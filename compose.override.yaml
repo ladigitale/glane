@@ -1,0 +1,11 @@
+# Ignore network if external network missing in pure local compose
+networks:
+  supersoniks:
+    external: false
+
+services:
+  php:
+    environment:
+      # HTTP only locally — avoids 308 → https://localhost:443 (connection refused)
+      SERVER_NAME: http://localhost, php:80, glane-mercure:80
+      DEFAULT_URI: http://localhost:${HTTP_PORT:-8081}

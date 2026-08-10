@@ -1,0 +1,13 @@
+---
+description: sonic-theme — design tokens, not API scope
+globs: **/*.{ts,tsx,css,html}
+alwaysApply: false
+---
+
+# Theme
+
+Skill **`concorde-theme`**
+
+- `<sonic-theme background color font>` + `--sc-*` CSS variables
+- `theme="dark"` for built-in dark palette
+- Not for `serviceURL` / API — use **`concorde-scope`**

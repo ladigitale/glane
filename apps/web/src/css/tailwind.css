@@ -1,0 +1,7 @@
+@tailwind utilities;
+
+/* No @tailwind base / preflight — resets break Concorde inside Lit shadows. */
+:host {
+  line-height: 1.2;
+  font-family: var(--gl-font-ui), var(--sc-font-family-base), sans-serif;
+}

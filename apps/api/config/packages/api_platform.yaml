@@ -1,0 +1,7 @@
+api_platform:
+    title: '%env(APP_NAME)% API'
+    version: 0.1.0
+    defaults:
+        stateless: true
+        extra_properties:
+            standard_put: true

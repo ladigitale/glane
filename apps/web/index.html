@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#1b2430" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/glane.svg" />
+    <title>Glane</title>
+    <script>
+      (function () {
+        try {
+          var lang =
+            localStorage.getItem("SonicSelectedLanguage") ||
+            ((navigator.languages && navigator.languages[0]) ||
+              navigator.language ||
+              "fr");
+          lang = String(lang).toLowerCase().split(/[-_]/)[0];
+          if (lang !== "fr" && lang !== "en") lang = "fr";
+          document.documentElement.lang = lang;
+
+          var raw = localStorage.getItem("glane.theme") || "nord";
+          var legacyDark =
+            raw === "nuit" ||
+            raw === "monokai" ||
+            raw === "dracula" ||
+            raw === "flare";
+          var t = legacyDark
+            ? "nord"
+            : raw === "jour" || raw === "soft"
+              ? "matcha"
+              : raw === "nord" || raw === "dark" || raw === "matcha"
+                ? raw
+                : "nord";
+          document.documentElement.dataset.theme = t;
+          document.documentElement.style.colorScheme =
+            t === "matcha" ? "light" : "dark";
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) {
+            meta.setAttribute(
+              "content",
+              t === "matcha"
+                ? "#eef8e4"
+                : t === "dark"
+                  ? "#07070c"
+                  : "#1b2430",
+            );
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/src/app/styles/tokens.css" />
+  </head>
+  <body>
+    <gl-app></gl-app>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

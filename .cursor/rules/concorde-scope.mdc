@@ -1,0 +1,14 @@
+---
+description: Scope — inherited API, form, icon defaults (not theme)
+globs: **/*.{ts,tsx,html}
+alwaysApply: false
+---
+
+# Scope
+
+Skill **`concorde-scope`**
+
+- `<sonic-scope>` — light DOM, attributes inherited by descendants
+- API: `serviceURL`, `token`, `credentials` → `@get`, list, queue
+- Or: `DataProviderKey<APIConfiguration>` as 2nd arg to `@get`
+- Not for colors/fonts — use **`concorde-theme`**

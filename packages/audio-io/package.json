@@ -1,0 +1,21 @@
+{
+  "name": "@glane/audio-io",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./worklet": "./src/worklet/capture-processor.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@glane/core-model": "0.1.0",
+    "lamejs": "^1.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

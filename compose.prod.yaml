@@ -1,0 +1,93 @@
+# Production — edge Caddy (TLS) + API FrankenPHP + PostgreSQL + SPA
+# Usage:
+#   Create a root .env (gitignored) — template in .ops/deploy.md
+#   VITE_API_BASE_URL=https://api.example.com yarn build
+#   docker compose -f compose.prod.yaml up -d --build
+#
+# DNS: APP_SERVER_NAME + API_SERVER_NAME → VPS IP
+# Co-host with Tadaaa: separate compose project, distinct hostnames; do not bind
+# a second edge to 80/443 if Tadaaa already owns them — use host reverse proxy.
+
+services:
+  edge:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      APP_SERVER_NAME: ${APP_SERVER_NAME:-app.example.com}
+      API_SERVER_NAME: ${API_SERVER_NAME:-api.example.com}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./apps/web/dist:/srv:ro
+      - ./deploy/Caddyfile.edge:/etc/caddy/Caddyfile:ro
+      - edge_caddy_data:/data
+      - edge_caddy_config:/config
+    ports:
+      - target: 80
+        published: ${HTTP_PORT:-80}
+        protocol: tcp
+      - target: 443
+        published: ${HTTPS_PORT:-443}
+        protocol: tcp
+      - target: 443
+        published: ${HTTP3_PORT:-443}
+        protocol: udp
+    depends_on:
+      - php
+
+  php:
+    image: ${IMAGES_PREFIX:-}glane-api:prod
+    build:
+      context: ./apps/api
+      target: frankenphp_prod
+    restart: unless-stopped
+    environment:
+      APP_ENV: prod
+      APP_DEBUG: ${APP_DEBUG:-0}
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+      SERVER_NAME: ":80"
+      DEFAULT_URI: https://${API_SERVER_NAME:-api.example.com}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@database:5432/${POSTGRES_DB:-glane}?serverVersion=${POSTGRES_VERSION:-16}&charset=utf8
+      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-^https://${APP_SERVER_NAME:-app.example.com}$}
+      SYMFONY_TRUSTED_PROXIES: ${SYMFONY_TRUSTED_PROXIES:-private_ranges}
+      SYMFONY_TRUSTED_HEADERS: ${SYMFONY_TRUSTED_HEADERS:-x-forwarded-for,x-forwarded-host,x-forwarded-proto,x-forwarded-port}
+      MERCURE_ENABLED: ${MERCURE_ENABLED:-0}
+      MERCURE_URL: ${MERCURE_URL:-http://127.0.0.1/.well-known/mercure}
+      MERCURE_PUBLIC_URL: ${MERCURE_PUBLIC_URL:-https://api.example.com/.well-known/mercure}
+      MERCURE_JWT_SECRET: ${MERCURE_JWT_SECRET:-!ChangeThisMercureHubJWTSecretKey!}
+      APP_NAME: ${APP_NAME:-Glane}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://app.example.com}
+      FRONT_URL: ${FRONT_URL:-https://app.example.com}
+      APP_LISTEN_DIR: /app/var/listens
+      JWT_SECRET_KEY: /app/config/jwt/private.pem
+      JWT_PUBLIC_KEY: /app/config/jwt/public.pem
+      JWT_PASSPHRASE: ${JWT_PASSPHRASE:-glane}
+    volumes:
+      - jwt_keys:/app/config/jwt
+      - listen_data:/app/var/listens
+    expose:
+      - "80"
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    image: postgres:${POSTGRES_VERSION:-16}-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-glane}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "${POSTGRES_DB:-glane}", "-U", "${POSTGRES_USER:-app}"]
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - database_data:/var/lib/postgresql/data:rw
+
+volumes:
+  edge_caddy_data:
+  edge_caddy_config:
+  database_data:
+  jwt_keys:
+  listen_data:

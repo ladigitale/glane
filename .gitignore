@@ -1,0 +1,24 @@
+node_modules/
+dist/
+*.local
+.env
+.env.local
+.DS_Store
+*.log
+/tmp/
+
+# API
+apps/api/vendor/
+apps/api/var/
+apps/api/config/jwt/*.pem
+apps/api/.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build
+packages/*/dist/
+apps/web/dist/
+coverage/

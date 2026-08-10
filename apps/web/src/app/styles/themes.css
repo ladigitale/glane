@@ -1,0 +1,94 @@
+/**
+ * Pack A — Tadaaa palettes (`--sc-*`), flat surfaces (no page gradients).
+ * dark / nord / matcha — fonts stay on Glane tokens.
+ */
+
+/* Dark — void + laser lime (Tadaaa) */
+html[data-theme="dark"],
+html[data-theme="dark"] sonic-theme {
+  color-scheme: dark;
+  --sc-base: #07070c;
+  --sc-base-content: #eef0ff;
+  --sc-base-50: #12121a;
+  --sc-base-100: #1c1c28;
+  --sc-base-200: #2a2a3c;
+  --sc-base-300: #3e3e58;
+  --sc-base-400: #6a6a88;
+  --sc-base-500: #9898b4;
+  --sc-base-600: #c4c4d8;
+  --sc-base-700: #e0e0ec;
+  --sc-base-800: #f0f0f8;
+  --sc-base-900: #ffffff;
+  --sc-primary: #a78bfa;
+  --sc-primary-content: #120824;
+  --sc-info: #22d3ee;
+  --sc-info-content: #042028;
+  --sc-success: #c8ff2a;
+  --sc-success-content: #121800;
+  --sc-warning: #ff9f1a;
+  --sc-warning-content: #1c1000;
+  --sc-danger: #ff4d88;
+  --sc-danger-content: #2a0014;
+  --sc-rounded: 0.75rem;
+  --sc-btn-rounded: 9999px;
+}
+
+/* Nord — polar night + aurora (Tadaaa) */
+html[data-theme="nord"],
+html[data-theme="nord"] sonic-theme {
+  color-scheme: dark;
+  --sc-base: #1b2430;
+  --sc-base-content: #eceff4;
+  --sc-base-50: #242e3c;
+  --sc-base-100: #2e3a4c;
+  --sc-base-200: #3b4a60;
+  --sc-base-300: #4e6280;
+  --sc-base-400: #6e88a8;
+  --sc-base-500: #96aabc;
+  --sc-base-600: #d0d8e4;
+  --sc-base-700: #e4eaf0;
+  --sc-base-800: #eceff4;
+  --sc-base-900: #ffffff;
+  --sc-primary: #5eead4;
+  --sc-primary-content: #04241e;
+  --sc-info: #7dd3fc;
+  --sc-info-content: #082030;
+  --sc-success: #bbf74a;
+  --sc-success-content: #142000;
+  --sc-warning: #fbbf24;
+  --sc-warning-content: #241800;
+  --sc-danger: #fb7185;
+  --sc-danger-content: #2a0810;
+  --sc-rounded: 0.2rem;
+  --sc-btn-rounded: 0.35rem;
+}
+
+/* Matcha — foam green + yuzu (Tadaaa) */
+html[data-theme="matcha"],
+html[data-theme="matcha"] sonic-theme {
+  color-scheme: light;
+  --sc-base: #eef8e4;
+  --sc-base-content: #142416;
+  --sc-base-50: #dcefc8;
+  --sc-base-100: #c4e4a4;
+  --sc-base-200: #9ecc70;
+  --sc-base-300: #74b048;
+  --sc-base-400: #548c30;
+  --sc-base-500: #3c6a22;
+  --sc-base-600: #2c5018;
+  --sc-base-700: #203c12;
+  --sc-base-800: #162a0c;
+  --sc-base-900: #0e1c08;
+  --sc-primary: #2f8f3a;
+  --sc-primary-content: #f4fff0;
+  --sc-info: #00a8a8;
+  --sc-info-content: #ffffff;
+  --sc-success: #1ea84a;
+  --sc-success-content: #ffffff;
+  --sc-warning: #ff9a1a;
+  --sc-warning-content: #2a1600;
+  --sc-danger: #e63a4a;
+  --sc-danger-content: #ffffff;
+  --sc-rounded: 1.5rem;
+  --sc-btn-rounded: 9999px;
+}

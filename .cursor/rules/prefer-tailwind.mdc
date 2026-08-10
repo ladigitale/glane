@@ -1,0 +1,16 @@
+---
+description: Prefer Tailwind utilities over new Lit component CSS (Glane web)
+globs: apps/web/**/*.ts
+alwaysApply: false
+---
+
+# prefer-tailwind
+
+Skill: `.cursor/skills/prefer-tailwind/SKILL.md` (source `ai/starter/skills/prefer-tailwind/`).
+
+When editing Lit components under `apps/web`:
+
+- Layout / spacing / color → Tailwind `class="…"` (`flex`, `gap-*`, `p-*`, `bg-neutral-*`, `text-primary`, …)
+- `static styles = [tailwind]` or `[tailwind, css\`:host…\`]` — import from `src/css/tailwind`
+- Do **not** add new BEM / layout rules in `css\`…\`` unless `:host`, print, fullscreen, or timeline/seek chrome that utilities cannot express
+- Tokens via theme map — not raw hex (`bg-neutral-0` not `#1b2430`)

@@ -1,0 +1,59 @@
+---
+description: Patterns Concorde — DataProvider, décorateurs, templates Lit list/queue, pas sonic-fetch
+globs: **/*.{ts,tsx,js,mjs}
+alwaysApply: false
+---
+
+# Concorde — patterns
+
+Référence : `.cursor/skills/concorde/SKILL.md` + `.cursor/skills/concorde-imports/SKILL.md`
+Migration get/set/dp : `.cursor/skills/concorde-get-set-dp/SKILL.md`
+
+## Imports
+
+**Apps externes** : chemins courts (`@supersoniks/concorde/list`, `/menu`, `/decorators`, …) — voir skill `concorde-imports`.
+
+**Dépôt Concorde (lib + doc)** : chemins longs ou relatifs — ex. `core/components/functional/list/list`, `core/decorators/Subscriber`, `core/utils/dataProviderKey`. Pas `@supersoniks/concorde/list` ici.
+
+## Vocabulaire
+
+- **DataProvider** (jamais « publisher »)
+- Accès impératif : **`dp(clé).get()` / `.set()` / `.invalidate()`** ou `get(clé)` / `set(clé, v)` — **jamais** `PublisherManager.getInstance()` ni `PublisherManager.get()` dans le code métier (bootstrap `dp.ts` excepté)
+
+## Interdits (nouveau code)
+
+- `sonic-fetch` → `sonic-queue` + filtre, ou `@get`
+- `@onAssign` → `@handle` + `DataProviderKey`
+- `@bind` → `@subscribe` + `DataProviderKey<T, U>` (pas sur composants métier)
+- `data-bind` HTML → `@subscribe` / `sub()`
+- `sonic-input` + `@input` → `formDataProvider` + `name`
+- Templates HTML sur list/queue → `.items`, `.separator`, `.noItems`, `.skeleton`
+
+## DataProviderKey dynamique
+
+```typescript
+new DataProviderKey<T, { userIndex: number }>("users.${userIndex}")
+```
+
+Placeholder `${prop}` = chaîne normale, résolu depuis le composant hôte.
+
+## get / set / dp vs sub()
+
+- **`get` / `set` / `dp`** : pas de `${` / `{$` dans la string passée (clé statique ou chemin JS évalué).
+- **`sub(chemin | DataProviderKey)`** : dynamique OK dans les templates (placeholders `${…}` sur l’hôte).
+- Clé dynamique → décorateur ou `dp(idRésolu)`, pas `dp(cléAvecPlaceholder)`.
+
+## Scope / theme
+
+- **Scope** : `<sonic-scope serviceURL="…">` · `@get(endpoint)` ou `@get(endpoint, apiConfigKey)` — skills `concorde-scope`
+- **Theme** : `<sonic-theme background color font>` · `--sc-*` — skill `concorde-theme`
+
+## Migration Subscriber / sonic-fetch (piège fréquent)
+
+- Retirer `extends Subscriber` **sans** `@subscribe` sur chaque champ affiché → UI vide (props orphelines).
+- Remplacer `sonic-fetch` : `@get` + alimenter le DP ; UI en `@subscribe` feuille ou hôte `Subscriber` + `dataProvider`/`subDataProvider`.
+- `@get` + placeholders `${prop}` : propriétés homonymes sur l'hôte (ou sync dans `willUpdate`).
+- Modale / portal : `@get(endpoint, apiConfigKey)` si pas de `serviceURL` ascendant.
+- `@subscribe` → préférer `@state()`, pas `@property`.
+
+Détail : skill `concorde` — section « Piège migration Subscriber → LitElement ».

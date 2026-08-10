@@ -1,0 +1,15 @@
+---
+description: Navigation Concorde — sonic-menu, sonic-menu-item, sonic-divider
+globs: **/{layout,sidebar,nav,docs-shell,routes}/**
+alwaysApply: false
+---
+
+# Navigation Concorde
+
+1. **`sonic-menu`** + **`sonic-menu-item`** — pas une liste de boutons ghost.
+2. Sections : **`sonic-divider`** (`label`, `align="left"`, `size="sm"`).
+3. Liens internes : `pushstate` + `href` + `autoActive="strict"`.
+
+Référence : `.cursor/skills/concorde-menu/SKILL.md`
+
+Pas de tirets dans les noms de dossiers de routes (générateur Concorde).

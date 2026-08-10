@@ -1,0 +1,104 @@
+@import "./themes.css";
+
+/**
+ * Shared tokens: fonts + Glane aliases bridged from Concorde `--sc-*`.
+ * Palettes live in themes.css (Pack A: nord / dark / matcha).
+ */
+:root {
+  --gl-font-ui: "Plus Jakarta Sans Variable", "Segoe UI", sans-serif;
+  --gl-font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --gl-font-display: "Bricolage Grotesque Variable", "Plus Jakarta Sans Variable",
+    sans-serif;
+  /* Display / brand typography (inherits into Lit shadow via vars) */
+  --gl-font-display-weight: 700;
+  --gl-font-display-wdth: 90;
+  --gl-font-display-tracking: -0.045em;
+  --gl-touch: 44px;
+
+  /* Default = Nord until data-theme is applied */
+  color-scheme: dark;
+  --sc-base: #1b2430;
+  --sc-base-content: #eceff4;
+  --sc-base-50: #242e3c;
+  --sc-base-100: #2e3a4c;
+  --sc-base-200: #3b4a60;
+  --sc-base-300: #4e6280;
+  --sc-base-400: #6e88a8;
+  --sc-base-500: #96aabc;
+  --sc-base-600: #d0d8e4;
+  --sc-base-700: #e4eaf0;
+  --sc-base-800: #eceff4;
+  --sc-base-900: #ffffff;
+  --sc-primary: #5eead4;
+  --sc-primary-content: #04241e;
+  --sc-info: #7dd3fc;
+  --sc-info-content: #082030;
+  --sc-success: #bbf74a;
+  --sc-success-content: #142000;
+  --sc-warning: #fbbf24;
+  --sc-warning-content: #241800;
+  --sc-danger: #fb7185;
+  --sc-danger-content: #2a0810;
+  --sc-rounded: 0.2rem;
+  --sc-btn-rounded: 0.35rem;
+  --sc-font-family-base: var(--gl-font-ui);
+  --sc-headings-font-family: var(--gl-font-display);
+  --sc-font-family-monospace: var(--gl-font-mono);
+
+  /* App aliases → Concorde */
+  --gl-ink: var(--sc-base);
+  --gl-ink-elevated: var(--sc-base-100);
+  --gl-fg: var(--sc-base-content);
+  --gl-fg-muted: var(--sc-base-500);
+  --gl-accent: var(--sc-primary);
+  --gl-accent-warm: var(--sc-warning);
+  --gl-danger: var(--sc-danger);
+}
+
+html[data-theme] {
+  --sc-font-family-base: var(--gl-font-ui);
+  --sc-headings-font-family: var(--gl-font-display);
+  --sc-font-family-monospace: var(--gl-font-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--sc-base);
+  color: var(--sc-base-content);
+  font-family: var(--gl-font-ui);
+  font-optical-sizing: auto;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.011em;
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--gl-font-display);
+  font-weight: var(--gl-font-display-weight);
+  font-variation-settings: "wdth" var(--gl-font-display-wdth);
+  letter-spacing: var(--gl-font-display-tracking);
+}
+
+button,
+a {
+  min-height: var(--gl-touch);
+  min-width: var(--gl-touch);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

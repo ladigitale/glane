@@ -1,0 +1,14 @@
+framework:
+    secret: '%env(APP_SECRET)%'
+    http_method_override: false
+    handle_all_throwables: true
+    php_errors:
+        log: true
+    cache:
+        app: cache.adapter.filesystem
+
+when@test:
+    framework:
+        test: true
+        cache:
+            app: cache.adapter.array

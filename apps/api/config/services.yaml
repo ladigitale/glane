@@ -1,0 +1,18 @@
+parameters:
+    app.name: '%env(APP_NAME)%'
+    app.listen_dir: '%env(default:app.listen_dir_fallback:APP_LISTEN_DIR)%'
+    app.listen_dir_fallback: '%kernel.project_dir%/var/listens'
+    app.public_url_fallback: ''
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Kernel.php'
+            - '../src/Entity/'
+
+    Psr\Cache\CacheItemPoolInterface: '@cache.app'
