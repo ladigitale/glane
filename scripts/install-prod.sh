@@ -14,6 +14,7 @@ ENV_FILE="$ROOT/.env"
 source "$ROOT/scripts/lib/prod-env.sh"
 
 COMPOSE=(docker compose -f compose.prod.yaml)
+COHOST=0
 
 rand_hex() {
   if command -v openssl >/dev/null 2>&1; then
@@ -46,8 +47,8 @@ say ""
 say "${BLD}Glane — production installer${RST}"
 say "Repo root: $ROOT"
 say ""
-say "Need DNS A/AAAA for app + api hosts, ports 80/443 free (or set HTTP_PORT)."
-say "If Tadaaa already binds 80/443, use a host reverse proxy instead of this edge."
+say "Need DNS A/AAAA for app + api hosts."
+say "Solo: ports 80/443 free. Cohost: Tadaaa (or other) already owns 80/443."
 say ""
 
 need_cmd curl
@@ -59,6 +60,11 @@ prompt domain "Base domain (e.g. example.com)"
 prompt app_host "Front host (APP_SERVER_NAME)" "glane.${domain}"
 prompt api_host "API host (API_SERVER_NAME)" "glane-api.${domain}"
 prompt acme_email "ACME / admin email"
+prompt cohost_yn "Cohost behind Tadaaa edge? (y/N)" "N"
+case "${cohost_yn}" in
+  y|Y|yes|YES) COHOST=1 ;;
+  *) COHOST=0 ;;
+esac
 app_secret="$(rand_hex)"
 pg_pass="$(rand_hex)"
 mercure_secret="$(rand_hex)"
@@ -89,9 +95,26 @@ JWT_PASSPHRASE=glane
 HTTP_PORT=80
 HTTPS_PORT=443
 HTTP3_PORT=443
+
+GLANE_COHOST=${COHOST}
+WEB_NETWORK=web
 EOF
 chmod 600 "$ENV_FILE"
 ok "Wrote ${ENV_FILE}"
+
+set -a
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+set +a
+compose_prod_cmd
+
+if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+  if ! docker network inspect "${WEB_NETWORK:-web}" >/dev/null 2>&1; then
+    info "Creating Docker network ${WEB_NETWORK:-web}…"
+    docker network create "${WEB_NETWORK:-web}"
+    ok "Network ${WEB_NETWORK:-web} created."
+  fi
+fi
 
 info "Building front (VITE_API_BASE_URL=https://${api_host})…"
 rm -rf "$ROOT/node_modules" "$ROOT/apps/web/node_modules"
@@ -107,6 +130,11 @@ ok "Front build ready."
 info "Starting stack…"
 "${COMPOSE[@]}" up -d --build
 ok "Containers started."
+# Drop a leftover solo edge if switching to cohost.
+if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+  docker compose -f compose.prod.yaml stop edge >/dev/null 2>&1 || true
+  docker compose -f compose.prod.yaml rm -f edge >/dev/null 2>&1 || true
+fi
 
 info "JWT keys…"
 "${COMPOSE[@]}" exec -T php sh -c '
@@ -129,4 +157,8 @@ say "${BLD}Install complete.${RST}"
 say "  Front: https://${app_host}"
 say "  API:   https://${api_host}/api/health"
 say "  Update later: bash scripts/update-prod.sh --pull"
+if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+  say ""
+  say "  Cohost: attach Tadaaa edge to network ${WEB_NETWORK:-web} — see .ops/deploy.md"
+fi
 say ""

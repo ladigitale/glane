@@ -1,0 +1,25 @@
+# Cohost behind another edge (e.g. Tadaaa) that already binds 80/443.
+# Usage:
+#   GLANE_COHOST=1 in root .env
+#   docker network create web   # once, if missing
+#   docker compose -f compose.prod.yaml -f compose.prod.cohost.yaml up -d --build
+#
+# Tadaaa edge must join the same external network and reverse-proxy
+# glane-api → glane-php:80 ; serve SPA from glane apps/web/dist (see .ops/deploy.md).
+
+services:
+  edge:
+    # Do not start Glane edge — sister app owns public TLS.
+    profiles: ["standalone-edge"]
+
+  php:
+    networks:
+      default: {}
+      web:
+        aliases:
+          - glane-php
+
+networks:
+  web:
+    external: true
+    name: ${WEB_NETWORK:-web}

@@ -1,0 +1,23 @@
+# Mounted into Tadaaa edge at /etc/caddy/cohost/glane.caddy
+# Hosts come from edge container env (see compose.prod.glane-cohost.yaml).
+
+{$GLANE_APP_SERVER_NAME:glane.example.com} {
+	encode zstd gzip
+	root * /srv-glane
+	try_files {path} /index.html
+	file_server
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "browsing-topics=()"
+	}
+}
+
+{$GLANE_API_SERVER_NAME:glane-api.example.com} {
+	encode zstd gzip
+	reverse_proxy glane-php:80 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}

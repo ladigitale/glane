@@ -41,4 +41,15 @@ ensure_prod_env_defaults() {
   ensure_env_key "HTTP_PORT" "80"
   ensure_env_key "HTTPS_PORT" "443"
   ensure_env_key "HTTP3_PORT" "443"
+  ensure_env_key "GLANE_COHOST" "0"
+  ensure_env_key "WEB_NETWORK" "web"
+}
+
+# Sets COMPOSE=(docker compose …) from GLANE_COHOST / .env.
+compose_prod_cmd() {
+  COMPOSE=(docker compose -f compose.prod.yaml)
+  if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+    COMPOSE+=(-f compose.prod.cohost.yaml)
+    info "Cohost mode: no Glane edge (WEB_NETWORK=${WEB_NETWORK:-web})"
+  fi
 }

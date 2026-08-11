@@ -23,6 +23,8 @@ for arg in "$@"; do
 Usage: bash scripts/update-prod.sh [--pull]
 
   --pull   git pull --ff-only before building
+
+Set GLANE_COHOST=1 in .env to skip Glane edge and join WEB_NETWORK (Tadaaa cohost).
 EOF
       exit 0
       ;;
@@ -61,9 +63,18 @@ set -a
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 set +a
+compose_prod_cmd
 
 need_cmd docker
 need_cmd curl
+
+if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+  if ! docker network inspect "${WEB_NETWORK:-web}" >/dev/null 2>&1; then
+    info "Creating Docker network ${WEB_NETWORK:-web}…"
+    docker network create "${WEB_NETWORK:-web}"
+    ok "Network ${WEB_NETWORK:-web} created."
+  fi
+fi
 
 info "Building front (VITE_API_BASE_URL=https://${api_host})…"
 rm -rf "$ROOT/node_modules" "$ROOT/apps/web/node_modules"
@@ -79,6 +90,10 @@ ok "Front build ready."
 info "Recreating stack…"
 "${COMPOSE[@]}" up -d --build
 ok "Containers up."
+if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+  docker compose -f compose.prod.yaml stop edge >/dev/null 2>&1 || true
+  docker compose -f compose.prod.yaml rm -f edge >/dev/null 2>&1 || true
+fi
 
 info "Migrations…"
 "${COMPOSE[@]}" exec -T php bin/console doctrine:migrations:migrate --no-interaction
@@ -87,11 +102,14 @@ ok "Migrations done."
 if curl -fsS --max-time 10 "https://${api_host}/api/health" >/dev/null 2>&1; then
   ok "API healthy: https://${api_host}/api/health"
 else
-  warn "API not reachable yet — check DNS / logs: ${COMPOSE[*]} logs -f edge php"
+  warn "API not reachable yet — check DNS / Tadaaa edge / logs: ${COMPOSE[*]} logs -f php"
 fi
 
 say ""
 say "${BLD}Update complete.${RST}"
 say "  Front: https://${app_host}"
 say "  API:   https://${api_host}/api"
+if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
+  say "  Cohost: wire Tadaaa edge — see .ops/deploy.md"
+fi
 say ""
