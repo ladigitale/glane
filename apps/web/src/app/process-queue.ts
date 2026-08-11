@@ -2,6 +2,7 @@ import { createEntityId, nowIso } from "@glane/core-model";
 import { sampleOpfs } from "@glane/audio-io";
 import type { ProcessWorkerResponse } from "@glane/audio-dsp";
 import { db, type ProcessJob } from "./db.js";
+import { cullExcessProcessedSamples } from "./sample-interest-cull.js";
 
 export type { ProcessJob, ProcessJobStatus } from "./db.js";
 
@@ -133,9 +134,11 @@ export const processQueue = (() => {
         loopEndMs: msg.loopEndMs,
         loopXfadeMs: msg.loopXfadeMs,
         loopScore: msg.loopScore,
+        interestScore: msg.interestScore,
         updatedAt: nowIso(),
         revision: (sample.revision ?? 0) + 1,
       });
+      void cullExcessProcessedSamples(sample.sessionId).catch(() => undefined);
     }
 
     await db.processJobs.put({

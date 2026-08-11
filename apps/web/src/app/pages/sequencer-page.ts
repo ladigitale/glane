@@ -39,7 +39,16 @@ import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
 import { t } from "../i18n/messages.js";
-import { planSequence, type GrooveKind } from "../generative.js";
+import {
+  keyPcLabel,
+  planSequence,
+  type GenAuto,
+  type GenFormStyle,
+  type GenGrooveChoice,
+  type GenPaletteChoice,
+  type GenScaleMode,
+  type GenTriState,
+} from "../generative.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { SAMPLE_PROCESSED_EVENT } from "../process-queue.js";
 import { exportFormKey, seqDrawerKey } from "../dp-keys.js";
@@ -568,10 +577,21 @@ export class GlSequencerPage extends LitElement {
   @state() private draftBpm = 120;
   @state() private draftBars = 16;
   @state() private draftGenSeed = 1;
-  @state() private draftGenDensity = 1;
-  @state() private draftGenEnergy = 0.55;
-  @state() private draftGenDrumsTextures = 0.55;
-  @state() private draftGenGroove: GrooveKind = "straight";
+  @state() private draftGenDensity: number | GenAuto = 1;
+  @state() private draftGenEnergy: number | GenAuto = 0.55;
+  @state() private draftGenDrumsTextures: number | GenAuto = 0.55;
+  @state() private draftGenGroove: GenGrooveChoice = "straight";
+  @state() private draftGenKey: number | GenAuto = "auto";
+  @state() private draftGenScale: GenScaleMode = "auto";
+  @state() private draftGenPalette: GenPaletteChoice = "auto";
+  @state() private draftGenForm: GenFormStyle = "auto";
+  @state() private draftGenHumanize: number | GenAuto = "auto";
+  @state() private draftGenVariation: number | GenAuto = "auto";
+  @state() private draftGenBpmSync: GenTriState = "auto";
+  @state() private draftGenReverse: GenTriState = "auto";
+  @state() private draftGenStutter: GenTriState = "auto";
+  @state() private draftGenCallResponse: GenTriState = "auto";
+  @state() private draftGenAdvanced = false;
   /** Long-press context menu (screen coords). */
   @state() private clipCtx: { clipId: string; x: number; y: number } | null =
     null;
@@ -2423,7 +2443,7 @@ export class GlSequencerPage extends LitElement {
 
       <sonic-modal
         align="left"
-        maxWidth="26rem"
+        maxWidth="28rem"
         .visible=${genOpen}
         @hide=${this.onSeqModalHide}
       >
@@ -2435,6 +2455,16 @@ export class GlSequencerPage extends LitElement {
               >${this.project?.bpm ?? 120} ${t("seq.bpm")} · ${bars}
               ${t("seq.barsUnit")} · ${formatClock(seqDurMs)}</span
             >
+            <div class="flex flex-wrap gap-2">
+              <sonic-button
+                size="sm"
+                variant="outline"
+                type="neutral"
+                @click=${() => this.#setAllGenAuto()}
+              >
+                ${t("seq.genRandomizeAll")}
+              </sonic-button>
+            </div>
             <label class="flex flex-col gap-1 text-xs text-neutral-500">
               ${t("seq.genSeed")}
               <span class="flex gap-2">
@@ -2461,84 +2491,200 @@ export class GlSequencerPage extends LitElement {
               </span>
               <span class="text-[0.65rem] opacity-80">${t("seq.genSeedHint")}</span>
             </label>
-            <label class="flex flex-col gap-1 text-xs text-neutral-500">
-              ${t("seq.genDensity")}
-              <input
-                type="range"
-                class="w-full"
-                min="35"
-                max="150"
-                .valueAsNumber=${Math.round(this.draftGenDensity * 100)}
-                @input=${(e: Event) => {
-                  this.draftGenDensity =
-                    (e.target as HTMLInputElement).valueAsNumber / 100;
-                }}
-              />
-              <span class="font-mono text-[0.65rem]"
-                >×${this.draftGenDensity.toFixed(2)}</span
-              >
-            </label>
-            <label class="flex flex-col gap-1 text-xs text-neutral-500">
-              ${t("seq.genEnergy")}
-              <input
-                type="range"
-                class="w-full"
-                min="0"
-                max="100"
-                .valueAsNumber=${Math.round(this.draftGenEnergy * 100)}
-                @input=${(e: Event) => {
-                  this.draftGenEnergy =
-                    (e.target as HTMLInputElement).valueAsNumber / 100;
-                }}
-              />
-              <span class="font-mono text-[0.65rem]"
-                >${Math.round(this.draftGenEnergy * 100)}%</span
-              >
-            </label>
-            <label class="flex flex-col gap-1 text-xs text-neutral-500">
-              ${t("seq.genDrumsTextures")}
-              <input
-                type="range"
-                class="w-full"
-                min="0"
-                max="100"
-                .valueAsNumber=${Math.round(this.draftGenDrumsTextures * 100)}
-                @input=${(e: Event) => {
-                  this.draftGenDrumsTextures =
-                    (e.target as HTMLInputElement).valueAsNumber / 100;
-                }}
-              />
-              <span class="flex justify-between font-mono text-[0.65rem]">
-                <span>${t("seq.genTextures")}</span>
-                <span>${t("seq.genDrums")}</span>
-              </span>
-            </label>
-            <div class="flex flex-col gap-1.5 text-xs text-neutral-500">
-              ${t("seq.genGroove")}
-              <div class="flex flex-wrap gap-[0.35rem]" role="radiogroup">
-                ${(
-                  [
-                    ["straight", "seq.genGrooveStraight"],
-                    ["shuffle", "seq.genGrooveShuffle"],
-                    ["half-time", "seq.genGrooveHalftime"],
-                  ] as const
-                ).map(
-                  ([value, labelKey]) => html`
-                    <sonic-button
-                      size="sm"
-                      variant="outline"
-                      type="neutral"
-                      ?active=${this.draftGenGroove === value}
-                      @click=${() => {
-                        this.draftGenGroove = value;
-                      }}
-                    >
-                      ${t(labelKey)}
-                    </sonic-button>
-                  `,
-                )}
-              </div>
-            </div>
+            ${this.#renderGenSlider({
+              label: t("seq.genDensity"),
+              value: this.draftGenDensity,
+              min: 35,
+              max: 150,
+              fallback: 100,
+              format: (n) => `×${(n / 100).toFixed(2)}`,
+              onChange: (v) => {
+                this.draftGenDensity = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            ${this.#renderGenSlider({
+              label: t("seq.genEnergy"),
+              value: this.draftGenEnergy,
+              min: 0,
+              max: 100,
+              fallback: 55,
+              format: (n) => `${Math.round(n)}%`,
+              onChange: (v) => {
+                this.draftGenEnergy = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            ${this.#renderGenSlider({
+              label: t("seq.genDrumsTextures"),
+              value: this.draftGenDrumsTextures,
+              min: 0,
+              max: 100,
+              fallback: 55,
+              format: () => "",
+              footer: html`
+                <span class="flex justify-between font-mono text-[0.65rem]">
+                  <span>${t("seq.genTextures")}</span>
+                  <span>${t("seq.genDrums")}</span>
+                </span>
+              `,
+              onChange: (v) => {
+                this.draftGenDrumsTextures = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            ${this.#renderGenChoice({
+              label: t("seq.genGroove"),
+              value: this.draftGenGroove,
+              options: [
+                ["auto", t("seq.genAuto")],
+                ["straight", t("seq.genGrooveStraight")],
+                ["shuffle", t("seq.genGrooveShuffle")],
+                ["half-time", t("seq.genGrooveHalftime")],
+              ],
+              onPick: (v) => {
+                this.draftGenGroove = v as GenGrooveChoice;
+              },
+            })}
+            <sonic-button
+              size="sm"
+              variant="outline"
+              type="neutral"
+              ?active=${this.draftGenAdvanced}
+              @click=${() => {
+                this.draftGenAdvanced = !this.draftGenAdvanced;
+              }}
+            >
+              ${t("seq.genAdvanced")}
+            </sonic-button>
+            ${this.draftGenAdvanced
+              ? html`
+                  ${this.#renderGenChoice({
+                    label: t("seq.genKey"),
+                    value:
+                      this.draftGenKey === "auto"
+                        ? "auto"
+                        : String(this.draftGenKey),
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ...Array.from({ length: 12 }, (_, pc) => [
+                        String(pc),
+                        keyPcLabel(pc),
+                      ] as [string, string]),
+                    ],
+                    onPick: (v) => {
+                      this.draftGenKey =
+                        v === "auto" ? "auto" : Number(v) >>> 0;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genScale"),
+                    value: this.draftGenScale,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["major", t("seq.genScaleMajor")],
+                      ["minor", t("seq.genScaleMinor")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenScale = v as GenScaleMode;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genPalette"),
+                    value: this.draftGenPalette,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["pop", t("seq.genPalettePop")],
+                      ["modal", t("seq.genPaletteModal")],
+                      ["jazz", t("seq.genPaletteJazz")],
+                      ["ambient", t("seq.genPaletteAmbient")],
+                      ["mixed", t("seq.genPaletteMixed")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenPalette = v as GenPaletteChoice;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genForm"),
+                    value: this.draftGenForm,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["song", t("seq.genFormSong")],
+                      ["ambient", t("seq.genFormAmbient")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenForm = v as GenFormStyle;
+                    },
+                  })}
+                  ${this.#renderGenSlider({
+                    label: t("seq.genHumanize"),
+                    value: this.draftGenHumanize,
+                    min: 0,
+                    max: 100,
+                    fallback: 65,
+                    format: (n) => `${Math.round(n)}%`,
+                    onChange: (v) => {
+                      this.draftGenHumanize = v === "auto" ? "auto" : v / 100;
+                    },
+                  })}
+                  ${this.#renderGenSlider({
+                    label: t("seq.genVariation"),
+                    value: this.draftGenVariation,
+                    min: 0,
+                    max: 100,
+                    fallback: 55,
+                    format: (n) => `${Math.round(n)}%`,
+                    onChange: (v) => {
+                      this.draftGenVariation = v === "auto" ? "auto" : v / 100;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genBpmSync"),
+                    value: this.draftGenBpmSync,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenBpmSync = v as GenTriState;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genReverse"),
+                    value: this.draftGenReverse,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenReverse = v as GenTriState;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genStutter"),
+                    value: this.draftGenStutter,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenStutter = v as GenTriState;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genCallResponse"),
+                    value: this.draftGenCallResponse,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenCallResponse = v as GenTriState;
+                    },
+                  })}
+                `
+              : nothing}
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
@@ -2601,6 +2747,105 @@ export class GlSequencerPage extends LitElement {
   async #commitGenerate(): Promise<void> {
     this.seqModal = null;
     await this.#generateSequence({ confirmed: true });
+  }
+
+  #setAllGenAuto(): void {
+    this.draftGenDensity = "auto";
+    this.draftGenEnergy = "auto";
+    this.draftGenDrumsTextures = "auto";
+    this.draftGenGroove = "auto";
+    this.draftGenKey = "auto";
+    this.draftGenScale = "auto";
+    this.draftGenPalette = "auto";
+    this.draftGenForm = "auto";
+    this.draftGenHumanize = "auto";
+    this.draftGenVariation = "auto";
+    this.draftGenBpmSync = "auto";
+    this.draftGenReverse = "auto";
+    this.draftGenStutter = "auto";
+    this.draftGenCallResponse = "auto";
+    this.draftGenAdvanced = true;
+    this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+  }
+
+  #renderGenChoice(opts: {
+    label: string;
+    value: string;
+    options: Array<[string, string]>;
+    onPick: (value: string) => void;
+  }) {
+    return html`
+      <div class="flex flex-col gap-1.5 text-xs text-neutral-500">
+        ${opts.label}
+        <div class="flex flex-wrap gap-[0.35rem]" role="radiogroup">
+          ${opts.options.map(
+            ([value, label]) => html`
+              <sonic-button
+                size="sm"
+                variant="outline"
+                type="neutral"
+                ?active=${opts.value === value}
+                @click=${() => opts.onPick(value)}
+              >
+                ${label}
+              </sonic-button>
+            `,
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  #renderGenSlider(opts: {
+    label: string;
+    value: number | GenAuto;
+    min: number;
+    max: number;
+    fallback: number;
+    format: (n: number) => string;
+    footer?: unknown;
+    onChange: (v: number | GenAuto) => void;
+  }) {
+    const sliderValue =
+      opts.value === "auto"
+        ? opts.fallback
+        : Math.round(opts.value * 100);
+    const display =
+      opts.value === "auto" ? t("seq.genAuto") : opts.format(sliderValue);
+    const isAuto = opts.value === "auto";
+    return html`
+      <label class="flex flex-col gap-1 text-xs text-neutral-500">
+        <span class="flex items-center justify-between gap-2">
+          <span>${opts.label}</span>
+          <sonic-button
+            size="sm"
+            variant="outline"
+            type="neutral"
+            ?active=${isAuto}
+            @click=${() => {
+              opts.onChange(isAuto ? opts.fallback : "auto");
+            }}
+          >
+            ${t("seq.genAuto")}
+          </sonic-button>
+        </span>
+        <input
+          type="range"
+          class="w-full"
+          min=${opts.min}
+          max=${opts.max}
+          ?disabled=${isAuto}
+          .valueAsNumber=${sliderValue}
+          @input=${(e: Event) => {
+            opts.onChange((e.target as HTMLInputElement).valueAsNumber);
+          }}
+        />
+        ${display
+          ? html`<span class="font-mono text-[0.65rem]">${display}</span>`
+          : nothing}
+        ${opts.footer ?? nothing}
+      </label>
+    `;
   }
 
   async #setBpm(bpm: number): Promise<void> {
@@ -3835,6 +4080,16 @@ export class GlSequencerPage extends LitElement {
       energy: this.draftGenEnergy,
       drumsVsTexture: this.draftGenDrumsTextures,
       groove: this.draftGenGroove,
+      keyRootPc: this.draftGenKey,
+      scaleMode: this.draftGenScale,
+      palette: this.draftGenPalette,
+      formStyle: this.draftGenForm,
+      humanize: this.draftGenHumanize,
+      variation: this.draftGenVariation,
+      bpmSync: this.draftGenBpmSync,
+      reverse: this.draftGenReverse,
+      stutter: this.draftGenStutter,
+      callResponse: this.draftGenCallResponse,
       tracks: this.tracks.map((t) => ({ id: t.id, index: t.index })),
       samples: pool.map((s) => {
         const a = analysisById.get(s.id);

@@ -116,6 +116,8 @@ export const SampleSchema = z.object({
   loopScore: z.number().min(0).max(1).optional(),
   /** True when seamless loop processing was auto-applied. */
   loopProposed: z.boolean().optional(),
+  /** 0–1 keep-worthiness after polish (auto-cull when library is dense). */
+  interestScore: z.number().min(0).max(1).optional(),
   originVersion: z.string(),
   parentSampleId: z.string().uuid().optional(),
   createdAt: z.string().datetime(),

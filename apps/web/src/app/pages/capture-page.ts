@@ -36,6 +36,7 @@ import { t } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { deleteSample } from "../sample-actions.js";
 import { processQueue } from "../process-queue.js";
+import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
 import {
   PROJECT_CHANGE_EVENT,
   projectWorkspace,
@@ -50,6 +51,7 @@ type ExtractedRow = {
   class: Sample["class"];
   tags: string[];
   loopProposed: boolean;
+  interestScore?: number;
 };
 
 /** Map internal sensitivity 0–100 → openFloorFactor (higher → lower factor). */
@@ -184,7 +186,10 @@ export class GlCapturePage extends LitElement {
     `,
   ];
 
+  /** Saving extractions to the library (mic button armed). */
   @state() private listening = false;
+  /** Mic + hunter running (scout and/or recording). */
+  @state() private micOpen = false;
   @state() private economy = false;
   @state() private level: LevelMeter = { rms: 0, peak: 0 };
   @state() private warnings: string[] = [];
@@ -204,18 +209,23 @@ export class GlCapturePage extends LitElement {
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
   @state() private measuredRatePerMin = 0;
   @state() private rateModalOpen = false;
+  @state() private scoutBlocked = false;
 
   #live: LiveCapture | null = null;
   #hunter: EventHunter | null = null;
   #hunt: Session | null = null;
   #analyseTimer: number | null = null;
   #clockTimer: number | null = null;
-  #startedAt = 0;
+  /** Mic open epoch (scout or record) — rate regulator. */
+  #micStartedAt = 0;
+  /** Recording epoch — clock display. */
+  #recordStartedAt = 0;
   #analysing = false;
   #stopping = false;
   #unsubProc: (() => void) | null = null;
   #captureTimes: number[] = [];
   #lastRateAdjustMs = 0;
+  #scoutStarting = false;
 
   @handle(captureFormKey.autoGain)
   onAutoGainFromForm(v: "1" | null): void {
@@ -253,23 +263,31 @@ export class GlCapturePage extends LitElement {
     super.connectedCallback();
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
+    window.addEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
     this.#unsubProc = processQueue.subscribe(() => {
       void this.#refreshExtractedTags();
     });
     await Promise.all([this.#loadLastCaptureName(), this.#loadCapturePrefs()]);
+    void this.#startScout();
   }
 
   override disconnectedCallback(): void {
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
+    window.removeEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
     this.#unsubProc?.();
     this.#unsubProc = null;
-    this.#stopping = true;
-    if (this.#analyseTimer != null) window.clearInterval(this.#analyseTimer);
-    if (this.#clockTimer != null) window.clearInterval(this.#clockTimer);
-    void this.#live?.stop();
+    void this.#shutdownMic();
     super.disconnectedCallback();
   }
+
+  #onSamplesCulled = (ev: Event): void => {
+    const ids = (ev as CustomEvent<{ culledIds?: string[] }>).detail?.culledIds;
+    if (!ids?.length) return;
+    const drop = new Set(ids);
+    this.extracted = this.extracted.filter((r) => !drop.has(r.id));
+    this.sampleCount = this.extracted.length;
+  };
 
   #onKey = (e: KeyboardEvent): void => {
     if (!isSpaceKey(e) || shouldIgnoreShortcut(e) || this.rateModalOpen) return;
@@ -283,19 +301,20 @@ export class GlCapturePage extends LitElement {
 
   async #refreshExtractedTags(): Promise<void> {
     if (this.extracted.length === 0) return;
-    const next = await Promise.all(
-      this.extracted.map(async (row) => {
-        const s = await db.samples.get(row.id);
-        if (!s) return row;
-        return {
-          id: row.id,
-          class: s.class,
-          tags: s.tags ?? [],
-          loopProposed: Boolean(s.loopProposed),
-        };
-      }),
-    );
+    const next: ExtractedRow[] = [];
+    for (const row of this.extracted) {
+      const s = await db.samples.get(row.id);
+      if (!s || s.deletedAt) continue;
+      next.push({
+        id: row.id,
+        class: s.class,
+        tags: s.tags ?? [],
+        loopProposed: Boolean(s.loopProposed),
+        interestScore: s.interestScore,
+      });
+    }
     this.extracted = next;
+    this.sampleCount = this.extracted.length;
   }
 
   async #loadCapturePrefs(): Promise<void> {
@@ -338,14 +357,14 @@ export class GlCapturePage extends LitElement {
   };
 
   #regulateCaptureRate(nowMs: number): void {
-    if (!this.listening || this.#startedAt <= 0) return;
+    if (!this.micOpen || this.#micStartedAt <= 0) return;
     this.#captureTimes = pruneCaptureTimes(this.#captureTimes, nowMs);
     const next = nextSensitivity({
       sensitivity: this.attackSensitivity,
       targetPerMin: this.targetCapturesPerMin,
       timestamps: this.#captureTimes,
       nowMs,
-      startedAtMs: this.#startedAt,
+      startedAtMs: this.#micStartedAt,
       lastAdjustMs: this.#lastRateAdjustMs,
     });
     this.measuredRatePerMin = next.ratePerMin;
@@ -353,6 +372,14 @@ export class GlCapturePage extends LitElement {
     if (!next.adjusted) return;
     this.attackSensitivity = next.sensitivity;
     this.#applyHunterSensitivity();
+  }
+
+  #noteDetection(nowMs: number): void {
+    this.#captureTimes = pruneCaptureTimes(
+      [...this.#captureTimes, nowMs],
+      nowMs,
+    );
+    this.#regulateCaptureRate(nowMs);
   }
 
   async #loadLastCaptureName(): Promise<void> {
@@ -390,7 +417,7 @@ export class GlCapturePage extends LitElement {
               label: t("capture.targetRate"),
               icon: "gauge",
               hint: `${this.targetCapturesPerMin}/min${
-                this.listening
+                this.micOpen
                   ? ` · ≈${formatRate(this.measuredRatePerMin)}`
                   : ""
               }`,
@@ -440,11 +467,21 @@ export class GlCapturePage extends LitElement {
                 class="h-3 w-3 rounded-full bg-danger shadow-[0_0_0_3px_color-mix(in_srgb,var(--sc-danger)_30%,transparent)]"
                 title="LISTEN"
               ></span>`
-            : nothing}
+            : this.micOpen
+              ? html`<span
+                  class="h-3 w-3 rounded-full bg-primary/70"
+                  title="SCOUT"
+                ></span>`
+              : nothing}
           <span class="font-mono tabular-nums">${formatClock(this.clockMs)}</span>
+          ${this.micOpen
+            ? html`<span class="font-mono text-[0.75rem] tabular-nums text-neutral-500"
+                >≈${formatRate(this.measuredRatePerMin)}</span
+              >`
+            : nothing}
         </div>
         <div
-          class="vu ${this.listening ? "on" : ""} ${hot ? "hot" : ""}"
+          class="vu ${this.micOpen ? "on" : ""} ${hot ? "hot" : ""}"
           role="meter"
           aria-label="Niveau micro"
           aria-valuemin="0"
@@ -476,7 +513,7 @@ export class GlCapturePage extends LitElement {
           </div>
         </div>
         <div
-          class="h-2 overflow-hidden rounded bg-neutral-100 ${this.listening
+          class="h-2 overflow-hidden rounded bg-neutral-100 ${this.micOpen
             ? "hidden"
             : ""}"
         >
@@ -488,8 +525,12 @@ export class GlCapturePage extends LitElement {
       </div>
       <p>
         ${this.listening
-          ? "Écoute continue — buffer glissant, pas d’enregistrement de session."
-          : "Ouvre le micro. Les sons caractérisés sont extraits et taggés."}
+          ? t("capture.hintRecording")
+          : this.micOpen
+            ? t("capture.hintScout")
+            : this.scoutBlocked
+              ? t("capture.hintScoutBlocked")
+              : t("capture.empty")}
       </p>
       ${this.liveState !== "idle" && this.liveState !== "listening"
         ? html`<p
@@ -499,7 +540,7 @@ export class GlCapturePage extends LitElement {
               ? "hot text-primary"
               : ""}"
           >
-            ${stateLabel(this.liveState)}
+            ${stateLabel(this.liveState, this.listening)}
           </p>`
         : nothing}
       ${this.#renderRateModal()}
@@ -521,7 +562,11 @@ export class GlCapturePage extends LitElement {
         <div class="feed flex flex-col gap-1.5">
           ${this.extracted.length === 0
             ? html`<p class="font-mono text-[0.7rem] text-neutral-500">
-                Aucun son extrait pour l’instant.
+                ${this.listening
+                  ? "Aucun son extrait pour l’instant."
+                  : this.micOpen
+                    ? t("capture.scoutFeedEmpty")
+                    : "Aucun son extrait pour l’instant."}
               </p>`
             : this.extracted.map(
                 (row) => html`
@@ -544,6 +589,10 @@ export class GlCapturePage extends LitElement {
                           : row.tags.includes("processing:done")
                             ? " · ok"
                             : ""
+                      }${
+                        row.interestScore != null
+                          ? ` · ★${Math.round(row.interestScore * 100)}`
+                          : ""
                       }</div>
                       <div class="font-mono text-[0.7rem] text-neutral-500">
                         ${row.tags.join(" · ")}
@@ -597,7 +646,7 @@ export class GlCapturePage extends LitElement {
           <div class="flex w-full flex-col gap-1.5">
             <span
               class="font-mono text-[0.8rem] tabular-nums text-neutral-500"
-              >${this.targetCapturesPerMin}/min${this.listening
+              >${this.targetCapturesPerMin}/min${this.micOpen
                 ? ` · ≈${formatRate(this.measuredRatePerMin)}`
                 : ""}</span
             >
@@ -636,9 +685,30 @@ export class GlCapturePage extends LitElement {
 
   #toggle = async (): Promise<void> => {
     if (this.listening) {
-      await this.#stop();
+      await this.#stopRecording();
       return;
     }
+    await this.#startRecording();
+  };
+
+  /** Open mic + hunter without writing samples (threshold warm-up). */
+  async #startScout(): Promise<void> {
+    if (this.micOpen || this.#scoutStarting || this.listening) return;
+    this.#scoutStarting = true;
+    try {
+      const ok = await this.#ensureMic({ scout: true });
+      if (!ok) {
+        this.scoutBlocked = true;
+        return;
+      }
+      this.scoutBlocked = false;
+      this.liveState = "listening";
+    } finally {
+      this.#scoutStarting = false;
+    }
+  }
+
+  async #startRecording(): Promise<void> {
     const name =
       (this.captureName ?? "").trim() ||
       `Capture ${new Date().toLocaleString("fr-FR")}`;
@@ -648,22 +718,65 @@ export class GlCapturePage extends LitElement {
     this.extracted = [];
     this.sampleCount = 0;
     this.statusText = "";
-    this.liveState = "listening";
-    this.#captureTimes = [];
-    this.#lastRateAdjustMs = 0;
-    this.measuredRatePerMin = 0;
+    this.economy = false;
 
+    const ok = await this.#ensureMic({ scout: false, title: name });
+    if (!ok) return;
+
+    this.scoutBlocked = false;
+    this.listening = true;
+    this.#recordStartedAt = performance.now();
+    this.clockMs = 0;
+    this.liveState = "listening";
+    if (this.#clockTimer != null) window.clearInterval(this.#clockTimer);
+    this.#clockTimer = window.setInterval(() => {
+      this.clockMs = Math.round(performance.now() - this.#recordStartedAt);
+    }, 200);
+  }
+
+  /**
+   * Ensure LiveCapture + EventHunter are running.
+   * Scout: ephemeral session (not in Dexie). Recording: persist session.
+   */
+  async #ensureMic(opts: {
+    scout: boolean;
+    title?: string;
+  }): Promise<boolean> {
     if (!window.isSecureContext) {
-      this.liveState = "idle";
       this.warnings = [
         "Contexte non sécurisé — ouvrez via localhost ou HTTPS (pas une IP http://).",
       ];
-      return;
+      return false;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      this.liveState = "idle";
       this.warnings = ["API micro indisponible dans ce navigateur."];
-      return;
+      return false;
+    }
+
+    this.#stopping = false;
+
+    if (this.#live && this.micOpen) {
+      if (!opts.scout) {
+        const projectId = await projectWorkspace.currentId();
+        const now = nowIso();
+        this.#hunt = {
+          id: createEntityId(),
+          projectId,
+          startedAt: now,
+          endedAt: null,
+          durationMs: 0,
+          sampleRate: this.#live.sampleRate,
+          channelCount: this.#live.hunt?.channelCount ?? 1,
+          title: (opts.title ?? this.captureName).trim() || "Capture",
+          status: "recording",
+          gapMarkers: [],
+          createdAt: now,
+          updatedAt: now,
+          revision: 0,
+        };
+        await db.sessions.put(this.#hunt);
+      }
+      return true;
     }
 
     this.#live = new LiveCapture(
@@ -672,6 +785,7 @@ export class GlCapturePage extends LitElement {
           this.level = l;
         },
         onWarning: (m) => {
+          if (opts.scout) return;
           this.warnings = [...this.warnings, m];
         },
         onState: (s) => {
@@ -681,41 +795,40 @@ export class GlCapturePage extends LitElement {
       { autoGain: this.autoGain },
     );
 
-    this.#stopping = false;
     try {
       const projectId = await projectWorkspace.currentId();
-      this.#hunt = await this.#live.start(name, projectId);
-      await db.sessions.put(this.#hunt);
+      const title = opts.scout
+        ? "Scout"
+        : (opts.title ?? this.captureName).trim() || "Capture";
+      this.#hunt = await this.#live.start(title, projectId);
+      if (!opts.scout) await db.sessions.put(this.#hunt);
       this.#hunter = new EventHunter(this.#live.sampleRate, {
         openFloorFactor: sensitivityToOpenFloor(this.attackSensitivity),
       });
-      this.listening = true;
-      this.#startedAt = performance.now();
-      this.#lastRateAdjustMs = this.#startedAt;
+      this.micOpen = true;
+      this.#micStartedAt = performance.now();
+      this.#lastRateAdjustMs = this.#micStartedAt;
+      if (this.#analyseTimer != null) window.clearInterval(this.#analyseTimer);
       this.#analyseTimer = window.setInterval(() => void this.#tick(), 150);
-      this.#clockTimer = window.setInterval(() => {
-        this.clockMs = Math.round(performance.now() - this.#startedAt);
-      }, 200);
+      return true;
     } catch (err) {
       void this.#live.stop().catch(() => undefined);
       this.#live = null;
       this.#hunt = null;
       this.#hunter = null;
+      this.micOpen = false;
       this.listening = false;
       this.liveState = "idle";
-      this.warnings = [micStartErrorMessage(err)];
-      console.error("[glane] capture start failed", err);
+      if (!opts.scout) {
+        this.warnings = [micStartErrorMessage(err)];
+      }
+      console.error("[glane] capture mic start failed", err);
+      return false;
     }
-  };
+  }
 
   async #tick(): Promise<void> {
-    if (
-      this.#stopping ||
-      this.#analysing ||
-      !this.#hunter ||
-      !this.#live ||
-      !this.#hunt
-    ) {
+    if (this.#stopping || this.#analysing || !this.#hunter || !this.#live) {
       return;
     }
     const rolling = this.#live.rolling;
@@ -738,7 +851,12 @@ export class GlCapturePage extends LitElement {
     }
 
     if (!extraction || this.#stopping) return;
-    void this.#persistExtraction(extraction);
+    this.#noteDetection(performance.now());
+    if (this.listening && this.#hunt) {
+      void this.#persistExtraction(extraction);
+    } else {
+      this.liveState = "listening";
+    }
   }
 
   async #persistExtraction(
@@ -746,6 +864,7 @@ export class GlCapturePage extends LitElement {
     opts: { ignoreStop?: boolean } = {},
   ): Promise<void> {
     if ((!opts.ignoreStop && this.#stopping) || !this.#hunt) return;
+    if (!this.listening && !opts.ignoreStop) return;
     const hunt = this.#hunt;
     this.liveState = "extracting";
     try {
@@ -807,12 +926,6 @@ export class GlCapturePage extends LitElement {
         ...this.extracted,
       ].slice(0, 40);
       this.sampleCount = this.extracted.length;
-      const nowMs = performance.now();
-      this.#captureTimes = pruneCaptureTimes(
-        [...this.#captureTimes, nowMs],
-        nowMs,
-      );
-      this.#regulateCaptureRate(nowMs);
       this.liveState = "characterized";
       this.statusText = `capturé · file processing`;
       if (navigator.vibrate) navigator.vibrate(10);
@@ -821,11 +934,44 @@ export class GlCapturePage extends LitElement {
     }
   }
 
-  async #stop(): Promise<void> {
-    this.#stopping = true;
-    this.listening = false;
-    this.liveState = "idle";
+  /** Stop writing to library; keep scout mic open. */
+  async #stopRecording(): Promise<void> {
+    const hunt = this.#hunt;
     this.economy = false;
+    if (this.#clockTimer != null) window.clearInterval(this.#clockTimer);
+    this.#clockTimer = null;
+
+    const flushed = this.#hunter?.flush() ?? null;
+    if (flushed && hunt) {
+      await this.#persistExtraction(flushed, { ignoreStop: true });
+    }
+
+    this.listening = false;
+    this.#hunt = null;
+    if (hunt) {
+      const ended = nowIso();
+      void db.sessions.put({
+        ...hunt,
+        endedAt: ended,
+        durationMs: Math.round(performance.now() - this.#recordStartedAt),
+        status: "ready",
+        updatedAt: ended,
+      });
+    }
+    this.liveState = this.micOpen ? "listening" : "idle";
+    this.clockMs = 0;
+    void this.#persistCapturePrefs();
+  }
+
+  /** Leave page: close mic entirely. */
+  async #shutdownMic(): Promise<void> {
+    this.#stopping = true;
+    const wasRecording = this.listening;
+    const hunt = this.#hunt;
+    this.listening = false;
+    this.micOpen = false;
+    this.economy = false;
+    this.liveState = "idle";
     if (this.#analyseTimer != null) window.clearInterval(this.#analyseTimer);
     if (this.#clockTimer != null) window.clearInterval(this.#clockTimer);
     this.#analyseTimer = null;
@@ -833,15 +979,30 @@ export class GlCapturePage extends LitElement {
 
     const flushed = this.#hunter?.flush() ?? null;
     this.#hunter = null;
-    if (flushed && this.#hunt) {
-      void this.#persistExtraction(flushed, { ignoreStop: true });
+    if (wasRecording && flushed && hunt) {
+      this.#hunt = hunt;
+      this.listening = true;
+      await this.#persistExtraction(flushed, { ignoreStop: true });
+      this.listening = false;
+      this.#hunt = null;
     }
 
     const live = this.#live;
     this.#live = null;
-    const hunt = await live?.stop();
     this.#hunt = null;
-    if (hunt) void db.sessions.put(hunt);
+    const stopped = await live?.stop();
+    if (hunt && wasRecording) {
+      const ended = nowIso();
+      void db.sessions.put({
+        ...hunt,
+        endedAt: ended,
+        durationMs:
+          stopped?.durationMs ??
+          Math.round(performance.now() - this.#recordStartedAt),
+        status: "ready",
+        updatedAt: ended,
+      });
+    }
     void this.#persistCapturePrefs();
   }
 
@@ -896,19 +1057,21 @@ function levelToDb(peak: number): string {
   return `${rounded.toFixed(0)} dB`;
 }
 
-function stateLabel(s: CaptureLiveState): string {
+function stateLabel(s: CaptureLiveState, recording: boolean): string {
   switch (s) {
     case "idle":
     case "listening":
       return "";
     case "event:attack":
-      return "événement · attaque";
+      return recording ? "événement · attaque" : "détecté · attaque (réglage)";
     case "event:sustain":
-      return "événement · sustain (enveloppe)";
+      return recording
+        ? "événement · sustain (enveloppe)"
+        : "détecté · sustain (réglage)";
     case "extracting":
       return "écriture…";
     case "characterized":
-      return "capturé → file processing";
+      return recording ? "capturé → file processing" : "détecté (non sauvé)";
   }
 }
 

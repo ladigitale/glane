@@ -1,6 +1,7 @@
 import { normalizePeak } from "./normalize.js";
 import { processTextureClip } from "./loop/seamless.js";
 import { DSP_THRESHOLDS } from "./config/thresholds.js";
+import { computeInterestScore } from "./interest-score.js";
 
 export type ProcessJobKind = "oneshot" | "texture";
 
@@ -27,6 +28,7 @@ export type ProcessWorkerResponse =
       loopEndMs?: number;
       loopXfadeMs?: number;
       loopScore?: number;
+      interestScore: number;
     }
   | {
       type: "error";
@@ -49,6 +51,7 @@ export function runProcessJob(
       // Trim + soften extremities; peak-norm only (no envelope crush).
       const out = normalizePeak(polished.pcm, target);
       const durationMs = Math.round((out.length / sampleRate) * 1000);
+      const loopScore = polished.loopScore;
       return {
         pcm: out,
         tags: [
@@ -61,13 +64,20 @@ export function runProcessJob(
         loopStartMs: 0,
         loopEndMs: durationMs,
         loopXfadeMs: polished.xfadeMs,
-        loopScore: polished.loopScore,
+        loopScore,
+        interestScore: computeInterestScore({
+          pcm: out,
+          sampleRate,
+          kind: "texture",
+          loopScore,
+        }),
       };
     }
   }
 
   const out = normalizePeak(pcm, target);
   const durationMs = Math.round((out.length / sampleRate) * 1000);
+  const loopScore = kind === "texture" ? 0.35 : undefined;
   return {
     pcm: out,
     tags: ["peak-norm", "processing:done"],
@@ -76,6 +86,12 @@ export function runProcessJob(
     loopStartMs: kind === "texture" ? 0 : undefined,
     loopEndMs: kind === "texture" ? durationMs : undefined,
     loopXfadeMs: kind === "texture" ? 40 : undefined,
-    loopScore: kind === "texture" ? 0.35 : undefined,
+    loopScore,
+    interestScore: computeInterestScore({
+      pcm: out,
+      sampleRate,
+      kind,
+      loopScore,
+    }),
   };
 }

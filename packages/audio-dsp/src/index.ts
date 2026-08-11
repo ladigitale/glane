@@ -5,6 +5,7 @@ export * from "./loop/optimize.js";
 export * from "./loop/seamless.js";
 export * from "./loop/ensure-seamless.js";
 export * from "./process-job.js";
+export * from "./interest-score.js";
 export * from "./detect/vad.js";
 export * from "./segment-pipeline.js";
 export * from "./analysis-queue.js";

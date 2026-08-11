@@ -67,6 +67,14 @@ export function probabilisticPlacement(opts: {
 
 export type GrooveKind = "straight" | "shuffle" | "half-time";
 
+/** Explicit lock vs seed-driven pick. */
+export type GenAuto = "auto";
+export type GenTriState = GenAuto | "on" | "off";
+export type GenScaleMode = GenAuto | "major" | "minor";
+export type GenFormStyle = GenAuto | "song" | "ambient";
+export type GenPaletteChoice = GenAuto | HarmonicPalette;
+export type GenGrooveChoice = GenAuto | GrooveKind;
+
 export type SequenceSampleIn = {
   id: string;
   durationMs: number;
@@ -233,6 +241,44 @@ function pickInt(rnd: () => number, lo: number, hi: number): number {
   return lo + Math.floor(rnd() * (hi - lo + 1));
 }
 
+function resolveSlider(
+  value: number | GenAuto | undefined,
+  rnd: () => number,
+  lo: number,
+  hi: number,
+  fallback: number,
+): number {
+  if (value === "auto") return lo + rnd() * (hi - lo);
+  if (value == null || !Number.isFinite(value)) return fallback;
+  return clamp(value, lo, hi);
+}
+
+function pickGroove(rnd: () => number): GrooveKind {
+  const r = rnd();
+  if (r < 0.55) return "straight";
+  if (r < 0.8) return "shuffle";
+  return "half-time";
+}
+
+const KEY_NOTE_NAMES = [
+  "C",
+  "C#",
+  "D",
+  "D#",
+  "E",
+  "F",
+  "F#",
+  "G",
+  "G#",
+  "A",
+  "A#",
+  "B",
+] as const;
+
+export function keyPcLabel(pc: number): string {
+  return KEY_NOTE_NAMES[((pc % 12) + 12) % 12] ?? "C";
+}
+
 function isDrumRole(role: ExprRole): boolean {
   return role === "kick" || role === "snare" || role === "hat" || role === "perc";
 }
@@ -371,7 +417,10 @@ function pickScale(
   samples: SequenceSampleIn[],
   rootPc: number,
   rnd: () => number,
+  mode: GenScaleMode = "auto",
 ): readonly number[] {
+  if (mode === "major") return MAJOR_SCALE;
+  if (mode === "minor") return MINOR_SCALE;
   let majorish = 0;
   let minorish = 0;
   for (const s of samples) {
@@ -389,7 +438,9 @@ function pickScale(
 function paletteFromMix(
   drumsVsTexture: number,
   rnd: () => number,
+  forced?: GenPaletteChoice,
 ): HarmonicPalette {
+  if (forced && forced !== "auto") return forced;
   if (drumsVsTexture < 0.35) return rnd() < 0.7 ? "ambient" : "modal";
   if (drumsVsTexture > 0.7) return rnd() < 0.55 ? "pop" : "mixed";
   if (rnd() < 0.25) return "jazz";
@@ -404,12 +455,22 @@ function paletteFromMix(
 export function planSongForm(
   bars: number,
   rnd: () => number,
-  opts?: { drumsVsTexture?: number; energy?: number },
+  opts?: {
+    drumsVsTexture?: number;
+    energy?: number;
+    formStyle?: GenFormStyle;
+  },
 ): SongSection[] {
   if (bars < 1) return [];
   const dvt = opts?.drumsVsTexture ?? 0.55;
   const energy = opts?.energy ?? 0.55;
-  const ambient = dvt < 0.4;
+  const form = opts?.formStyle ?? "auto";
+  const ambient =
+    form === "ambient"
+      ? true
+      : form === "song"
+        ? false
+        : dvt < 0.4;
 
   type Unit = {
     kind: SectionKind;
@@ -1281,11 +1342,19 @@ function bpmSyncStretch(
   projectBpm: number,
   role: ExprRole,
   rnd: () => number,
+  mode: GenTriState = "auto",
 ): { stretchMode: StretchMode; lengthFactor: number } | null {
+  if (mode === "off") return null;
   const src = sample.analysisBpm;
   if (src == null || src < 40 || src > 240) return null;
   const ratio = projectBpm / src;
   if (Math.abs(ratio - 1) < 0.04) return null;
+  if (mode === "on") {
+    return {
+      stretchMode: Math.abs(ratio - 1) > 0.12 ? "preserve-pitch" : "resample",
+      lengthFactor: 1 / ratio,
+    };
+  }
   if (isDrumRole(role) && Math.abs(ratio - 1) > 0.25 && rnd() < 0.5) {
     // Drums: prefer one-shot at native feel unless close
     return null;
@@ -1689,7 +1758,9 @@ function pickTrackMix(
 
 /**
  * Plan a full multi-track sequence over `bars`, drawing from the library.
- * Controls: seed, density, energy, drumsVsTexture, groove.
+ * Controls: seed + density/energy/mix/groove; advanced locks (key, palette,
+ * form, humanize, variation, bpm-sync, reverse, stutter, call–response).
+ * Pass `"auto"` to let the seed pick; omit for engine defaults.
  */
 export function planSequence(opts: {
   bars: number;
@@ -1699,26 +1770,61 @@ export function planSequence(opts: {
   seed: number;
   tracks: Array<{ id: string; index: number }>;
   samples: SequenceSampleIn[];
-  keyRootPc?: number;
-  /** Hit keep multiplier (0.35–1.5). Default 1. */
-  density?: number;
-  /** Dynamics / fills / expressivity (0–1). Default 0.55. */
-  energy?: number;
-  /** 0 = textures/field, 1 = drums/kit. Default 0.55. */
-  drumsVsTexture?: number;
-  groove?: GrooveKind;
+  /** Pitch-class 0–11, or `"auto"` / omit → infer from library. */
+  keyRootPc?: number | GenAuto;
+  /** Hit keep multiplier (0.35–1.5), or `"auto"`. Default 1. */
+  density?: number | GenAuto;
+  /** Dynamics / fills / expressivity (0–1), or `"auto"`. Default 0.55. */
+  energy?: number | GenAuto;
+  /** 0 = textures/field, 1 = drums/kit, or `"auto"`. Default 0.55. */
+  drumsVsTexture?: number | GenAuto;
+  groove?: GenGrooveChoice;
+  scaleMode?: GenScaleMode;
+  palette?: GenPaletteChoice;
+  formStyle?: GenFormStyle;
+  /** Timing jitter strength (0–1), or `"auto"`. */
+  humanize?: number | GenAuto;
+  /** Motif evolve / sample rotate / reverse·stutter intensity (0–1), or `"auto"`. */
+  variation?: number | GenAuto;
+  bpmSync?: GenTriState;
+  reverse?: GenTriState;
+  stutter?: GenTriState;
+  callResponse?: GenTriState;
 }): SequencePlanResult {
   const { bars, beatsPerBar, ppq, bpm, seed, tracks, samples } = opts;
   if (bars < 1 || tracks.length === 0 || samples.length === 0) {
     return { clips: [], tracks: [] };
   }
 
-  const density = clamp(opts.density ?? 1, 0.35, 1.5);
-  const energy = clamp(opts.energy ?? 0.55, 0, 1);
-  const drumsVsTexture = clamp(opts.drumsVsTexture ?? 0.55, 0, 1);
-  const groove: GrooveKind = opts.groove ?? "straight";
-
   const rnd = mulberry32(seed);
+  const density = resolveSlider(opts.density, rnd, 0.35, 1.5, 1);
+  const energy = resolveSlider(opts.energy, rnd, 0, 1, 0.55);
+  const drumsVsTexture = resolveSlider(
+    opts.drumsVsTexture,
+    rnd,
+    0,
+    1,
+    0.55,
+  );
+  const groove: GrooveKind =
+    opts.groove === "auto"
+      ? pickGroove(rnd)
+      : (opts.groove ?? "straight");
+  const humanize =
+    opts.humanize === undefined
+      ? 1
+      : resolveSlider(opts.humanize, rnd, 0, 1, 1);
+  const variation =
+    opts.variation === undefined
+      ? 0.55
+      : resolveSlider(opts.variation, rnd, 0, 1, 0.55);
+  const scaleMode: GenScaleMode = opts.scaleMode ?? "auto";
+  const formStyle: GenFormStyle = opts.formStyle ?? "auto";
+  const bpmSyncMode: GenTriState = opts.bpmSync ?? "auto";
+  const reverseMode: GenTriState = opts.reverse ?? "auto";
+  const stutterMode: GenTriState = opts.stutter ?? "auto";
+  const callResponseMode: GenTriState = opts.callResponse ?? "auto";
+
   const ticksPerBar = beatsPerBar * ppq;
   const seqEnd = bars * ticksPerBar;
   const pool = [...samples].sort((a, b) => {
@@ -1726,13 +1832,20 @@ export function planSequence(opts: {
     return a.id.localeCompare(b.id);
   });
 
-  const rootPc = opts.keyRootPc ?? inferKeyRootPc(pool);
-  const scale = pickScale(pool, rootPc, rnd);
+  const rootPc =
+    opts.keyRootPc == null || opts.keyRootPc === "auto"
+      ? inferKeyRootPc(pool)
+      : ((Math.round(opts.keyRootPc) % 12) + 12) % 12;
+  const scale = pickScale(pool, rootPc, rnd, scaleMode);
   const minor = scale === MINOR_SCALE;
-  const palette = paletteFromMix(drumsVsTexture, rnd);
+  const palette = paletteFromMix(drumsVsTexture, rnd, opts.palette);
   const progression = pickProgressionBank(palette, minor, rnd);
   const chordTimeline = expandChordTimeline(progression, bars);
-  const sections = planSongForm(bars, rnd, { drumsVsTexture, energy });
+  const sections = planSongForm(bars, rnd, {
+    drumsVsTexture,
+    energy,
+    formStyle,
+  });
 
   const sortedTracks = [...tracks].sort((a, b) => a.index - b.index);
   const roles = assignTrackRoles(
@@ -1749,18 +1862,43 @@ export function planSequence(opts: {
 
   // Call–response pairs: lead↔perc, hat↔snare when both present
   const respondTracks = new Set<number>();
-  const leadIdx = roles.indexOf("lead");
-  const percIdx = roles.indexOf("perc");
-  const hatIdx = roles.indexOf("hat");
-  const snareIdx = roles.indexOf("snare");
-  if (leadIdx >= 0 && percIdx >= 0) respondTracks.add(percIdx);
-  if (hatIdx >= 0 && snareIdx >= 0 && rnd() < 0.45) respondTracks.add(hatIdx);
+  if (callResponseMode !== "off") {
+    const leadIdx = roles.indexOf("lead");
+    const percIdx = roles.indexOf("perc");
+    const hatIdx = roles.indexOf("hat");
+    const snareIdx = roles.indexOf("snare");
+    if (leadIdx >= 0 && percIdx >= 0) respondTracks.add(percIdx);
+    if (hatIdx >= 0 && snareIdx >= 0) {
+      if (
+        callResponseMode === "on" ||
+        (callResponseMode === "auto" && rnd() < 0.45)
+      ) {
+        respondTracks.add(hatIdx);
+      }
+    }
+  }
 
   const plans: SequenceClipPlan[] = [];
   const rankedByRole = new Map<ExprRole, SequenceSampleIn[]>();
   for (const role of ROLE_TRACK_ORDER) {
     rankedByRole.set(role, rankSamplesForRole(pool, role));
   }
+
+  const reverseBaseChance =
+    reverseMode === "off"
+      ? 0
+      : reverseMode === "on"
+        ? 0.32 + energy * 0.25 + variation * 0.15
+        : (0.14 + energy * 0.1) * (0.5 + variation);
+
+  const stutterBaseChance =
+    stutterMode === "off"
+      ? 0
+      : stutterMode === "on"
+        ? 0.22 + energy * 0.2 + variation * 0.15
+        : energy > 0.55
+          ? (0.12 + energy * 0.1) * (0.55 + variation * 0.9)
+          : 0;
 
   for (let ti = 0; ti < sortedTracks.length; ti++) {
     const track = sortedTracks[ti]!;
@@ -1774,15 +1912,23 @@ export function planSequence(opts: {
 
     const motif = buildMotif(role, beatsPerBar, ppq, rnd, groove);
     const motifAlt = buildMotif(role, beatsPerBar, ppq, rnd, groove);
-    const leadCell = role === "lead" ? pickMelodyCell(rnd, drumsVsTexture < 0.4) : null;
+    const leadCell =
+      role === "lead" ? pickMelodyCell(rnd, drumsVsTexture < 0.4) : null;
     const leadCellAlt =
       role === "lead" ? pickMelodyCell(rnd, drumsVsTexture < 0.4) : null;
 
     const humanizeMs =
-      isDrumRole(role) ? 6 + energy * 6 : role === "lead" ? 18 + energy * 10 : 14;
+      (isDrumRole(role)
+        ? 6 + energy * 6
+        : role === "lead"
+          ? 18 + energy * 10
+          : 14) * humanize;
 
     let sampleCursor = 0;
-    const rotateEvery = Math.max(1, 2 - Math.floor(energy * 1.5));
+    const rotateEvery = Math.max(
+      1,
+      2 - Math.floor(energy * 1.5 * (0.5 + variation)),
+    );
 
     for (const section of sections) {
       const baseMotif =
@@ -1812,8 +1958,13 @@ export function planSequence(opts: {
         if (b % rotateEvery === 0 || section.altSample) {
           sampleCursor = (sampleCursor + 1) % samplePool.length;
         }
-        if (section.altSample && samplePool.length > 1 && rnd() < 0.7) {
-          sampleCursor = (sampleCursor + pickInt(rnd, 1, samplePool.length - 1)) %
+        if (
+          section.altSample &&
+          samplePool.length > 1 &&
+          rnd() < 0.4 + variation * 0.55
+        ) {
+          sampleCursor =
+            (sampleCursor + pickInt(rnd, 1, samplePool.length - 1)) %
             samplePool.length;
         }
         const sample = samplePool[sampleCursor]!;
@@ -1836,7 +1987,10 @@ export function planSequence(opts: {
         } else {
           hits = evolveMotifHits(baseMotif, {
             role,
-            section,
+            section: {
+              ...section,
+              evolve: section.evolve * (0.45 + variation * 0.9),
+            },
             barInSection: b,
             beatsPerBar,
             ppq,
@@ -1869,13 +2023,19 @@ export function planSequence(opts: {
           const next = absHits[hi + 1]?.tick ?? null;
 
           const stutter =
-            energy > 0.55 &&
+            stutterBaseChance > 0 &&
             (role === "lead" || role === "perc" || role === "hat") &&
-            section.kind === "chorus" &&
+            (stutterMode === "on" || section.kind === "chorus") &&
             hit.accent &&
-            rnd() < 0.12 + energy * 0.1;
+            rnd() < stutterBaseChance;
 
-          const bpmSync = bpmSyncStretch(sample, bpm, role, rnd);
+          const bpmSync = bpmSyncStretch(
+            sample,
+            bpm,
+            role,
+            rnd,
+            bpmSyncMode,
+          );
           const bpmLengthFactor = bpmSync?.lengthFactor ?? 1;
 
           let lengthTick = pickLengthTick({
@@ -1955,17 +2115,19 @@ export function planSequence(opts: {
             sample.durationMs > lengthMs + 40 &&
             !isDrumRole(role)
           ) {
-            // Expressive scrub into the body of long field takes
             const window = Math.max(0, sample.durationMs - lengthMs);
             contentOffsetMs = Math.round(
-              rnd() * window * (0.35 + energy * 0.5),
+              rnd() * window * (0.35 + energy * 0.5) * (0.4 + variation * 0.8),
             );
           }
 
           const reverse =
+            reverseBaseChance > 0 &&
             (role === "texture" || role === "fx" || role === "lead") &&
-            (section.kind === "bridge" || section.kind === "outro") &&
-            rnd() < 0.14 + energy * 0.1;
+            (reverseMode === "on" ||
+              section.kind === "bridge" ||
+              section.kind === "outro") &&
+            rnd() < reverseBaseChance;
 
           let gainDb = hit.gainDb + section.gainBiasDb + (energy - 0.5) * 1.5;
           if (section.kind === "chorus") {
@@ -1976,9 +2138,10 @@ export function planSequence(opts: {
           }
           if (stutter) gainDb += 0.5;
 
-          // Repeat bursts: extra short copies after stutter hits
           const repeats =
-            stutter && rnd() < 0.7 ? pickInt(rnd, 1, 2 + Math.floor(energy * 2)) : 0;
+            stutter && rnd() < 0.7
+              ? pickInt(rnd, 1, 2 + Math.floor(energy * 2 * variation))
+              : 0;
 
           const pushClip = (
             startTick: number,
