@@ -1,3 +1,4 @@
+/// <reference path="../lamejs.d.ts" />
 /**
  * User-facing bounce encoding (WAV / MP3) + browser download.
  */
