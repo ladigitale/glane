@@ -1,6 +1,5 @@
 import {
   DEFAULT_CHANNEL_COUNT,
-  DEFAULT_SAMPLE_RATE,
   RING_BUFFER_SECONDS_DEFAULT,
   createEntityId,
   nowIso,
@@ -79,9 +78,9 @@ export class SessionRecorder {
     const { stream, warnings } = await this.capture.start();
     for (const w of warnings) this.#events.onWarning?.(w);
 
+    // Native hardware rate — avoid mic→48 kHz browser resample on mobile.
     const ctx = new AudioContext({
       latencyHint: "interactive",
-      sampleRate: DEFAULT_SAMPLE_RATE,
     });
     this.#ctx = ctx;
     if (ctx.state === "suspended") await ctx.resume();

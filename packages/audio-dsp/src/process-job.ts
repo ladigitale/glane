@@ -46,7 +46,7 @@ export function runProcessJob(
   if (kind === "texture") {
     const polished = processTextureClip(pcm, sampleRate);
     if (polished) {
-      // Envelope flatten then peak-norm so waveforms share the same height.
+      // Trim + soften extremities; peak-norm only (no envelope crush).
       const out = normalizePeak(polished.pcm, target);
       const durationMs = Math.round((out.length / sampleRate) * 1000);
       return {

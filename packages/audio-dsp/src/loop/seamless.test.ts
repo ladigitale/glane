@@ -3,11 +3,10 @@ import assert from "node:assert/strict";
 import { processTextureClip, flattenEnvelope } from "./seamless.ts";
 
 describe("processTextureClip", () => {
-  it("returns a leveled section without stacking copies", () => {
+  it("returns a field-raw section without stacking copies", () => {
     const sr = 48_000;
     const n = sr * 2;
     const pcm = new Float32Array(n);
-    // Amplitude ramp — envelope flatten must compensate
     for (let i = 0; i < n; i++) {
       const env = 0.2 + 0.8 * (i / n);
       pcm[i] = Math.sin((2 * Math.PI * 220 * i) / sr) * env;
@@ -17,14 +16,15 @@ describe("processTextureClip", () => {
     assert.ok(r!.pcm.length > sr * 0.2);
     // No repetition: output must not exceed the source section
     assert.ok(r!.pcm.length <= pcm.length);
-    assert.ok(r!.tags.includes("envelope-flat"));
+    assert.ok(r!.tags.includes("field-raw"));
     assert.ok(r!.tags.includes("seamless"));
     assert.ok(!r!.tags.includes("peak-norm"));
+    assert.ok(!r!.tags.includes("envelope-flat"));
   });
 });
 
 describe("flattenEnvelope", () => {
-  it("reduces loudness swing toward a nearly constant level", () => {
+  it("gently reduces loudness swing without crushing dynamics", () => {
     const sr = 48_000;
     const n = sr;
     const pcm = new Float32Array(n);
@@ -41,7 +41,9 @@ describe("flattenEnvelope", () => {
     };
     const a = rms(Math.floor(n * 0.2));
     const b = rms(Math.floor(n * 0.7));
-    // After flatten, half-loud vs loud should be close (not 9× apart)
-    assert.ok(Math.abs(a - b) / Math.max(a, b) < 0.35);
+    // Soft maxBoost≈4: quieter half rises, but not to near-equality
+    const ratio = Math.max(a, b) / Math.max(1e-9, Math.min(a, b));
+    assert.ok(ratio < 6);
+    assert.ok(ratio > 1.2);
   });
 });

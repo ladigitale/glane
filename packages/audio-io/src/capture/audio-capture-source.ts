@@ -1,5 +1,8 @@
 /**
  * Capture abstraction — swap getUserMedia for Capacitor native later (ADR-0001).
+ *
+ * Field fidelity: disable browser voice pipeline (AEC / NS / AGC). Many mobile
+ * browsers ignore soft `false`; we prefer `{ exact: false }` then fall back.
  */
 export type CaptureConstraintsResult = {
   stream: MediaStream;
@@ -13,13 +16,45 @@ export interface AudioCaptureSource {
   readonly stream: MediaStream | null;
 }
 
-export const FIELD_CONSTRAINTS: MediaTrackConstraints = {
+/** Prefer mono; never force sampleRate (avoids extra browser resample). */
+const FIELD_BASE: MediaTrackConstraints = {
+  channelCount: 1,
+};
+
+/** Soft prefs — used when `exact: false` throws OverconstrainedError. */
+const FIELD_SOFT: MediaTrackConstraints = {
+  ...FIELD_BASE,
   echoCancellation: false,
   noiseSuppression: false,
   autoGainControl: false,
-  channelCount: 1,
-  sampleRate: 48_000,
 };
+
+/**
+ * Strict off for voice processing. Chrome may also honor goog* keys via
+ * the extended constraint bag (ignored by other browsers).
+ */
+const FIELD_EXACT: MediaTrackConstraints = {
+  ...FIELD_BASE,
+  echoCancellation: { exact: false },
+  noiseSuppression: { exact: false },
+  autoGainControl: { exact: false },
+  ...( {
+    googEchoCancellation: false,
+    googNoiseSuppression: false,
+    googAutoGainControl: false,
+    googHighpassFilter: false,
+  } as MediaTrackConstraints),
+};
+
+/** @deprecated Prefer MediaStreamCaptureSource — kept for callers/tests. */
+export const FIELD_CONSTRAINTS: MediaTrackConstraints = FIELD_SOFT;
+
+function isOverconstrained(err: unknown): boolean {
+  return (
+    err instanceof DOMException &&
+    (err.name === "OverconstrainedError" || err.name === "ConstraintNotSatisfiedError")
+  );
+}
 
 export class MediaStreamCaptureSource implements AudioCaptureSource {
   #stream: MediaStream | null = null;
@@ -29,9 +64,17 @@ export class MediaStreamCaptureSource implements AudioCaptureSource {
   }
 
   async start(): Promise<CaptureConstraintsResult> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: FIELD_CONSTRAINTS,
-    });
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: FIELD_EXACT,
+      });
+    } catch (err) {
+      if (!isOverconstrained(err)) throw err;
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: FIELD_SOFT,
+      });
+    }
     this.#stream = stream;
     const track = stream.getAudioTracks()[0];
     if (!track) {
@@ -40,13 +83,19 @@ export class MediaStreamCaptureSource implements AudioCaptureSource {
     const settings = track.getSettings();
     const warnings: string[] = [];
     if (settings.echoCancellation === true) {
-      warnings.push("echoCancellation still on — browser ignored constraint");
+      warnings.push(
+        "Annulation d'écho navigateur active — le son peut sonner « téléphone ».",
+      );
     }
     if (settings.noiseSuppression === true) {
-      warnings.push("noiseSuppression still on — browser ignored constraint");
+      warnings.push(
+        "Réduction de bruit navigateur active — le fond sonore sera compressé.",
+      );
     }
     if (settings.autoGainControl === true) {
-      warnings.push("autoGainControl still on — browser ignored constraint");
+      warnings.push(
+        "AGC navigateur actif — dynamique écrasée (fréquent sur mobile).",
+      );
     }
     return { stream, settings, warnings };
   }

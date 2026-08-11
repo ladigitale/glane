@@ -9,9 +9,9 @@ export type SeamlessLoopResult = {
 };
 
 /**
- * Divide each sample by a smoothed |signal| envelope so perceived loudness
- * stays nearly constant — accentuates texture grain.
- * Global peak-norm to −0.3 dBTP is applied afterward by `runProcessJob`.
+ * Divide each sample by a smoothed |signal| envelope (gentle leveling).
+ * Default maxBoost is low so room noise is not pumped; unused by field-raw
+ * texture polish — kept for optional callers/tests.
  */
 export function flattenEnvelope(
   input: Float32Array,
@@ -25,9 +25,9 @@ export function flattenEnvelope(
     return out;
   }
 
-  // Wide gain range so the result envelope is almost flat
-  const maxBoost = opts.maxBoost ?? 48;
-  const maxCut = opts.maxCut ?? 0.02;
+  // Gentle range only — ×48 used to pump room noise into “compressed” mush.
+  const maxBoost = opts.maxBoost ?? 4;
+  const maxCut = opts.maxCut ?? 0.25;
 
   // Light envelope: |x| with asymmetric one-pole (faster rise, slower fall)
   const riseA = Math.exp(-1 / Math.max(2, sampleRate * 0.003));
@@ -135,11 +135,11 @@ function softenExtremities(
 }
 
 /**
- * Texture prep from a capture section:
- * 1. take a ZC-aligned slice (no repetition / stacking of the sound)
- * 2. flatten the amplitude envelope (sample / local envelope → almost constant)
- * 3. soften extremities to avoid clicks
- * Peak-norm is applied by `runProcessJob` after this returns.
+ * Texture prep from a capture section (field fidelity):
+ * 1. ZC-aligned slice (no repetition / stacking)
+ * 2. soften extremities to avoid clicks
+ * No envelope flatten — that pumped noise and crushed dynamics.
+ * Peak-norm (global scale only) is applied by `runProcessJob` after this.
  */
 export function processTextureClip(
   input: Float32Array,
@@ -154,14 +154,13 @@ export function processTextureClip(
   const body = new Float32Array(input.subarray(start, end));
   if (body.length < 64) return null;
 
-  const leveled = flattenEnvelope(body, sampleRate);
-  softenExtremities(leveled, sampleRate);
+  softenExtremities(body, sampleRate);
 
   return {
-    pcm: leveled,
+    pcm: body,
     loopScore: 0.5,
     xfadeMs: 40,
-    tags: ["loop-proposed", "seamless", "envelope-flat"],
+    tags: ["loop-proposed", "seamless", "field-raw"],
   };
 }
 

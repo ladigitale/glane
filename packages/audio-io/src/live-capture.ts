@@ -109,9 +109,9 @@ export class LiveCapture {
     for (const w of warnings) this.#events.onWarning?.(w);
 
     try {
+      // Native hardware rate — avoid mic→48 kHz browser resample on mobile.
       const ctx = new AudioContext({
         latencyHint: "interactive",
-        sampleRate: DEFAULT_SAMPLE_RATE,
       });
       this.#ctx = ctx;
       if (ctx.state === "suspended") await ctx.resume();
