@@ -9,7 +9,8 @@
     "./worklet": "./src/worklet/capture-processor.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/export/octatrack-ot.test.ts"
   },
   "dependencies": {
     "@glane/core-model": "0.1.0",

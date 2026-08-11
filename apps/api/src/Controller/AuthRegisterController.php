@@ -23,6 +23,13 @@ final class AuthRegisterController extends AbstractController
     ) {
     }
 
+    /** Stub for json_login check_path — firewall intercepts before this runs. */
+    #[Route('/api/auth/login', name: 'api_auth_login', methods: ['POST'])]
+    public function login(): never
+    {
+        throw new \LogicException('Handled by security json_login firewall.');
+    }
+
     #[Route('/api/auth/register', name: 'api_auth_register', methods: ['POST'])]
     public function __invoke(Request $request): JsonResponse
     {

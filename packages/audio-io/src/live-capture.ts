@@ -41,6 +41,8 @@ export type LiveCaptureOpts = {
   capture?: AudioCaptureSource;
   /** Soft compressor + makeup in the capture graph (default false). */
   autoGain?: boolean;
+  /** Preferred getUserMedia input (ignored if `capture` is injected). */
+  deviceId?: string;
 };
 
 /**
@@ -66,7 +68,8 @@ export class LiveCapture {
   #windowSeconds: number;
 
   constructor(events: LiveCaptureEvents = {}, opts: LiveCaptureOpts = {}) {
-    this.capture = opts.capture ?? new MediaStreamCaptureSource();
+    this.capture =
+      opts.capture ?? new MediaStreamCaptureSource({ deviceId: opts.deviceId });
     this.#events = events;
     this.#windowSeconds = opts.windowSeconds ?? RING_BUFFER_SECONDS_DEFAULT;
     this.#autoGain = opts.autoGain ?? false;

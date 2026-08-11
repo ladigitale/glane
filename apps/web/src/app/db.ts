@@ -40,6 +40,8 @@ export type UserPrefs = {
   attackSensitivity?: number;
   /** Desired live captures per minute (2–60). */
   targetCapturesPerMin?: number;
+  /** Preferred MediaDeviceInfo.deviceId for capture (empty = browser default). */
+  captureAudioDeviceId?: string;
 };
 
 export type ProcessJobStatus = "pending" | "running" | "done" | "error";

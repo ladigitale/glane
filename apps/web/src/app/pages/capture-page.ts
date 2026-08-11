@@ -32,7 +32,7 @@ import {
   nextSensitivity,
   pruneCaptureTimes,
 } from "../capture-rate-regulator.js";
-import { t } from "../i18n/messages.js";
+import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { deleteSample } from "../sample-actions.js";
 import { processQueue } from "../process-queue.js";
@@ -45,6 +45,9 @@ import { captureFormKey } from "../dp-keys.js";
 import { glIcon } from "../icon.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { renderMoreMenu } from "../more-menu.js";
+import "../pop-select.js";
+
+type AudioInputOption = { value: string; label: string };
 
 type ExtractedRow = {
   id: string;
@@ -209,7 +212,10 @@ export class GlCapturePage extends LitElement {
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
   @state() private measuredRatePerMin = 0;
   @state() private rateModalOpen = false;
+  @state() private configModalOpen = false;
   @state() private scoutBlocked = false;
+  @state() private audioDeviceId = "";
+  @state() private audioInputs: AudioInputOption[] = [];
 
   #live: LiveCapture | null = null;
   #hunter: EventHunter | null = null;
@@ -248,8 +254,17 @@ export class GlCapturePage extends LitElement {
     this.rateModalOpen = true;
   };
 
+  #openConfigModal = (): void => {
+    this.configModalOpen = true;
+    void this.#refreshAudioInputs();
+  };
+
   #onRateModalHide = (): void => {
     this.rateModalOpen = false;
+  };
+
+  #onConfigModalHide = (): void => {
+    this.configModalOpen = false;
   };
 
   #syncCaptureForm(): void {
@@ -264,6 +279,10 @@ export class GlCapturePage extends LitElement {
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.addEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
+    navigator.mediaDevices?.addEventListener?.(
+      "devicechange",
+      this.#onDeviceChange,
+    );
     this.#unsubProc = processQueue.subscribe(() => {
       void this.#refreshExtractedTags();
     });
@@ -275,6 +294,10 @@ export class GlCapturePage extends LitElement {
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.removeEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
+    navigator.mediaDevices?.removeEventListener?.(
+      "devicechange",
+      this.#onDeviceChange,
+    );
     this.#unsubProc?.();
     this.#unsubProc = null;
     void this.#shutdownMic();
@@ -290,9 +313,20 @@ export class GlCapturePage extends LitElement {
   };
 
   #onKey = (e: KeyboardEvent): void => {
-    if (!isSpaceKey(e) || shouldIgnoreShortcut(e) || this.rateModalOpen) return;
+    if (
+      !isSpaceKey(e) ||
+      shouldIgnoreShortcut(e) ||
+      this.rateModalOpen ||
+      this.configModalOpen
+    ) {
+      return;
+    }
     e.preventDefault();
     void this.#toggle();
+  };
+
+  #onDeviceChange = (): void => {
+    if (this.configModalOpen) void this.#refreshAudioInputs();
   };
 
   #onProjectChange = (): void => {
@@ -325,6 +359,7 @@ export class GlCapturePage extends LitElement {
     this.targetCapturesPerMin = clampTargetPerMin(
       prefs.targetCapturesPerMin ?? DEFAULT_TARGET_CAPTURES_PER_MIN,
     );
+    this.audioDeviceId = prefs.captureAudioDeviceId ?? "";
     this.#syncCaptureForm();
   }
 
@@ -335,6 +370,7 @@ export class GlCapturePage extends LitElement {
       captureAutoGain: this.autoGain,
       attackSensitivity: this.attackSensitivity,
       targetCapturesPerMin: this.targetCapturesPerMin,
+      captureAudioDeviceId: this.audioDeviceId || undefined,
     });
   }
 
@@ -407,6 +443,11 @@ export class GlCapturePage extends LitElement {
         ${renderMoreMenu({
           ariaLabel: t("capture.more"),
           items: [
+            {
+              label: t("capture.config"),
+              icon: "settings",
+              onClick: this.#openConfigModal,
+            },
             {
               label: t("capture.autoGain"),
               icon: "volume-2",
@@ -544,6 +585,7 @@ export class GlCapturePage extends LitElement {
           </p>`
         : nothing}
       ${this.#renderRateModal()}
+      ${this.#renderConfigModal()}
       ${this.warnings.map(
         (w) =>
           html`<sonic-alert status="warning" label="Attention">${w}</sonic-alert>`,
@@ -683,6 +725,125 @@ export class GlCapturePage extends LitElement {
     `;
   }
 
+  #renderConfigModal() {
+    const inputs = this.audioInputs;
+    const multi = inputs.length > 1;
+    const options: AudioInputOption[] = [
+      { value: "", label: t("capture.audioSourceDefault") },
+      ...inputs,
+    ];
+    const selectedLabel =
+      inputs.length === 1
+        ? inputs[0]!.label
+        : (options.find((o) => o.value === this.audioDeviceId)?.label ??
+          t("capture.audioSourceDefault"));
+
+    return html`
+      <sonic-modal
+        align="left"
+        maxWidth="22rem"
+        .visible=${this.configModalOpen}
+        @hide=${this.#onConfigModalHide}
+      >
+        <sonic-modal-title>${t("capture.configTitle")}</sonic-modal-title>
+        <sonic-modal-content>
+          <div class="flex w-full flex-col gap-3">
+            <div class="flex flex-col gap-1.5">
+              <span class="text-[0.7rem] text-neutral-500"
+                >${t("capture.audioSource")}</span
+              >
+              ${inputs.length === 0
+                ? html`<p class="m-0 text-xs leading-snug text-neutral-500">
+                    ${t("capture.audioSourceNone")}
+                  </p>`
+                : multi
+                  ? html`
+                      <p class="m-0 text-xs leading-snug text-neutral-500">
+                        ${t("capture.audioSourceHint")}
+                      </p>
+                      <gl-pop-select
+                        class="w-full max-w-full"
+                        size="sm"
+                        variant="outline"
+                        .value=${this.audioDeviceId}
+                        .options=${options}
+                        placeholder=${t("capture.audioSourceDefault")}
+                        @gl-change=${this.#onAudioDeviceChange}
+                      ></gl-pop-select>
+                      <p class="m-0 text-[0.7rem] leading-snug text-neutral-500">
+                        ${t("capture.audioSourceApplyHint")}
+                      </p>
+                    `
+                  : html`
+                      <p class="m-0 text-sm text-content">${selectedLabel}</p>
+                      <p class="m-0 text-xs leading-snug text-neutral-500">
+                        ${t("capture.audioSourceSingle")}
+                      </p>
+                    `}
+            </div>
+          </div>
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
+  }
+
+  #onAudioDeviceChange = (e: Event): void => {
+    const value = String(
+      (e as CustomEvent<{ value?: string }>).detail?.value ?? "",
+    );
+    void this.#applyAudioDevice(value);
+  };
+
+  async #refreshAudioInputs(): Promise<void> {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      this.audioInputs = [];
+      return;
+    }
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    let inputs = devices.filter((d) => d.kind === "audioinput");
+    if (inputs.some((d) => !d.label) && !this.micOpen) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        stream.getTracks().forEach((tr) => tr.stop());
+        devices = await navigator.mediaDevices.enumerateDevices();
+        inputs = devices.filter((d) => d.kind === "audioinput");
+      } catch {
+        /* permission denied — keep unlabeled list */
+      }
+    }
+    this.audioInputs = inputs.map((d, i) => ({
+      value: d.deviceId,
+      label:
+        d.label.trim() ||
+        tf("capture.audioSourceUnnamed", { n: i + 1 }),
+    }));
+    if (
+      this.audioDeviceId &&
+      !this.audioInputs.some((o) => o.value === this.audioDeviceId)
+    ) {
+      this.audioDeviceId = "";
+      void this.#persistCapturePrefs();
+    }
+  }
+
+  async #applyAudioDevice(deviceId: string): Promise<void> {
+    if (deviceId === this.audioDeviceId) return;
+    this.audioDeviceId = deviceId;
+    await this.#persistCapturePrefs();
+    if (!this.micOpen) return;
+    const wasListening = this.listening;
+    if (wasListening) await this.#stopRecording();
+    await this.#shutdownMic();
+    this.#stopping = false;
+    if (wasListening) await this.#startRecording();
+    else await this.#startScout();
+  }
+
   #toggle = async (): Promise<void> => {
     if (this.listening) {
       await this.#stopRecording();
@@ -792,7 +953,7 @@ export class GlCapturePage extends LitElement {
           this.statusText = s;
         },
       },
-      { autoGain: this.autoGain },
+      { autoGain: this.autoGain, deviceId: this.audioDeviceId || undefined },
     );
 
     try {

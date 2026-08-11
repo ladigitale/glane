@@ -21,7 +21,7 @@
     "preview": "yarn --cwd apps/web preview",
     "typecheck": "yarn workspaces run typecheck",
     "ai:sync": "node scripts/sync-ai.mjs",
-    "test": "yarn --cwd packages/audio-dsp test && yarn --cwd packages/gestures test && yarn --cwd packages/core-model test",
+    "test": "yarn --cwd packages/audio-dsp test && yarn --cwd packages/gestures test && yarn --cwd packages/core-model test && yarn --cwd packages/audio-io test",
     "api:up": "yarn env:up",
     "api:down": "yarn env:down",
     "api:logs": "docker compose logs -f php database",

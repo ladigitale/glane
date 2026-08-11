@@ -1,31 +1,30 @@
 # Glane
 
-Instrument web de captation / segmentation / arrangement de sons d'ambiance.
+Web instrument for capturing, segmenting, and arranging ambient sounds.
 
 ## Quick start
 
 ```bash
 yarn setup           # deps + JWT + Docker API
-yarn status          # état de l’env
+yarn status          # environment status
 yarn dev             # Vite → http://localhost:5173
 ```
 
-Sans Docker (front only) :
+Without Docker (front only):
 
 ```bash
 yarn setup -- --no-docker
-# ou : ssks yarn setup -- --no-docker
-ssks yarn dev
+yarn dev
 ```
 
-| Script | Rôle |
+| Script | Role |
 |--------|------|
 | `yarn status` | Git, node_modules, compose ps, `/api/health`, JWT |
-| `yarn setup` | Install + JWT + `env:up` (pas `yarn install` — lifecycle Yarn) |
-| `yarn update` | Refresh yarn (+ composer/rebuild si stack up) |
-| `yarn env:up` / `env:down` | Stack FrankenPHP + Postgres |
-| `yarn api:logs` / `api:migrate` | Ops API |
-| `yarn prod:install` / `prod:update` | VPS install / update (voir `.ops/deploy.md`) |
+| `yarn setup` | Install + JWT + `env:up` (not `yarn install` — Yarn lifecycle) |
+| `yarn update` | Refresh yarn (+ composer/rebuild if stack is up) |
+| `yarn env:up` / `env:down` | FrankenPHP + Postgres stack |
+| `yarn api:logs` / `api:migrate` | API ops |
+| `yarn prod:install` / `prod:update` | VPS install / update (see `.ops/deploy.md`) |
 
 See [AGENTS.md](AGENTS.md), [docs/adr/](docs/adr/), and [.ops/deploy.md](.ops/deploy.md) for production install/update.
 

@@ -271,6 +271,23 @@ function zipStore(files: ReadonlyArray<{ path: string; data: Uint8Array }>): Blo
   );
 }
 
+/** Resample each channel; pad/trim to a shared frame length. */
+function resampleChannels(
+  channels: Float32Array[],
+  fromRate: number,
+  toRate: number,
+  targetFrames?: number,
+): Float32Array[] {
+  const out = channels.map((ch) => resampleLinear(ch, fromRate, toRate));
+  if (targetFrames == null) return out;
+  return out.map((ch) => {
+    if (ch.length === targetFrames) return ch;
+    const fitted = new Float32Array(targetFrames);
+    fitted.set(ch.subarray(0, Math.min(ch.length, targetFrames)));
+    return fitted;
+  });
+}
+
 export const audioExport = {
   encodeWavHeaderBytes,
   encodeWav(buffer: AudioBuffer, format: "float32" | "int16" = "int16"): Blob {
@@ -280,8 +297,21 @@ export const audioExport = {
       format,
     });
   },
+  encodeWavChannels(
+    channels: Float32Array[],
+    sampleRate: number,
+    format: "float32" | "int16" = "int16",
+  ): Blob {
+    return encodeWavFromChannels(channels, {
+      sampleRate,
+      channelCount: Math.max(1, channels.length),
+      format,
+    });
+  },
   encodeWavMono,
   resampleLinear,
+  resampleChannels,
+  audioBufferToPlanarFloat,
   zipStore,
   async encodeMp3(buffer: AudioBuffer, bitrateKbps = 192): Promise<Blob> {
     return encodeMp3FromChannels(

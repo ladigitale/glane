@@ -16,6 +16,11 @@ export interface AudioCaptureSource {
   readonly stream: MediaStream | null;
 }
 
+export type MediaStreamCaptureSourceOpts = {
+  /** Preferred input; empty / omitted → browser default. */
+  deviceId?: string;
+};
+
 /** Prefer mono; never force sampleRate (avoids extra browser resample). */
 const FIELD_BASE: MediaTrackConstraints = {
   channelCount: 1,
@@ -56,23 +61,44 @@ function isOverconstrained(err: unknown): boolean {
   );
 }
 
+function withDeviceId(
+  base: MediaTrackConstraints,
+  deviceId: string | undefined,
+): MediaTrackConstraints {
+  if (!deviceId) return base;
+  return { ...base, deviceId: { ideal: deviceId } };
+}
+
 export class MediaStreamCaptureSource implements AudioCaptureSource {
   #stream: MediaStream | null = null;
+  #deviceId: string | undefined;
+
+  constructor(opts: MediaStreamCaptureSourceOpts = {}) {
+    this.#deviceId = opts.deviceId?.trim() || undefined;
+  }
 
   get stream(): MediaStream | null {
     return this.#stream;
+  }
+
+  get deviceId(): string | undefined {
+    return this.#deviceId;
+  }
+
+  setDeviceId(deviceId: string | undefined): void {
+    this.#deviceId = deviceId?.trim() || undefined;
   }
 
   async start(): Promise<CaptureConstraintsResult> {
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: FIELD_EXACT,
+        audio: withDeviceId(FIELD_EXACT, this.#deviceId),
       });
     } catch (err) {
       if (!isOverconstrained(err)) throw err;
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: FIELD_SOFT,
+        audio: withDeviceId(FIELD_SOFT, this.#deviceId),
       });
     }
     this.#stream = stream;

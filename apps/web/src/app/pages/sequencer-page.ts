@@ -73,6 +73,7 @@ import {
   type BounceResult,
   type SoundCloudStatus,
 } from "../export-publish.js";
+import { seqOctatrackExport } from "../seq-octatrack-export.js";
 import { listenShare, type ListenMeta } from "../listen-share.js";
 import { auth } from "../auth.js";
 import {
@@ -2157,7 +2158,18 @@ export class GlSequencerPage extends LitElement {
                 ${glIcon("download", { slot: "prefix", size: "xs" })}
                 ${t("export.downloadMp3")}
               </sonic-button>
+              <sonic-button
+                variant="outline"
+                type="neutral"
+                ?disabled=${!!busy}
+                ?loading=${busy === t("export.octatrackSlices")}
+                @click=${() => void this.#exportOctatrackSlices()}
+              >
+                ${glIcon("download", { slot: "prefix", size: "xs" })}
+                ${t("export.octatrackSlices")}
+              </sonic-button>
             </div>
+            <p class="m-0 text-sm text-neutral-9">${t("export.octatrackHint")}</p>
             <div class="row flex flex-wrap items-center gap-2">
               <strong>${t("export.soundcloud")}</strong>
               ${sc?.connected
@@ -2918,6 +2930,38 @@ export class GlSequencerPage extends LitElement {
       kind,
       kind === "wav" ? bounce.wav : bounce.mp3,
     );
+  }
+
+  async #exportOctatrackSlices(): Promise<void> {
+    if (!this.#engine || !this.project) return;
+    this.exportBusy = t("export.octatrackSlices");
+    this.exportError = null;
+    try {
+      this.#engine ??= new TransportEngine();
+      const scheduled = await this.#buildSchedule({ ignoreLoop: true });
+      if (scheduled.length === 0) {
+        this.exportError = t("export.empty");
+        return;
+      }
+      const { blob } = await seqOctatrackExport.buildZip({
+        engine: this.#engine,
+        clips: scheduled,
+        tracks: this.tracks,
+        trackInserts: this.tracks.map(trackToInsertConfig),
+        project: this.project,
+        lengthTick: this.#projectLengthTick(),
+        title: this.exportTitle || this.project.title || "glane",
+      });
+      seqOctatrackExport.download(
+        this.exportTitle || this.project.title || "glane",
+        blob,
+      );
+    } catch (e) {
+      this.exportError =
+        e instanceof Error ? e.message : t("export.error");
+    } finally {
+      this.exportBusy = null;
+    }
   }
 
   async #scConnect(): Promise<void> {

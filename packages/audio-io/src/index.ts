@@ -12,4 +12,11 @@ export {
   type LiveCaptureOpts,
 } from "./live-capture.js";
 export { audioExport, type EncodeWavOpts } from "./export/audio-export.js";
+export {
+  octatrackOt,
+  OT_MAX_SLICES,
+  OT_SLICE_LOOP_OFF,
+  type OtEncodeOpts,
+  type OtSlice,
+} from "./export/octatrack-ot.js";
 
