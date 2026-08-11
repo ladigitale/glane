@@ -1,4 +1,5 @@
-# Mounted into Tadaaa edge at /etc/caddy/cohost/glane.caddy
+# Copied onto the Tadaaa host at deploy/cohost/glane.caddy (directory volume).
+# Do not Docker-mount this file into /etc/caddy/cohost/ (parent is already a RO volume).
 # Hosts come from edge container env (see compose.prod.glane-cohost.yaml).
 
 {$GLANE_APP_SERVER_NAME:glane.example.com} {

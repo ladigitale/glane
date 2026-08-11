@@ -1,11 +1,13 @@
 # Optional overlay for Tadaaa when co-hosting Glane on the same VPS.
-# From ~/tadaaa (adjust GLANE_ROOT):
-#   docker network create web   # once
-#   export GLANE_ROOT=/root/glane
-#   docker compose -f compose.prod.yaml -f /root/glane/deploy/tadaaa-cohost/compose.prod.glane-cohost.yaml up -d edge
+# From ~/tadaaa:
+#   1) Ensure Caddyfile.edge ends with: import /etc/caddy/cohost/*.caddy
+#   2) Copy snippet into Tadaaa cohost dir (host path, not a nested Docker mount):
+#        cp "$GLANE_ROOT/deploy/tadaaa-cohost/glane.caddy" deploy/cohost/glane.caddy
+#   3) docker network create web || true
+#   4) docker compose -f compose.prod.yaml -f "$GLANE_ROOT/deploy/tadaaa-cohost/compose.prod.glane-cohost.yaml" up -d edge
 #
-# Requires deploy/Caddyfile.edge to `import /etc/caddy/cohost/*.caddy`
-# (see Caddyfile.edge patch in Glane .ops/deploy.md / tadaaa repo).
+# Do NOT bind-mount a file into /etc/caddy/cohost/ — that directory is already a
+# read-only volume from ./deploy/cohost. Place glane.caddy on the host instead.
 
 services:
   edge:
@@ -14,7 +16,6 @@ services:
       GLANE_API_SERVER_NAME: ${GLANE_API_SERVER_NAME:-glane-api.tadaaa.space}
     volumes:
       - ${GLANE_ROOT:-/root/glane}/apps/web/dist:/srv-glane:ro
-      - ${GLANE_ROOT:-/root/glane}/deploy/tadaaa-cohost/glane.caddy:/etc/caddy/cohost/glane.caddy:ro
     networks:
       default: {}
       web: {}

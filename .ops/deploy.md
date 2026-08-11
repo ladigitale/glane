@@ -87,20 +87,24 @@ docker compose -f compose.prod.yaml -f compose.prod.cohost.yaml exec -T php sh -
 docker compose -f compose.prod.yaml -f compose.prod.cohost.yaml exec -T php \
   bin/console doctrine:migrations:migrate --no-interaction
 
-# 2) Tadaaa — import line + cohost mount (need Caddyfile with import /etc/caddy/cohost/*.caddy)
+# 2) Tadaaa — import + snippet on host + edge on network web
 cd /root/tadaaa
-git pull --ff-only   # or patch Caddyfile.edge manually if not yet merged
-# Optional in tadaaa .env:
-#   GLANE_ROOT=/root/glane
-#   GLANE_APP_SERVER_NAME=glane.tadaaa.space
-#   GLANE_API_SERVER_NAME=glane-api.tadaaa.space
-#   WEB_NETWORK=web
+git pull --ff-only   # or patch Caddyfile / compose manually (see below)
+
+# Caddyfile must end with import (add once if missing):
+grep -q 'import /etc/caddy/cohost' deploy/Caddyfile.edge \
+  || printf '\nimport /etc/caddy/cohost/*.caddy\n' >> deploy/Caddyfile.edge
+
+# compose.prod.yaml must mount ./deploy/cohost (add if missing after pull)
+mkdir -p deploy/cohost
+cp /root/glane/deploy/tadaaa-cohost/glane.caddy deploy/cohost/glane.caddy
+
 export GLANE_ROOT=/root/glane
 export GLANE_APP_SERVER_NAME=glane.tadaaa.space
 export GLANE_API_SERVER_NAME=glane-api.tadaaa.space
 docker compose -f compose.prod.yaml \
   -f /root/glane/deploy/tadaaa-cohost/compose.prod.glane-cohost.yaml \
-  up -d edge
+  up -d --force-recreate edge
 
 # 3) Smoke
 curl -fsS https://glane-api.tadaaa.space/api/health
@@ -113,8 +117,7 @@ If Tadaaa cannot pull yet, add this line at the end of `~/tadaaa/deploy/Caddyfil
 import /etc/caddy/cohost/*.caddy
 ```
 
-and ensure `compose.prod.yaml` mounts `./deploy/cohost:/etc/caddy/cohost:ro` (create an empty `deploy/cohost` dir).
-
+and ensure `compose.prod.yaml` mounts `./deploy/cohost:/etc/caddy/cohost:ro` (create the dir). Place `glane.caddy` **on the host** under `deploy/cohost/` — do not bind-mount a file into that RO volume.
 ## Env files
 
 | File | Role |
