@@ -40,6 +40,14 @@ yarn prod:update -- --pull
 | Volumes | Prefixed by compose project name (`glane_*` vs `tada_*`). Listen MP3s on volume `listen_data`. |
 | DNS | Distinct `APP_SERVER_NAME` / `API_SERVER_NAME` (e.g. `glane.example.com` / `glane-api.example.com`). |
 
+## Env files
+
+| File | Role |
+|------|------|
+| `/.env` (gitignored) | Compose secrets — written by `install-prod.sh` |
+| `apps/api/.env` (committed) | Symfony placeholders so `composer dump-env prod` works in the image; Compose env overrides at runtime |
+| `apps/api/.env.local` | Local overrides only (gitignored) |
+
 ## Manual env sketch
 
 ```bash

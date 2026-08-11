@@ -1,7 +1,8 @@
 node_modules/
 dist/
 *.local
-.env
+# Root Compose secrets only — apps/api/.env is committed placeholders for dump-env.
+/.env
 .env.local
 .DS_Store
 *.log
