@@ -13,8 +13,8 @@
     "test": "tsx --test src/export/octatrack-ot.test.ts"
   },
   "dependencies": {
-    "@glane/core-model": "0.1.0",
-    "lamejs": "^1.2.1"
+    "@breezystack/lamejs": "^1.2.7",
+    "@glane/core-model": "0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

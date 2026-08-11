@@ -12,6 +12,10 @@ import { loadSampleAudio } from "./load-sample-audio.js";
 const IMPORT_SESSION_NOTES = "glane:import";
 const IMPORT_SESSION_TITLE = "Importés";
 
+/** Marker on stub sessions that hold sequencer mix bounces. */
+const EXPORT_SESSION_NOTES = "glane:export";
+const EXPORT_SESSION_TITLE = "Exports";
+
 /** Soft-delete sample, drop OPFS clip, detach/remove clips that reference it. */
 export async function deleteSample(sampleId: string): Promise<void> {
   const sample = await db.samples.get(sampleId);
@@ -109,13 +113,14 @@ function withCopySuffix(label: string): string {
   return `${base} (copie)`;
 }
 
-/** Stub session used when samples are shared into a project without their hunt. */
-export async function ensureImportSession(
+async function ensureStubSession(
   projectId: string,
+  notes: string,
+  title: string,
   sampleRate = 48_000,
 ): Promise<Session> {
   const all = await db.sessions.where("projectId").equals(projectId).toArray();
-  const hit = all.find((s) => !s.deletedAt && s.notes === IMPORT_SESSION_NOTES);
+  const hit = all.find((s) => !s.deletedAt && s.notes === notes);
   if (hit) return hit;
 
   const now = nowIso();
@@ -127,8 +132,8 @@ export async function ensureImportSession(
     durationMs: 0,
     sampleRate,
     channelCount: 1,
-    title: IMPORT_SESSION_TITLE,
-    notes: IMPORT_SESSION_NOTES,
+    title,
+    notes,
     status: "ready",
     gapMarkers: [],
     createdAt: now,
@@ -137,6 +142,32 @@ export async function ensureImportSession(
   };
   await db.sessions.put(session);
   return session;
+}
+
+/** Stub session used when samples are shared into a project without their hunt. */
+export async function ensureImportSession(
+  projectId: string,
+  sampleRate = 48_000,
+): Promise<Session> {
+  return ensureStubSession(
+    projectId,
+    IMPORT_SESSION_NOTES,
+    IMPORT_SESSION_TITLE,
+    sampleRate,
+  );
+}
+
+/** Stub session for sequencer mix exports saved into the project library. */
+export async function ensureExportSession(
+  projectId: string,
+  sampleRate = 48_000,
+): Promise<Session> {
+  return ensureStubSession(
+    projectId,
+    EXPORT_SESSION_NOTES,
+    EXPORT_SESSION_TITLE,
+    sampleRate,
+  );
 }
 
 export type CloneSampleOpts = {
@@ -238,4 +269,152 @@ export async function duplicateSamples(sampleIds: string[]): Promise<number> {
     if (cloned) n++;
   }
   return n;
+}
+
+const IMPORT_ORIGIN = "import";
+const IMPORT_TAG = "import";
+
+function stripAudioExt(name: string): string {
+  const base = name.replace(/\.(wav|wave|mp3)$/i, "").trim();
+  return base || name;
+}
+
+function isImportableAudio(file: File): boolean {
+  const n = file.name.toLowerCase();
+  if (/\.(wav|wave|mp3)$/.test(n)) return true;
+  const t = file.type.toLowerCase();
+  return (
+    t === "audio/wav" ||
+    t === "audio/wave" ||
+    t === "audio/x-wav" ||
+    t === "audio/mpeg" ||
+    t === "audio/mp3"
+  );
+}
+
+function audioBufferToMonoPcm(buf: AudioBuffer): Float32Array {
+  const frames = buf.length;
+  const out = new Float32Array(frames);
+  if (buf.numberOfChannels === 1) {
+    out.set(buf.getChannelData(0));
+    return out;
+  }
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const ch = buf.getChannelData(c);
+    for (let i = 0; i < frames; i++) out[i]! += ch[i]!;
+  }
+  const inv = 1 / buf.numberOfChannels;
+  for (let i = 0; i < frames; i++) out[i]! *= inv;
+  return out;
+}
+
+async function decodeAudioFile(file: File): Promise<AudioBuffer> {
+  const ab = await file.arrayBuffer();
+  const ctx = new AudioContext();
+  try {
+    return await ctx.decodeAudioData(ab.slice(0));
+  } finally {
+    await ctx.close().catch(() => undefined);
+  }
+}
+
+export type ImportAudioResult = {
+  imported: number;
+  failed: number;
+  samples: Sample[];
+};
+
+/** Decode WAV/MP3 files into the project Importés session (OPFS + Dexie). */
+export async function importAudioFiles(
+  files: Iterable<File>,
+  projectId: string,
+): Promise<ImportAudioResult> {
+  const list = [...files].filter(isImportableAudio);
+  const samples: Sample[] = [];
+  let failed = 0;
+  let session: Session | null = null;
+
+  for (const file of list) {
+    try {
+      const buffer = await decodeAudioFile(file);
+      const pcm = audioBufferToMonoPcm(buffer);
+      if (pcm.length === 0) {
+        failed++;
+        continue;
+      }
+      session ??= await ensureImportSession(projectId, buffer.sampleRate);
+      const id = createEntityId();
+      const now = nowIso();
+      const durationMs = Math.max(
+        1,
+        Math.round((pcm.length / buffer.sampleRate) * 1000),
+      );
+      const label = stripAudioExt(file.name);
+      await sampleOpfs.savePcm(id, pcm, buffer.sampleRate, 1);
+      const sample: Sample = {
+        id,
+        sessionId: session.id,
+        projectId,
+        captureName: IMPORT_SESSION_TITLE,
+        sourceOffsetMs: 0,
+        durationMs,
+        class: "unclassified",
+        tags: [IMPORT_TAG],
+        confidence: 0,
+        name: label,
+        favorite: false,
+        originVersion: IMPORT_ORIGIN,
+        createdAt: now,
+        updatedAt: now,
+        revision: 0,
+      };
+      await db.samples.put(sample);
+      samples.push(sample);
+    } catch {
+      failed++;
+    }
+  }
+
+  return { imported: samples.length, failed, samples };
+}
+
+/** Persist a bounced mix as a new sample in the project library (mono PCM). */
+export async function saveBounceToLibrary(
+  projectId: string,
+  buffer: AudioBuffer,
+  name: string,
+): Promise<Sample> {
+  const pcm = audioBufferToMonoPcm(buffer);
+  if (pcm.length === 0) {
+    throw new Error("empty_bounce");
+  }
+  const sampleRate = buffer.sampleRate;
+  const session = await ensureExportSession(projectId, sampleRate);
+  const id = createEntityId();
+  const now = nowIso();
+  const label = name.trim() || "Export";
+  const durationMs = Math.max(1, Math.round((pcm.length / sampleRate) * 1000));
+
+  await sampleOpfs.savePcm(id, pcm, sampleRate, 1);
+
+  const sample: Sample = {
+    id,
+    sessionId: session.id,
+    projectId,
+    captureName: EXPORT_SESSION_TITLE,
+    sourceOffsetMs: 0,
+    durationMs,
+    class: "texture",
+    tags: ["export", "bounce"],
+    confidence: 1,
+    name: label,
+    userName: label,
+    favorite: false,
+    originVersion: "seq-bounce",
+    createdAt: now,
+    updatedAt: now,
+    revision: 0,
+  };
+  await db.samples.put(sample);
+  return sample;
 }

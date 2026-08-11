@@ -6,7 +6,7 @@ Arrangements need a portable bounce (WAV/MP3) without requiring sync. Artists al
 
 ## Decision
 
-1. **Local bounce first** — `TransportEngine.renderOffline` + client encode (int16 WAV, MP3 via lamejs). Download works offline; no API required.
+1. **Local bounce first** — `TransportEngine.renderOffline` + client encode (int16 WAV, MP3 via `@breezystack/lamejs`). Download works offline; no API required.
 2. **SoundCloud** — OAuth 2.1 + PKCE on the Glane API; tokens stored on `User`. Track upload is **proxied** same-origin (`POST /api/publish/soundcloud/tracks`) so COEP pages remain able to publish. Direct browser→SoundCloud upload is not used.
 3. **Bandcamp** — assisted only: download MP3, copy title, open Bandcamp upload/login. No automated upload.
 4. **Adapters** — keep platform glue behind a small front façade (`exportPublish`) and API services so Archive.org / PeerTube / etc. can land later without touching the sequencer UI.

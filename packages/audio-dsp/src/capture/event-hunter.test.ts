@@ -8,8 +8,8 @@ import { DSP_THRESHOLDS } from "../config/thresholds.ts";
 import { runProcessJob } from "../process-job.ts";
 
 describe("EnvelopeHunter", () => {
-  it("exposes live thresholds 1.5.2", () => {
-    assert.equal(DSP_THRESHOLDS.version, "1.5.2");
+  it("exposes live thresholds 1.5.3", () => {
+    assert.equal(DSP_THRESHOLDS.version, "1.5.3");
     assert.ok(DSP_THRESHOLDS.live.maxDurationMs >= 20_000);
     assert.ok(DSP_THRESHOLDS.live.openFloorMin < DSP_THRESHOLDS.live.openFloorFactor);
     assert.ok(DSP_THRESHOLDS.live.openFloorMax > DSP_THRESHOLDS.live.openFloorFactor);
@@ -59,53 +59,66 @@ describe("EnvelopeHunter", () => {
     assert.equal(hunter.openFloorFactor, DSP_THRESHOLDS.live.openFloorMin);
   });
 
-  it("scans only a short horizon of new audio", () => {
+  it("accumulates contiguous deltas without hop-remainder gaps", () => {
     const sr = 48_000;
-    const hunter = new EnvelopeHunter(sr);
     const hop = DSP_THRESHOLDS.live.envelopeHop;
-    const horizon = Math.floor(
-      (DSP_THRESHOLDS.live.analyseHorizonMs / 1000) * sr,
+    const hunter = new EnvelopeHunter(sr, { openFloorFactor: 1.05 });
+
+    // Quiet floor
+    for (let t = 0; t < 4; t++) {
+      hunter.analyse(new Float32Array(hop * 4), 1000 + t * 150);
+    }
+
+    // Sustained loud tone — feed deltas whose length is NOT a multiple of hop
+    // (old bug dropped length % hop every tick → ~150 ms rhythm).
+    const chunkLen = hop * 3 + 17;
+    let extraction = null as ReturnType<EnvelopeHunter["analyse"]>["extraction"];
+    for (let t = 0; t < 40; t++) {
+      const delta = new Float32Array(chunkLen);
+      for (let i = 0; i < delta.length; i++) {
+        delta[i] = 0.4 * Math.sin((2 * Math.PI * 220 * (t * chunkLen + i)) / sr);
+      }
+      const r = hunter.analyse(delta, 2000 + t * 150);
+      if (r.extraction) {
+        extraction = r.extraction;
+        break;
+      }
+    }
+    // Force close if still open
+    if (!extraction) {
+      extraction = hunter.flush();
+    }
+    assert.ok(extraction && extraction.pcm.length > hop * 10);
+    // Captured length should be close to fed loud audio (no systematic 17-sample holes)
+    const expectedMin = chunkLen * 8;
+    assert.ok(
+      extraction.pcm.length >= expectedMin * 0.85,
+      `expected >= ${expectedMin * 0.85}, got ${extraction.pcm.length}`,
     );
-    const maxFrames = Math.floor(horizon / hop) + 4;
-
-    const n1 = sr * 3;
-    hunter.analyse(new Float32Array(n1), 1000);
-    assert.ok(hunter.lastFramesScanned <= maxFrames);
-
-    const n2 = n1 + Math.floor(sr * 0.2);
-    const pcm2 = new Float32Array(n2);
-    hunter.analyse(pcm2, 1200);
-    assert.ok(hunter.lastFramesScanned <= maxFrames);
   });
 
   it("captures a loud burst as an extraction", () => {
     const sr = 48_000;
-    const hunter = new EnvelopeHunter(sr);
+    const hunter = new EnvelopeHunter(sr, { openFloorFactor: 1.05 });
     const hop = DSP_THRESHOLDS.live.envelopeHop;
-    // Seed noise floor with quiet
-    const quiet = new Float32Array(sr);
-    hunter.analyse(quiet, 1000);
 
-    const burst = new Float32Array(Math.floor(sr * 0.4));
-    for (let i = 0; i < burst.length; i++) {
-      burst[i] = (i % 2 === 0 ? 0.5 : -0.5) * Math.exp(-i / (sr * 0.15));
+    for (let t = 0; t < 3; t++) {
+      hunter.analyse(new Float32Array(hop * 8), 1000 + t * 150);
     }
-    // Feed in chunks like the live path
-    let extraction = null;
-    for (let t = 0; t < 8; t++) {
-      const win = new Float32Array(Math.floor(sr * 0.5));
-      const offset = Math.min(burst.length, t * hop * 4);
-      win.set(burst.subarray(0, Math.min(burst.length, win.length)));
-      if (offset > 0) {
-        // shift: put later part at end
-        win.fill(0);
-        const start = Math.min(burst.length - 1, t * Math.floor(sr * 0.05));
-        win.set(burst.subarray(start, Math.min(burst.length, start + win.length)));
-      }
-      const r = hunter.analyse(win, 2000 + t * 150);
+
+    const burst = new Float32Array(Math.floor(sr * 0.35));
+    for (let i = 0; i < burst.length; i++) {
+      burst[i] = (i % 2 === 0 ? 0.5 : -0.5) * Math.exp(-i / (sr * 0.12));
+    }
+
+    let extraction = null as ReturnType<EnvelopeHunter["analyse"]>["extraction"];
+    const step = hop * 4 + 3;
+    for (let off = 0; off < burst.length; off += step) {
+      const delta = burst.subarray(off, Math.min(burst.length, off + step));
+      const r = hunter.analyse(new Float32Array(delta), 2000 + off);
       if (r.extraction) extraction = r.extraction;
     }
-    // May or may not extract depending on envelope timing — at least no throw
+    if (!extraction) extraction = hunter.flush();
     assert.ok(extraction === null || extraction.pcm.length > hop);
   });
 });

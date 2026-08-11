@@ -11,7 +11,7 @@ import tailwind from "../../css/tailwind";
 import { subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
-import { t } from "../i18n/messages.js";
+import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { processQueue } from "../process-queue.js";
@@ -22,6 +22,7 @@ import {
   deleteSamples,
   duplicateSample,
   duplicateSamples,
+  importAudioFiles,
   renameSample,
   setFavoriteMany,
   toggleFavorite,
@@ -332,6 +333,27 @@ export class GlLibraryPage extends LitElement {
             this.selected = new Set();
           }}
         ></gl-pop-select>
+        <sonic-button
+          type="neutral"
+          variant="outline"
+          size="sm"
+          ?disabled=${this.batchBusy}
+          @click=${() =>
+            this.renderRoot
+              .querySelector<HTMLInputElement>("#import-audio")
+              ?.click()}
+        >
+          ${glIcon("upload", { slot: "prefix", size: "xs" })}
+          ${t("library.import")}
+        </sonic-button>
+        <input
+          id="import-audio"
+          class="sr-only"
+          type="file"
+          accept=".wav,.wave,.mp3,audio/wav,audio/wave,audio/x-wav,audio/mpeg,audio/mp3"
+          multiple
+          @change=${(e: Event) => void this.#onImportFiles(e)}
+        />
         ${renderMoreMenu({
           ariaLabel: t("library.batchMore"),
           items: batchItems,
@@ -554,6 +576,30 @@ export class GlLibraryPage extends LitElement {
     try {
       await duplicateSamples(ids);
       await this.#reload();
+    } finally {
+      this.batchBusy = false;
+    }
+  }
+
+  async #onImportFiles(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    const files = input.files ? [...input.files] : [];
+    input.value = "";
+    if (files.length === 0) return;
+    const projectId = await projectWorkspace.currentId();
+    this.batchBusy = true;
+    try {
+      const { imported, failed } = await importAudioFiles(files, projectId);
+      await this.#reload();
+      if (imported === 0) {
+        await glDialog.alert(t("library.importFailed"));
+        return;
+      }
+      const summary =
+        failed > 0
+          ? tf("library.importSummaryPartial", { imported, failed })
+          : tf("library.importSummary", { imported });
+      await glDialog.alert(`${t("library.importDone")} — ${summary}`);
     } finally {
       this.batchBusy = false;
     }

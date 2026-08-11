@@ -1,4 +1,3 @@
-/// <reference path="../lamejs.d.ts" />
 /**
  * User-facing bounce encoding (WAV / MP3) + browser download.
  */
@@ -103,29 +102,8 @@ async function encodeMp3FromChannels(
   sampleRate: number,
   bitrateKbps = 192,
 ): Promise<Blob> {
-  // lamejs is CJS; Vite interop may expose default or named.
-  const mod = (await import("lamejs")) as {
-    Mp3Encoder?: new (
-      channels: number,
-      sampleRate: number,
-      kbps: number,
-    ) => {
-      encodeBuffer: (left: Int16Array, right?: Int16Array) => Int8Array;
-      flush: () => Int8Array;
-    };
-    default?: {
-      Mp3Encoder: new (
-        channels: number,
-        sampleRate: number,
-        kbps: number,
-      ) => {
-        encodeBuffer: (left: Int16Array, right?: Int16Array) => Int8Array;
-        flush: () => Int8Array;
-      };
-    };
-  };
-  const Mp3Encoder = mod.Mp3Encoder ?? mod.default?.Mp3Encoder;
-  if (!Mp3Encoder) throw new Error("lamejs Mp3Encoder unavailable");
+  // Maintained fork — npm `lamejs` 1.2.1 breaks under Vite (MPEGMode / circular deps).
+  const { Mp3Encoder } = await import("@breezystack/lamejs");
 
   const channelCount = Math.min(2, Math.max(1, channels.length));
   const encoder = new Mp3Encoder(channelCount, sampleRate, bitrateKbps);
@@ -156,6 +134,9 @@ async function encodeMp3FromChannels(
 }
 
 function downloadBlob(filename: string, blob: Blob): void {
+  if (!(blob instanceof Blob)) {
+    throw new Error("downloadBlob: expected Blob");
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

@@ -222,6 +222,8 @@ export class GlCapturePage extends LitElement {
   #hunt: Session | null = null;
   #analyseTimer: number | null = null;
   #clockTimer: number | null = null;
+  /** Absolute RollingPcmWindow cursor — gap-free EventHunter feed. */
+  #pcmCursor = 0;
   /** Mic open epoch (scout or record) — rate regulator. */
   #micStartedAt = 0;
   /** Recording epoch — clock display. */
@@ -966,6 +968,7 @@ export class GlCapturePage extends LitElement {
       this.#hunter = new EventHunter(this.#live.sampleRate, {
         openFloorFactor: sensitivityToOpenFloor(this.attackSensitivity),
       });
+      this.#pcmCursor = this.#live.rolling?.totalPushed ?? 0;
       this.micOpen = true;
       this.#micStartedAt = performance.now();
       this.#lastRateAdjustMs = this.#micStartedAt;
@@ -998,12 +1001,16 @@ export class GlCapturePage extends LitElement {
     this.#analysing = true;
     let extraction = null as ReturnType<EventHunter["analyse"]>["extraction"];
     try {
-      const maxSamples = Math.floor(
-        (DSP_THRESHOLDS.live.snapshotMs / 1000) * this.#live.sampleRate,
-      );
-      const win = rolling.snapshotRecent(maxSamples);
+      // Contiguous delta since last tick — never re-slice a sliding window
+      // (that used to drop `length % hop` samples every ~150 ms → regular chops).
+      const { pcm, fromAbs, toAbs } = rolling.snapshotFrom(this.#pcmCursor);
+      if (fromAbs > this.#pcmCursor) {
+        // Window overflowed the cursor — gap in capture; resync quietly.
+        this.#pcmCursor = fromAbs;
+      }
+      this.#pcmCursor = toAbs;
       const nowMs = performance.now();
-      const result = this.#hunter.analyse(win, nowMs);
+      const result = this.#hunter.analyse(pcm, nowMs);
       this.liveState = result.state;
       extraction = result.extraction;
       this.#regulateCaptureRate(nowMs);

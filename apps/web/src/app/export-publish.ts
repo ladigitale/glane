@@ -19,7 +19,8 @@ export type SoundCloudStatus = {
 export type BounceResult = {
   buffer: AudioBuffer;
   wav: Blob;
-  mp3: Blob;
+  /** Null until MP3 encode runs (`ensureMp3`). */
+  mp3: Blob | null;
 };
 
 async function bounceProject(opts: {
@@ -28,8 +29,17 @@ async function bounceProject(opts: {
   project: Project;
   lengthTick: number;
   tracks?: TrackInsertConfig[];
+  /** Default: wav only. Pass true when the caller needs MP3. */
+  encodeMp3?: boolean;
 }): Promise<BounceResult> {
-  const { engine, clips, project, lengthTick, tracks = [] } = opts;
+  const {
+    engine,
+    clips,
+    project,
+    lengthTick,
+    tracks = [],
+    encodeMp3 = false,
+  } = opts;
   const durationSamples = ticksToSamples(
     asTick(lengthTick),
     project.bpm,
@@ -51,11 +61,19 @@ async function bounceProject(opts: {
       }
     }
     const wav = audioExport.encodeWav(buffer, "int16");
-    const mp3 = await audioExport.encodeMp3(buffer, 192);
+    const mp3 = encodeMp3
+      ? await audioExport.encodeMp3(buffer, 192)
+      : null;
     return { buffer, wav, mp3 };
   } finally {
     engine.master.gain.value = prev;
   }
+}
+
+async function ensureMp3(bounce: BounceResult): Promise<Blob> {
+  if (bounce.mp3) return bounce.mp3;
+  bounce.mp3 = await audioExport.encodeMp3(bounce.buffer, 192);
+  return bounce.mp3;
 }
 
 async function fetchSoundCloudStatus(): Promise<SoundCloudStatus> {
@@ -155,6 +173,7 @@ function downloadExport(title: string, kind: "wav" | "mp3", blob: Blob): void {
 
 export const exportPublish = {
   bounceProject,
+  ensureMp3,
   fetchSoundCloudStatus,
   connectSoundCloud,
   disconnectSoundCloud,

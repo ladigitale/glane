@@ -76,6 +76,7 @@ import {
 import { seqOctatrackExport } from "../seq-octatrack-export.js";
 import { listenShare, type ListenMeta } from "../listen-share.js";
 import { auth } from "../auth.js";
+import { saveBounceToLibrary } from "../sample-actions.js";
 import {
   CANCEL_ZONE_H,
   MAX_PX_PER_TICK,
@@ -574,6 +575,7 @@ export class GlSequencerPage extends LitElement {
   @state() private exportBusy: string | null = null;
   @state() private exportError: string | null = null;
   @state() private exportPermalink: string | null = null;
+  @state() private exportLibraryOk: string | null = null;
   @state() private seqModal: SeqConfigModal = null;
   @state() private draftBpm = 120;
   @state() private draftBars = 16;
@@ -2143,7 +2145,7 @@ export class GlSequencerPage extends LitElement {
                 type="primary"
                 ?disabled=${!!busy}
                 ?loading=${busy === t("export.bouncing") ||
-                busy === t("export.encoding")}
+                busy === t("export.encodingWav")}
                 @click=${() => void this.#exportDownload("wav")}
               >
                 ${glIcon("download", { slot: "prefix", size: "xs" })}
@@ -2153,6 +2155,7 @@ export class GlSequencerPage extends LitElement {
                 variant="outline"
                 type="neutral"
                 ?disabled=${!!busy}
+                ?loading=${busy === t("export.encodingMp3")}
                 @click=${() => void this.#exportDownload("mp3")}
               >
                 ${glIcon("download", { slot: "prefix", size: "xs" })}
@@ -2170,6 +2173,20 @@ export class GlSequencerPage extends LitElement {
               </sonic-button>
             </div>
             <p class="m-0 text-sm text-neutral-9">${t("export.octatrackHint")}</p>
+            <div class="row flex flex-wrap items-center gap-2">
+              <sonic-button
+                type="primary"
+                ?disabled=${!!busy}
+                ?loading=${busy === t("export.savingLibrary") ||
+                busy === t("export.bouncing") ||
+                busy === t("export.encodingWav")}
+                @click=${() => void this.#exportToLibrary()}
+              >
+                ${glIcon("library", { slot: "prefix", size: "xs" })}
+                ${t("export.toLibrary")}
+              </sonic-button>
+            </div>
+            <p class="m-0 text-sm text-neutral-9">${t("export.toLibraryHint")}</p>
             <div class="row flex flex-wrap items-center gap-2">
               <strong>${t("export.soundcloud")}</strong>
               ${sc?.connected
@@ -2328,16 +2345,22 @@ export class GlSequencerPage extends LitElement {
                 ? html`<sonic-alert status="error" label="Erreur"
                     >${this.exportError}</sonic-alert
                   >`
-                : this.exportPermalink
-                  ? html`<sonic-alert status="success" label=${t("export.uploaded")}>
-                      <a
-                        href=${this.exportPermalink}
-                        target="_blank"
-                        rel="noopener"
-                        >${this.exportPermalink}</a
-                      >
-                    </sonic-alert>`
-                  : nothing}
+                : this.exportLibraryOk
+                  ? html`<sonic-alert
+                      status="success"
+                      label=${t("export.toLibraryDone")}
+                      >${this.exportLibraryOk}</sonic-alert
+                    >`
+                  : this.exportPermalink
+                    ? html`<sonic-alert status="success" label=${t("export.uploaded")}>
+                        <a
+                          href=${this.exportPermalink}
+                          target="_blank"
+                          rel="noopener"
+                          >${this.exportPermalink}</a
+                        >
+                      </sonic-alert>`
+                    : nothing}
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
@@ -2882,6 +2905,7 @@ export class GlSequencerPage extends LitElement {
     }
     this.exportError = null;
     this.exportPermalink = null;
+    this.exportLibraryOk = null;
     this.#bounceCache = null;
     set(exportFormKey, {
       title: this.project?.title ?? "Glane",
@@ -2891,28 +2915,36 @@ export class GlSequencerPage extends LitElement {
     this.scStatus = await exportPublish.fetchSoundCloudStatus();
   }
 
-  async #ensureBounce(): Promise<BounceResult | null> {
+  async #ensureBounce(needMp3 = false): Promise<BounceResult | null> {
     if (!this.#engine || !this.project) return null;
-    if (this.#bounceCache) return this.#bounceCache;
+    if (this.#bounceCache && (!needMp3 || this.#bounceCache.mp3)) {
+      return this.#bounceCache;
+    }
     this.exportBusy = t("export.bouncing");
     this.exportError = null;
     try {
       this.#engine ??= new TransportEngine();
-      const scheduled = await this.#buildSchedule({ ignoreLoop: true });
-      if (scheduled.length === 0) {
-        this.exportError = t("export.empty");
-        return null;
+      if (!this.#bounceCache) {
+        const scheduled = await this.#buildSchedule({ ignoreLoop: true });
+        if (scheduled.length === 0) {
+          this.exportError = t("export.empty");
+          return null;
+        }
+        this.exportBusy = t("export.encodingWav");
+        this.#bounceCache = await exportPublish.bounceProject({
+          engine: this.#engine,
+          clips: scheduled,
+          project: this.project,
+          lengthTick: this.#projectLengthTick(),
+          tracks: this.tracks.map(trackToInsertConfig),
+          encodeMp3: false,
+        });
       }
-      this.exportBusy = t("export.encoding");
-      const result = await exportPublish.bounceProject({
-        engine: this.#engine,
-        clips: scheduled,
-        project: this.project,
-        lengthTick: this.#projectLengthTick(),
-        tracks: this.tracks.map(trackToInsertConfig),
-      });
-      this.#bounceCache = result;
-      return result;
+      if (needMp3 && !this.#bounceCache.mp3) {
+        this.exportBusy = t("export.encodingMp3");
+        await exportPublish.ensureMp3(this.#bounceCache);
+      }
+      return this.#bounceCache;
     } catch (e) {
       this.exportError =
         e instanceof Error ? e.message : t("export.error");
@@ -2923,13 +2955,35 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #exportDownload(kind: "wav" | "mp3"): Promise<void> {
-    const bounce = await this.#ensureBounce();
+    const bounce = await this.#ensureBounce(kind === "mp3");
     if (!bounce) return;
-    exportPublish.downloadExport(
-      this.exportTitle || "glane",
-      kind,
-      kind === "wav" ? bounce.wav : bounce.mp3,
-    );
+    const blob =
+      kind === "wav" ? bounce.wav : await exportPublish.ensureMp3(bounce);
+    exportPublish.downloadExport(this.exportTitle || "glane", kind, blob);
+  }
+
+  async #exportToLibrary(): Promise<void> {
+    if (!this.project) return;
+    this.exportLibraryOk = null;
+    this.exportPermalink = null;
+    const bounce = await this.#ensureBounce(false);
+    if (!bounce) return;
+    this.exportBusy = t("export.savingLibrary");
+    this.exportError = null;
+    try {
+      const sample = await saveBounceToLibrary(
+        this.project.id,
+        bounce.buffer,
+        this.exportTitle || this.project.title || "Export",
+      );
+      await this.#loadSamples();
+      this.exportLibraryOk = sample.userName ?? sample.name;
+    } catch (e) {
+      this.exportError =
+        e instanceof Error ? e.message : t("export.error");
+    } finally {
+      this.exportBusy = null;
+    }
   }
 
   async #exportOctatrackSlices(): Promise<void> {
@@ -2987,8 +3041,8 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #scUpload(): Promise<void> {
-    const bounce = await this.#ensureBounce();
-    if (!bounce) return;
+    const bounce = await this.#ensureBounce(true);
+    if (!bounce?.mp3) return;
     this.exportBusy = t("export.uploading");
     this.exportError = null;
     this.exportPermalink = null;
@@ -3009,8 +3063,8 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #bandcampAssist(): Promise<void> {
-    const bounce = await this.#ensureBounce();
-    if (!bounce) return;
+    const bounce = await this.#ensureBounce(true);
+    if (!bounce?.mp3) return;
     exportPublish.downloadExport(
       this.exportTitle || "glane",
       "mp3",
@@ -3023,12 +3077,11 @@ export class GlSequencerPage extends LitElement {
     this.exportBusy = t("export.bouncing");
     this.exportError = null;
     try {
-      const bounce = await this.#ensureBounce();
-      if (!bounce) {
+      const bounce = await this.#ensureBounce(true);
+      if (!bounce?.mp3) {
         this.exportError = t("export.empty");
         return;
       }
-      this.exportBusy = t("export.encoding");
       const durationMs = Math.round(
         (bounce.buffer.length / bounce.buffer.sampleRate) * 1000,
       );

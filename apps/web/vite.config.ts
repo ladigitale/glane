@@ -37,6 +37,6 @@ export default defineConfig({
     }),
   ],
   optimizeDeps: {
-    include: ["lamejs"],
+    include: ["@breezystack/lamejs"],
   },
 });

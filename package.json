@@ -7,7 +7,6 @@
     "packages/*"
   ],
   "scripts": {
-    "postinstall": "node scripts/patch-lamejs.mjs",
     "status": "bash scripts/glane.sh status",
     "setup": "bash scripts/glane.sh setup",
     "update": "bash scripts/glane.sh update",

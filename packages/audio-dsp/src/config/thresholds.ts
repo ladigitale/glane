@@ -3,7 +3,7 @@
  * Units and useful ranges documented per field.
  */
 export const DSP_THRESHOLDS = {
-  version: "1.5.2",
+  version: "1.5.3",
   frameSize: 1024,
   hopSize: 256,
   /** Adaptive noise floor: 10th percentile over this window (ms). */
