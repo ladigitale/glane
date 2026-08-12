@@ -8,6 +8,8 @@ import { deleteSample } from "./sample-actions.js";
 
 export const SAMPLES_CULLED_EVENT = "glane:samples-culled";
 
+/** Matches import-for-hunt session notes — no density cull for these. */
+const CULL_EXEMPT_NOTES = new Set(["glane:file-song", "glane:file-whole"]);
 export const INTEREST_CULL = {
   /** Keep about target×minutes; slight slack before deleting. */
   headroom: 1.15,
@@ -52,6 +54,9 @@ export async function cullExcessProcessedSamples(
 ): Promise<CullResult> {
   const session = await db.sessions.get(sessionId);
   if (!session) return { culledIds: [], kept: 0, target: 0 };
+  if (CULL_EXEMPT_NOTES.has(session.notes ?? "")) {
+    return { culledIds: [], kept: 0, target: 0 };
+  }
 
   const prefs = await ensurePrefs();
   const targetPerMin =

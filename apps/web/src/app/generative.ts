@@ -95,6 +95,9 @@ export type SequenceSampleIn = {
   class: string;
   favorite: boolean;
   loopScore?: number;
+  /** Detected seamless loop region on the sample (ms). */
+  loopStartMs?: number;
+  loopEndMs?: number;
   pitchHz?: number;
   noteName?: string;
   harmonicity?: number;
@@ -123,6 +126,8 @@ export type SequenceClipPlan = {
   contentOffsetMs: number;
   gainDb: number;
   loopEnabled: boolean;
+  /** When set with loopEnabled, only this window (from contentOffset) repeats. */
+  loopLengthMs?: number;
   fadeInMs: number;
   fadeOutMs: number;
   fadeCurve: FadeCurve;
@@ -1367,6 +1372,162 @@ function pickPitchSemitones(opts: {
   return semis;
 }
 
+function tempoAlignedForLoop(
+  sample: SequenceSampleIn,
+  projectBpm: number,
+): boolean {
+  const src = sample.analysisBpm;
+  if (src == null || src < 40 || src > 240) {
+    return (sample.loopScore ?? 0) > 0.55;
+  }
+  const ratio = projectBpm / src;
+  if (Math.abs(ratio - 1) < 0.08) return true;
+  // Half-time / double-time / … also count as grid-aligned.
+  return nearTempoPow2(ratio);
+}
+
+/**
+ * For tempo-matched loops: pick a musical sub-window to repeat instead of
+ * always looping the whole file (or never looping a long take).
+ */
+function pickLoopContent(opts: {
+  sample: SequenceSampleIn;
+  role: ExprRole;
+  lengthMs: number;
+  bpm: number;
+  beatsPerBar: number;
+  loopEnabled: boolean;
+  stretchMode: StretchMode;
+  energy: number;
+  variation: number;
+  rnd: () => number;
+}): { contentOffsetMs: number; loopEnabled: boolean; loopLengthMs?: number } {
+  const {
+    sample,
+    role,
+    lengthMs,
+    bpm,
+    beatsPerBar,
+    stretchMode,
+    energy,
+    variation,
+    rnd,
+  } = opts;
+  let loopEnabled = opts.loopEnabled;
+
+  const beatMs = 60_000 / Math.max(1, bpm);
+  const barMs = beatMs * Math.max(1, beatsPerBar);
+  const loopish =
+    (sample.loopScore ?? 0) > 0.4 ||
+    (sample.loopStartMs != null && sample.loopEndMs != null);
+  const roleOk =
+    role === "loop" ||
+    role === "texture" ||
+    role === "chord" ||
+    role === "perc" ||
+    role === "hat";
+  const canPartial =
+    stretchMode === "off" &&
+    loopish &&
+    roleOk &&
+    tempoAlignedForLoop(sample, bpm) &&
+    sample.durationMs > barMs * 1.15;
+
+  if (canPartial && rnd() < 0.5 + variation * 0.3 + energy * 0.1) {
+    const regionStart = sample.loopStartMs ?? 0;
+    const regionEnd =
+      sample.loopEndMs != null && sample.loopEndMs > regionStart
+        ? sample.loopEndMs
+        : sample.durationMs;
+    const regionLen = Math.max(beatMs, regionEnd - regionStart);
+
+    const sliceChoices = [barMs, barMs * 2, beatMs * 2, beatMs]
+      .map((ms) => Math.round(ms))
+      .filter((ms) => ms >= beatMs * 0.85 && ms <= regionLen * 0.98);
+    const loopLengthMs =
+      sliceChoices[pickInt(rnd, 0, Math.max(0, sliceChoices.length - 1))] ??
+      Math.min(Math.round(barMs), Math.floor(regionLen));
+
+    const maxOffset = Math.max(0, regionLen - loopLengthMs);
+    const grid = Math.max(1, Math.floor(maxOffset / beatMs) + 1);
+    const beatIndex = pickInt(rnd, 0, grid - 1);
+    const contentOffsetMs = Math.round(
+      regionStart + Math.min(maxOffset, beatIndex * beatMs),
+    );
+
+    // Only loop when the clip on the timeline is longer than the slice.
+    if (lengthMs > loopLengthMs * 1.05) {
+      return { contentOffsetMs, loopEnabled: true, loopLengthMs };
+    }
+    // Shorter/equal: play that window once (still a useful partial take).
+    return {
+      contentOffsetMs,
+      loopEnabled: false,
+      loopLengthMs: undefined,
+    };
+  }
+
+  if (
+    stretchMode === "off" &&
+    !loopEnabled &&
+    sample.durationMs > lengthMs + 40 &&
+    !isDrumRole(role)
+  ) {
+    const window = Math.max(0, sample.durationMs - lengthMs);
+    return {
+      contentOffsetMs: Math.round(
+        rnd() * window * (0.35 + energy * 0.5) * (0.4 + variation * 0.8),
+      ),
+      loopEnabled,
+    };
+  }
+
+  // Existing full-file loop: prefer sample loop region length when present.
+  if (
+    loopEnabled &&
+    sample.loopStartMs != null &&
+    sample.loopEndMs != null &&
+    sample.loopEndMs > sample.loopStartMs + 40
+  ) {
+    return {
+      contentOffsetMs: sample.loopStartMs,
+      loopEnabled: true,
+      loopLengthMs: sample.loopEndMs - sample.loopStartMs,
+    };
+  }
+
+  return { contentOffsetMs: 0, loopEnabled };
+}
+
+function stretchWithoutPitchShift(mode: StretchMode): StretchMode {
+  return mode === "resample" ? "preserve-pitch" : mode;
+}
+
+/** Allowed tempo-rate multiples when pow2 lock is on. */
+const TEMPO_POW2_RATIOS = [0.25, 0.5, 1, 2, 4, 8] as const;
+
+/** Snap a tempo ratio (projectBpm / sampleBpm) to the nearest power of two. */
+function snapTempoRatioPow2(ratio: number): number {
+  if (!Number.isFinite(ratio) || ratio <= 0) return 1;
+  let best: number = 1;
+  let bestDist = Infinity;
+  for (const p of TEMPO_POW2_RATIOS) {
+    const d = Math.abs(Math.log2(ratio / p));
+    if (d < bestDist) {
+      bestDist = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+/** True when ratio is already near a pow2 multiple (within ~6%). */
+function nearTempoPow2(ratio: number, tolLog2 = 0.08): boolean {
+  if (!Number.isFinite(ratio) || ratio <= 0) return false;
+  const snapped = snapTempoRatioPow2(ratio);
+  return Math.abs(Math.log2(ratio / snapped)) <= tolLog2;
+}
+
 /** Stretch toward project BPM when sample has analysisBpm. */
 function bpmSyncStretch(
   sample: SequenceSampleIn,
@@ -1374,15 +1535,25 @@ function bpmSyncStretch(
   role: ExprRole,
   rnd: () => number,
   mode: GenTriState = "auto",
+  lockPitch = false,
+  lockTempoPow2 = false,
 ): { stretchMode: StretchMode; lengthFactor: number } | null {
   if (mode === "off") return null;
   const src = sample.analysisBpm;
   if (src == null || src < 40 || src > 240) return null;
-  const ratio = projectBpm / src;
+  let ratio = projectBpm / src;
+  if (lockTempoPow2) {
+    ratio = snapTempoRatioPow2(ratio);
+  }
   if (Math.abs(ratio - 1) < 0.04) return null;
+  const mild = Math.abs(ratio - 1) <= 0.12;
+  const pickMode = (preferPreserve: boolean): StretchMode => {
+    if (lockPitch || preferPreserve || !mild) return "preserve-pitch";
+    return "resample";
+  };
   if (mode === "on") {
     return {
-      stretchMode: Math.abs(ratio - 1) > 0.12 ? "preserve-pitch" : "resample",
+      stretchMode: pickMode(false),
       lengthFactor: 1 / ratio,
     };
   }
@@ -1392,7 +1563,7 @@ function bpmSyncStretch(
   }
   if (role === "loop" || role === "texture" || role === "chord") {
     return {
-      stretchMode: Math.abs(ratio - 1) > 0.12 ? "preserve-pitch" : "resample",
+      stretchMode: pickMode(false),
       lengthFactor: 1 / ratio,
     };
   }
@@ -1401,6 +1572,11 @@ function bpmSyncStretch(
       stretchMode: "preserve-pitch",
       lengthFactor: 1 / ratio,
     };
+  }
+  if (lockPitch) {
+    return rnd() < 0.4
+      ? { stretchMode: "preserve-pitch", lengthFactor: 1 / ratio }
+      : null;
   }
   return rnd() < 0.4
     ? { stretchMode: "resample", lengthFactor: 1 / ratio }
@@ -1415,6 +1591,7 @@ function pickStretchMode(opts: {
   bpmSync: { stretchMode: StretchMode; lengthFactor: number } | null;
   energy: number;
   stutter: boolean;
+  lockPitch: boolean;
   rnd: () => number;
 }): StretchMode {
   const {
@@ -1425,10 +1602,18 @@ function pickStretchMode(opts: {
     bpmSync,
     energy,
     stutter,
+    lockPitch,
     rnd,
   } = opts;
-  if (stutter) return rnd() < 0.6 ? "copy" : "resample";
-  if (bpmSync) return bpmSync.stretchMode;
+  if (stutter) {
+    const mode = rnd() < 0.6 || lockPitch ? "copy" : "resample";
+    return lockPitch ? stretchWithoutPitchShift(mode) : mode;
+  }
+  if (bpmSync) {
+    return lockPitch
+      ? stretchWithoutPitchShift(bpmSync.stretchMode)
+      : bpmSync.stretchMode;
+  }
 
   const loopish = (sample.loopScore ?? 0) > 0.45;
   if (Math.abs(pitchSemitones) >= 1) {
@@ -1438,7 +1623,13 @@ function pickStretchMode(opts: {
     return "off";
   }
   if (isDrumRole(role)) {
-    if (rnd() < 0.08 + energy * 0.1 && lengthFactor < 0.85) return "resample";
+    if (
+      !lockPitch &&
+      rnd() < 0.08 + energy * 0.1 &&
+      lengthFactor < 0.85
+    ) {
+      return "resample";
+    }
     return "off";
   }
   if (loopish && lengthFactor > 1.2) {
@@ -1448,9 +1639,10 @@ function pickStretchMode(opts: {
     if (role === "texture" || role === "loop") {
       return rnd() < 0.7 ? "preserve-pitch" : "copy";
     }
+    if (lockPitch) return "preserve-pitch";
     return rnd() < 0.35 + energy * 0.15 ? "resample" : "preserve-pitch";
   }
-  if (rnd() < 0.08 + energy * 0.06) return "resample";
+  if (!lockPitch && rnd() < 0.08 + energy * 0.06) return "resample";
   return "off";
 }
 
@@ -1815,7 +2007,8 @@ function pickTrackMix(
 /**
  * Plan a full multi-track sequence over `bars`, drawing from the library.
  * Controls: seed + density/energy/mix/groove; advanced locks (key, palette,
- * form, humanize, variation, bpm-sync, reverse, stutter, call–response).
+ * form, humanize, variation, bpm-sync, reverse, stutter, call–response,
+ * lock-pitch).
  * Pass `"auto"` to let the seed pick; omit for engine defaults.
  */
 export function planSequence(opts: {
@@ -1846,6 +2039,16 @@ export function planSequence(opts: {
   reverse?: GenTriState;
   stutter?: GenTriState;
   callResponse?: GenTriState;
+  /**
+   * Keep native sample pitch: no semitone transpose, no resample stretch,
+   * no melody/chord tone targeting. `"auto"` / `"off"` = unlocked.
+   */
+  lockPitch?: GenTriState;
+  /**
+   * Constrain tempo adapts to ×¼, ×½, ×1, ×2, ×4, ×8 only (snap BPM sync /
+   * rate changes). `"auto"` / `"off"` = free ratio.
+   */
+  lockTempoPow2?: GenTriState;
 }): SequencePlanResult {
   const { bars, beatsPerBar, ppq, bpm, seed, tracks, samples } = opts;
   if (bars < 1 || tracks.length === 0 || samples.length === 0) {
@@ -1880,6 +2083,8 @@ export function planSequence(opts: {
   const reverseMode: GenTriState = opts.reverse ?? "auto";
   const stutterMode: GenTriState = opts.stutter ?? "auto";
   const callResponseMode: GenTriState = opts.callResponse ?? "auto";
+  const lockPitch = opts.lockPitch === "on";
+  const lockTempoPow2 = opts.lockTempoPow2 === "on";
 
   const ticksPerBar = beatsPerBar * ppq;
   const seqEnd = bars * ticksPerBar;
@@ -1898,15 +2103,24 @@ export function planSequence(opts: {
     return a.id.localeCompare(b.id);
   });
 
-  const rootPc =
-    opts.keyRootPc == null || opts.keyRootPc === "auto"
+  const rootPc = lockPitch
+    ? 0
+    : opts.keyRootPc == null || opts.keyRootPc === "auto"
       ? inferKeyRootPc(pool)
       : ((Math.round(opts.keyRootPc) % 12) + 12) % 12;
-  const scale = pickScale(pool, rootPc, rnd, scaleMode);
-  const minor = scale === MINOR_SCALE;
-  const palette = paletteFromMix(drumsVsTexture, rnd, opts.palette);
-  const progression = pickProgressionBank(palette, minor, rnd);
-  const chordTimeline = expandChordTimeline(progression, bars);
+  const scale = lockPitch
+    ? MAJOR_SCALE
+    : pickScale(pool, rootPc, rnd, scaleMode);
+  const chordTimeline = lockPitch
+    ? []
+    : expandChordTimeline(
+        pickProgressionBank(
+          paletteFromMix(drumsVsTexture, rnd, opts.palette),
+          scale === MINOR_SCALE,
+          rnd,
+        ),
+        bars,
+      );
   const sections = planSongForm(bars, rnd, {
     drumsVsTexture,
     energy,
@@ -1979,9 +2193,13 @@ export function planSequence(opts: {
     const motif = buildMotif(role, beatsPerBar, ppq, rnd, groove);
     const motifAlt = buildMotif(role, beatsPerBar, ppq, rnd, groove);
     const leadCell =
-      role === "lead" ? pickMelodyCell(rnd, drumsVsTexture < 0.4) : null;
+      !lockPitch && role === "lead"
+        ? pickMelodyCell(rnd, drumsVsTexture < 0.4)
+        : null;
     const leadCellAlt =
-      role === "lead" ? pickMelodyCell(rnd, drumsVsTexture < 0.4) : null;
+      !lockPitch && role === "lead"
+        ? pickMelodyCell(rnd, drumsVsTexture < 0.4)
+        : null;
 
     const humanizeMs =
       (isDrumRole(role)
@@ -2014,10 +2232,12 @@ export function planSequence(opts: {
       for (let b = 0; b < section.bars; b += barStride) {
         const absBar = section.startBar + b;
         const barTick = absBar * ticksPerBar;
-        const chord = chordTimeline[absBar] ?? {
-          degree: 0,
-          tones: [0, 2, 4] as const,
-        };
+        const chord = lockPitch
+          ? { degree: 0, tones: [0, 2, 4] as const }
+          : (chordTimeline[absBar] ?? {
+              degree: 0,
+              tones: [0, 2, 4] as const,
+            });
         const degreeHint = chord.degree;
 
         // Rotate samples mid-song
@@ -2101,6 +2321,8 @@ export function planSequence(opts: {
             role,
             rnd,
             bpmSyncMode,
+            lockPitch,
+            lockTempoPow2,
           );
           const bpmLengthFactor = bpmSync?.lengthFactor ?? 1;
 
@@ -2123,29 +2345,46 @@ export function planSequence(opts: {
           if (lengthTick < Math.floor(ppq / 4)) continue;
 
           const naturalTick = msToLengthTick(sample.durationMs, bpm, ppq);
+          // When pow2 lock is on, snap free duration changes to ×¼…×8 of the
+          // natural (BPM-synced) length — no arbitrary tempo warps.
+          if (lockTempoPow2 && !stutter) {
+            const base = Math.max(1, naturalTick * bpmLengthFactor);
+            const rawFactor = lengthTick / base;
+            const snapped = snapTempoRatioPow2(rawFactor);
+            if (Math.abs(snapped - rawFactor) > 0.06) {
+              lengthTick = Math.max(
+                Math.floor(ppq / 4),
+                Math.round(base * snapped),
+              );
+              if (hit.tick + lengthTick > seqEnd) {
+                lengthTick = seqEnd - hit.tick;
+              }
+              if (lengthTick < Math.floor(ppq / 4)) continue;
+            }
+          }
           const factor =
             lengthTick / Math.max(1, naturalTick * bpmLengthFactor);
 
-          const melodyDegree =
-            role === "lead" && leadCell
-              ? (leadCell[hi % leadCell.length]?.degree ?? degreeHint)
-              : undefined;
+          const pitchSemitones = lockPitch
+            ? 0
+            : pickPitchSemitones({
+                sample,
+                role,
+                rootPc,
+                scale,
+                degreeHint,
+                chordTones: role === "chord" ? chord.tones : undefined,
+                toneIndex: role === "chord" ? hi : undefined,
+                melodyDegree:
+                  role === "lead" && leadCell
+                    ? (leadCell[hi % leadCell.length]?.degree ?? degreeHint)
+                    : undefined,
+                section,
+                energy,
+                rnd,
+              });
 
-          const pitchSemitones = pickPitchSemitones({
-            sample,
-            role,
-            rootPc,
-            scale,
-            degreeHint,
-            chordTones: role === "chord" ? chord.tones : undefined,
-            toneIndex: role === "chord" ? hi : undefined,
-            melodyDegree,
-            section,
-            energy,
-            rnd,
-          });
-
-          const stretchMode = pickStretchMode({
+          let stretchMode = pickStretchMode({
             sample,
             role,
             lengthFactor: factor,
@@ -2153,8 +2392,41 @@ export function planSequence(opts: {
             bpmSync,
             energy,
             stutter,
+            lockPitch,
             rnd,
           });
+
+          // Pow2 tempo lock: avoid non-grid resample/stretch; tile or leave native.
+          if (
+            lockTempoPow2 &&
+            !stutter &&
+            stretchMode !== "off" &&
+            stretchMode !== "copy" &&
+            !nearTempoPow2(factor) &&
+            !nearTempoPow2(1 / Math.max(1e-6, factor))
+          ) {
+            stretchMode =
+              (sample.loopScore ?? 0) > 0.45 || factor > 1.1
+                ? "copy"
+                : "off";
+          }
+
+          // Tempo-matched loops: prefer a musical sub-window + loop over
+          // stretching the whole take to fill the clip.
+          if (
+            !stutter &&
+            stretchMode !== "copy" &&
+            tempoAlignedForLoop(sample, bpm) &&
+            ((sample.loopScore ?? 0) > 0.4 ||
+              (sample.loopStartMs != null && sample.loopEndMs != null)) &&
+            (role === "loop" ||
+              role === "texture" ||
+              role === "chord" ||
+              role === "perc") &&
+            Math.abs(factor - 1) > 0.08
+          ) {
+            stretchMode = "off";
+          }
 
           const lengthMs = lengthTickToMs(lengthTick, bpm, ppq);
           const { fadeInMs, fadeOutMs, fadeCurve } = pickFades({
@@ -2168,24 +2440,28 @@ export function planSequence(opts: {
             rnd,
           });
 
-          const loopEnabled =
+          const loopSeed =
             stutter ||
             stretchMode === "copy" ||
             ((sample.loopScore ?? 0) > 0.5 &&
               (factor > 1.05 || role === "texture" || role === "loop"));
 
-          let contentOffsetMs = 0;
-          if (
-            stretchMode === "off" &&
-            !loopEnabled &&
-            sample.durationMs > lengthMs + 40 &&
-            !isDrumRole(role)
-          ) {
-            const window = Math.max(0, sample.durationMs - lengthMs);
-            contentOffsetMs = Math.round(
-              rnd() * window * (0.35 + energy * 0.5) * (0.4 + variation * 0.8),
-            );
-          }
+          const {
+            contentOffsetMs,
+            loopEnabled,
+            loopLengthMs,
+          } = pickLoopContent({
+            sample,
+            role,
+            lengthMs,
+            bpm,
+            beatsPerBar,
+            loopEnabled: loopSeed,
+            stretchMode,
+            energy,
+            variation,
+            rnd,
+          });
 
           const reverse =
             reverseBaseChance > 0 &&
@@ -2223,6 +2499,7 @@ export function planSequence(opts: {
               contentOffsetMs,
               gainDb: g,
               loopEnabled,
+              loopLengthMs,
               fadeInMs,
               fadeOutMs,
               fadeCurve,

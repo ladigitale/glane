@@ -10,7 +10,19 @@ export type WaveformView = {
   heightPx: number;
   color: string;
   playheadSample?: number;
+  /**
+   * Circular read offset: display index `i` reads `pcm[(i + offset) % n]`.
+   * When set (non-zero), adaptive LOD uses PCM paths so wrap stays correct.
+   */
+  circularOffsetSamples?: number;
 };
+
+function wrapReadIndex(i: number, n: number, offset: number): number {
+  if (n <= 0) return 0;
+  let x = (i + offset) % n;
+  if (x < 0) x += n;
+  return x;
+}
 
 function prepareCanvas(
   canvas: HTMLCanvasElement,
@@ -110,6 +122,8 @@ export class WaveformRenderer {
    */
   drawMinMax(samples: Float32Array, view: WaveformView): void {
     const { widthPx, heightPx, samplesPerPixel, scrollSample, color } = view;
+    const offset = view.circularOffsetSamples ?? 0;
+    const n = samples.length;
     prepareCanvas(this.canvas, this.ctx, widthPx, heightPx);
     const mid = heightPx / 2;
     this.ctx.strokeStyle = color;
@@ -119,12 +133,22 @@ export class WaveformRenderer {
       const s1 = Math.ceil(scrollSample + (x + 1) * samplesPerPixel);
       let min = 1;
       let max = -1;
-      const start = Math.max(0, s0);
-      const end = Math.min(samples.length, Math.max(start + 1, s1));
-      for (let i = start; i < end; i++) {
-        const v = samples[i] ?? 0;
-        if (v < min) min = v;
-        if (v > max) max = v;
+      if (offset !== 0 && n > 0) {
+        const start = s0;
+        const end = Math.max(start + 1, s1);
+        for (let i = start; i < end; i++) {
+          const v = samples[wrapReadIndex(i, n, offset)] ?? 0;
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+      } else {
+        const start = Math.max(0, s0);
+        const end = Math.min(n, Math.max(start + 1, s1));
+        for (let i = start; i < end; i++) {
+          const v = samples[i] ?? 0;
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
       }
       if (max < min) {
         min = 0;
@@ -140,6 +164,8 @@ export class WaveformRenderer {
   /** Sample-accurate polyline when zoomed in past 1 sample/pixel. */
   drawSamples(samples: Float32Array, view: WaveformView): void {
     const { widthPx, heightPx, samplesPerPixel, scrollSample, color } = view;
+    const offset = view.circularOffsetSamples ?? 0;
+    const n = samples.length;
     prepareCanvas(this.canvas, this.ctx, widthPx, heightPx);
     const mid = heightPx / 2;
     this.ctx.strokeStyle = color;
@@ -147,8 +173,13 @@ export class WaveformRenderer {
     let started = false;
     for (let x = 0; x < widthPx; x++) {
       const i = Math.floor(scrollSample + x * samplesPerPixel);
-      if (i < 0 || i >= samples.length) continue;
-      const y = mid - (samples[i] ?? 0) * mid;
+      let sampleIndex = i;
+      if (offset !== 0 && n > 0) {
+        sampleIndex = wrapReadIndex(i, n, offset);
+      } else if (i < 0 || i >= n) {
+        continue;
+      }
+      const y = mid - (samples[sampleIndex] ?? 0) * mid;
       if (!started) {
         this.ctx.moveTo(x, y);
         started = true;
@@ -172,9 +203,16 @@ export class WaveformRenderer {
     view: WaveformView,
     sampleAccurateBelowSpp = 1,
   ): void {
-    if (view.samplesPerPixel < sampleAccurateBelowSpp) {
-      this.drawSamples(samples, view);
-      return;
+    const circular = (view.circularOffsetSamples ?? 0) !== 0;
+    if (circular || view.samplesPerPixel < sampleAccurateBelowSpp) {
+      if (view.samplesPerPixel < sampleAccurateBelowSpp) {
+        this.drawSamples(samples, view);
+        return;
+      }
+      if (circular) {
+        this.drawMinMax(samples, view);
+        return;
+      }
     }
     const levelIdx = pickPeakLevelIndex(pyramid, view.samplesPerPixel);
     if (levelIdx < 0) {

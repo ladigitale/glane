@@ -7,7 +7,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/detect/onset.test.ts src/detect/vad.test.ts src/stretch.test.ts src/loop/seamless.test.ts src/loop/optimize.test.ts src/capture/event-hunter.test.ts src/interest-score.test.ts src/dynamics.test.ts src/auto-crop.test.ts"
+    "test": "tsx --test src/detect/onset.test.ts src/detect/vad.test.ts src/stretch.test.ts src/loop/seamless.test.ts src/loop/optimize.test.ts src/capture/event-hunter.test.ts src/interest-score.test.ts src/dynamics.test.ts src/auto-crop.test.ts src/song-slice.test.ts"
   },
   "dependencies": {
     "@glane/core-model": "0.1.0"

@@ -182,12 +182,9 @@ export function approxSrcIndex(
   clipSamples: number,
 ): number | null {
   if (t < 0 || t >= clipSamples) return null;
-  if (mode === "off") {
-    const buf = offset + t;
-    if (buf < 0 || buf >= pcmLen) return null;
-    return buf;
-  }
-  if (mode === "copy") {
+  if (mode === "off" || mode === "copy") {
+    if (pcmLen <= 0) return null;
+    // Circular contentOffset (instance phase) — same wrap as editor rotate.
     return (((offset + t) % pcmLen) + pcmLen) % pcmLen;
   }
   const buf = offset + t;

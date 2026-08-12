@@ -14,3 +14,4 @@ export * from "./normalize.js";
 export * from "./dynamics.js";
 export * from "./auto-crop.js";
 export * from "./capture/event-hunter.js";
+export * from "./song-slice.js";

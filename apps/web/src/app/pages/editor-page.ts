@@ -9,7 +9,7 @@ import {
   type Sample,
   type TrackFx,
 } from "@glane/core-model";
-import { noiseGate, softCompress, autoCropPcm } from "@glane/audio-dsp";
+import { noiseGate, softCompress, autoCropPcm, rotatePcm } from "@glane/audio-dsp";
 import { TransportEngine, bakeTrackFx } from "@glane/audio-engine";
 import { sampleOpfs } from "@glane/audio-io";
 import { LitElement, css, html, nothing } from "lit";
@@ -133,6 +133,8 @@ export class GlEditorPage extends LitElement {
   @state() private hasClipboard = false;
   @state() private dirty = false;
   @state() private historyLen = 0;
+  /** Lane tool: circular-shift waveform in the file. */
+  @state() private rotateTool = false;
 
   #engine: TransportEngine | null = null;
   /** Working PCM — @state so `.pcm` reaches the timeline after async load. */
@@ -240,6 +242,18 @@ export class GlEditorPage extends LitElement {
           @gl-fx=${this.#onPreviewFxEvent}
           @gl-fx-apply=${this.#onFxApply}
         ></gl-track-fx-control>
+        <sonic-button
+          size="sm"
+          variant="outline"
+          type=${this.rotateTool ? "primary" : "neutral"}
+          ?disabled=${this.applyingFx || !this.master}
+          @click=${() => {
+            this.rotateTool = !this.rotateTool;
+          }}
+          >${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}${t(
+            "editor.rotate",
+          )}</sonic-button
+        >
       </div>
       <gl-edit-timeline
         .pcm=${this.master}
@@ -252,10 +266,12 @@ export class GlEditorPage extends LitElement {
         .selEnd=${this.selEnd}
         .playheadSample=${this.state.startSample + this.playheadSample}
         .playing=${this.playing}
+        ?rotateMode=${this.rotateTool}
         @gl-trim=${this.#onTimelineTrim}
         @gl-sel=${this.#onTimelineSel}
         @gl-seek=${this.#onTimelineSeek}
         @gl-view=${this.#onTimelineView}
+        @gl-rotate=${this.#onTimelineRotate}
         @gl-scrub-start=${this.#onScrubStart}
         @gl-scrub-end=${this.#onScrubEnd}
       ></gl-edit-timeline>
@@ -440,6 +456,57 @@ export class GlEditorPage extends LitElement {
     this.viewEnd = Math.max(this.viewStart, Math.min(max, b));
     this.viewMode = e.detail.follow ? "global" : "vue";
   };
+
+  #onTimelineRotate = (
+    e: CustomEvent<{ offsetSamples: number }>,
+  ): void => {
+    void this.#commitRotate(e.detail.offsetSamples);
+  };
+
+  async #commitRotate(offsetSamples: number): Promise<void> {
+    const offset = Math.round(offsetSamples);
+    if (!offset) {
+      this.#editTimeline()?.clearRotateOffset();
+      return;
+    }
+    const before = this.master;
+    await this.#mutateView((view, sel) => {
+      const n = view.length;
+      if (n === 0) return null;
+      const pcm = rotatePcm(view, offset);
+      const wrap = (i: number): number => {
+        let x = (i - offset) % n;
+        if (x < 0) x += n;
+        return x;
+      };
+      if (!sel) {
+        return {
+          pcm,
+          status: t("editor.rotateDone"),
+          selStart: 0,
+          selEnd: 0,
+        };
+      }
+      const a = wrap(sel.a);
+      const b = wrap(sel.b);
+      const width = sel.b - sel.a;
+      if (a < b) {
+        return {
+          pcm,
+          status: t("editor.rotateDone"),
+          selStart: a,
+          selEnd: b,
+        };
+      }
+      return {
+        pcm,
+        status: t("editor.rotateDone"),
+        selStart: a,
+        selEnd: Math.min(n, a + width),
+      };
+    });
+    if (this.master === before) this.#editTimeline()?.clearRotateOffset();
+  }
 
   #onScrubStart = (): void => {
     this.#scrubbing = true;
@@ -1094,6 +1161,7 @@ export class GlEditorPage extends LitElement {
             <li>Règle = région de boucle</li>
             <li>Poignées = trim / in-out / tête de lecture</li>
             <li>Poignée timeline = déplacer la boucle</li>
+            <li>${t("editor.rotateDocs")}</li>
           </ul>
         </sonic-modal-content>
         <sonic-modal-actions>

@@ -32,8 +32,8 @@ export const prefsFormKey = new DataProviderKey<PrefsForm>("glPrefsForm");
 export type LibraryFilters = {
   classFilter: SampleClass | "all";
   sessionFilter: string;
-  /** Exact tag match, or "" for all. */
-  tagFilter: string;
+  /** Exact tag matches (OR); empty = all. */
+  tagFilter: string[];
   q: string;
 };
 

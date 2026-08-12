@@ -163,7 +163,7 @@ export function clipToScheduled(
     sampleRate,
   );
   const offsetSamples = msToSamples(clip.contentOffsetMs, sampleRate);
-  return {
+  const scheduled: ScheduledClip = {
     id: clip.id,
     trackId: clip.trackId,
     buffer,
@@ -176,6 +176,24 @@ export function clipToScheduled(
     playbackRate: Math.pow(2, (clip.pitchSemitones ?? 0) / 12),
     loop: clip.loopEnabled,
   };
+  if (
+    clip.loopEnabled &&
+    clip.loopLengthMs != null &&
+    clip.loopLengthMs > 0 &&
+    Number.isFinite(clip.loopLengthMs)
+  ) {
+    const startSec = Math.max(
+      0,
+      Math.min(buffer.duration - 0.001, clip.contentOffsetMs / 1000),
+    );
+    const endSec = Math.min(
+      buffer.duration,
+      startSec + clip.loopLengthMs / 1000,
+    );
+    scheduled.loopStartSec = startSec;
+    scheduled.loopEndSec = Math.max(startSec + 0.001, endSec);
+  }
+  return scheduled;
 }
 
 /** Track bus config for TransportEngine (gain / pan / FX insert). */

@@ -13,9 +13,10 @@ import {
 import {
   EventHunter,
   DSP_THRESHOLDS,
+  songSlice,
   type CaptureLiveState,
 } from "@glane/audio-dsp";
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import tailwind from "../../css/tailwind";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
@@ -25,6 +26,7 @@ import {
   ensurePrefs,
   DEFAULT_ATTACK_SENSITIVITY,
   DEFAULT_TARGET_CAPTURES_PER_MIN,
+  type FileProcessMode,
 } from "../db.js";
 import {
   CAPTURE_RATE,
@@ -35,7 +37,7 @@ import {
 import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { deleteSample } from "../sample-actions.js";
-import { importForHunt } from "../import-for-hunt.js";
+import { importForHunt, ImportTempoError } from "../import-for-hunt.js";
 import { processQueue } from "../process-queue.js";
 import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
 import {
@@ -43,11 +45,23 @@ import {
   projectWorkspace,
 } from "../project-workspace.js";
 import { captureFormKey } from "../dp-keys.js";
+import { captureToast } from "../capture-toast.js";
 import { glIcon } from "../icon.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { renderMoreMenu } from "../more-menu.js";
 import "../pop-select.js";
 
+function songGridCaption(targetPerMin: number): string {
+  const beats = songSlice.beatsPerSliceFromTarget(
+    songSlice.referenceBpm,
+    targetPerMin,
+  );
+  const g = songSlice.gridLabel(beats);
+  if (g.kind === "beat") return t("capture.gridBeat");
+  if (g.kind === "half-bar") return t("capture.gridHalfBar");
+  if (g.kind === "bar") return t("capture.gridBar");
+  return tf("capture.gridBars", { n: String(g.bars) });
+}
 type AudioInputOption = { value: string; label: string };
 
 type ExtractedRow = {
@@ -213,6 +227,7 @@ export class GlCapturePage extends LitElement {
   /** Internal 0–100; auto-tuned toward targetCapturesPerMin. */
   @state() private attackSensitivity = DEFAULT_ATTACK_SENSITIVITY;
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
+  @state() private fileProcessMode: FileProcessMode = "hunt";
   @state() private measuredRatePerMin = 0;
   @state() private rateModalOpen = false;
   @state() private configModalOpen = false;
@@ -311,8 +326,41 @@ export class GlCapturePage extends LitElement {
     this.#unsubProc = null;
     this.#importAbort?.abort();
     this.#importAbort = null;
+    captureToast.clear();
     void this.#shutdownMic();
     super.disconnectedCallback();
+  }
+
+  override updated(changed: PropertyValues): void {
+    if (
+      changed.has("listening") ||
+      changed.has("micOpen") ||
+      changed.has("liveState") ||
+      changed.has("statusText") ||
+      changed.has("importBusy")
+    ) {
+      this.#syncCaptureToast();
+    }
+  }
+
+  #syncCaptureToast(): void {
+    if (this.importBusy || (!this.listening && !this.micOpen)) {
+      captureToast.clear();
+      return;
+    }
+    const label = stateLabel(this.liveState, this.listening);
+    const hint = this.listening
+      ? t("capture.hintRecording")
+      : t("capture.hintScout");
+    const statusExtra =
+      this.statusText && !isLiveCaptureDeviceState(this.statusText)
+        ? this.statusText
+        : "";
+    captureToast.show({
+      title: this.listening ? t("capture.recording") : t("capture.scout"),
+      text: label || statusExtra || hint,
+      status: this.listening ? "error" : "info",
+    });
   }
 
   #onSamplesCulled = (ev: Event): void => {
@@ -373,6 +421,7 @@ export class GlCapturePage extends LitElement {
     this.targetCapturesPerMin = clampTargetPerMin(
       prefs.targetCapturesPerMin ?? DEFAULT_TARGET_CAPTURES_PER_MIN,
     );
+    this.fileProcessMode = prefs.fileProcessMode ?? "hunt";
     this.audioDeviceId = prefs.captureAudioDeviceId ?? "";
     this.#syncCaptureForm();
   }
@@ -386,6 +435,7 @@ export class GlCapturePage extends LitElement {
       mlClap: this.mlClap,
       attackSensitivity: this.attackSensitivity,
       targetCapturesPerMin: this.targetCapturesPerMin,
+      fileProcessMode: this.fileProcessMode,
       captureAudioDeviceId: this.audioDeviceId || undefined,
     });
   }
@@ -473,11 +523,18 @@ export class GlCapturePage extends LitElement {
             {
               label: t("capture.targetRate"),
               icon: "gauge",
-              hint: `${this.targetCapturesPerMin}/min${
-                this.micOpen
-                  ? ` · ≈${formatRate(this.measuredRatePerMin)}`
-                  : ""
-              }`,
+              hint:
+                this.fileProcessMode === "whole"
+                  ? t("capture.fileModeWhole")
+                  : this.fileProcessMode === "song"
+                    ? tf("capture.targetRateGrid", {
+                        grid: songGridCaption(this.targetCapturesPerMin),
+                      })
+                    : `${this.targetCapturesPerMin}/min${
+                        this.micOpen
+                          ? ` · ≈${formatRate(this.measuredRatePerMin)}`
+                          : ""
+                      }`,
               onClick: this.#openRateModal,
             },
             "divider",
@@ -533,17 +590,6 @@ export class GlCapturePage extends LitElement {
       </div>
       <div class="flex flex-col gap-2">
         <div class="flex items-center gap-2.5">
-          ${this.listening
-            ? html`<span
-                class="h-3 w-3 rounded-full bg-danger shadow-[0_0_0_3px_color-mix(in_srgb,var(--sc-danger)_30%,transparent)]"
-                title="LISTEN"
-              ></span>`
-            : this.micOpen
-              ? html`<span
-                  class="h-3 w-3 rounded-full bg-primary/70"
-                  title="SCOUT"
-                ></span>`
-              : nothing}
           <span class="font-mono tabular-nums">${formatClock(this.clockMs)}</span>
           ${this.micOpen
             ? html`<span class="font-mono text-[0.75rem] tabular-nums text-neutral-500"
@@ -594,17 +640,15 @@ export class GlCapturePage extends LitElement {
           ></i>
         </div>
       </div>
-      <p>
-        ${this.importBusy
-          ? t("capture.importBusy")
-          : this.listening
-            ? t("capture.hintRecording")
-            : this.micOpen
-              ? t("capture.hintScout")
-              : this.scoutBlocked
+      ${this.importBusy
+        ? html`<p>${t("capture.importBusy")}</p>`
+        : !this.listening && !this.micOpen
+          ? html`<p>
+              ${this.scoutBlocked
                 ? t("capture.hintScoutBlocked")
                 : t("capture.empty")}
-      </p>
+            </p>`
+          : nothing}
       ${this.importBusy
         ? html`
             <div class="flex flex-col gap-2">
@@ -635,24 +679,6 @@ export class GlCapturePage extends LitElement {
               </div>
             </div>
           `
-        : nothing}
-      ${!this.importBusy &&
-      this.liveState !== "idle" &&
-      this.liveState !== "listening"
-        ? html`<p
-            class="font-mono text-[0.85rem] text-neutral-500 ${this.liveState.startsWith(
-              "event",
-            ) || this.liveState === "characterized"
-              ? "hot text-primary"
-              : ""}"
-          >
-            ${stateLabel(this.liveState, this.listening)}
-          </p>`
-        : nothing}
-      ${this.statusText && !this.importBusy
-        ? html`<p class="font-mono text-[0.8rem] text-neutral-500">
-            ${this.statusText}
-          </p>`
         : nothing}
       ${this.#renderRateModal()}
       ${this.#renderConfigModal()}
@@ -746,6 +772,23 @@ export class GlCapturePage extends LitElement {
   }
 
   #renderRateModal() {
+    const songMode = this.fileProcessMode === "song";
+    const wholeMode = this.fileProcessMode === "whole";
+    const hint = wholeMode
+      ? t("capture.targetRateHintWhole")
+      : songMode
+        ? t("capture.targetRateHintSong")
+        : t("capture.targetRateHint");
+    const valueLabel = wholeMode
+      ? t("capture.fileModeWhole")
+      : songMode
+        ? `${this.targetCapturesPerMin}/min · ${tf("capture.targetRateGrid", {
+            grid: songGridCaption(this.targetCapturesPerMin),
+          })}`
+        : `${this.targetCapturesPerMin}/min${
+            this.micOpen ? ` · ≈${formatRate(this.measuredRatePerMin)}` : ""
+          }`;
+
     return html`
       <sonic-modal
         align="left"
@@ -758,21 +801,20 @@ export class GlCapturePage extends LitElement {
           <div class="flex w-full flex-col gap-1.5">
             <span
               class="font-mono text-[0.8rem] tabular-nums text-neutral-500"
-              >${this.targetCapturesPerMin}/min${this.micOpen
-                ? ` · ≈${formatRate(this.measuredRatePerMin)}`
-                : ""}</span
+              >${valueLabel}</span
             >
-            <p class="m-0 text-xs leading-snug text-neutral-500">
-              ${t("capture.targetRateHint")}
-            </p>
+            <p class="m-0 text-xs leading-snug text-neutral-500">${hint}</p>
             <input
               id="gl-target-rate"
-              class="w-full cursor-pointer accent-primary"
+              class="w-full accent-primary ${wholeMode
+                ? "cursor-not-allowed opacity-40"
+                : "cursor-pointer"}"
               type="range"
               min=${CAPTURE_RATE.minPerMin}
               max=${CAPTURE_RATE.maxPerMin}
               step="1"
               .value=${String(this.targetCapturesPerMin)}
+              ?disabled=${wholeMode}
               @input=${this.#onTargetRateInput}
               @change=${this.#onTargetRateChange}
               aria-valuemin=${CAPTURE_RATE.minPerMin}
@@ -818,6 +860,15 @@ export class GlCapturePage extends LitElement {
         <sonic-modal-title>${t("capture.configTitle")}</sonic-modal-title>
         <sonic-modal-content>
           <div class="flex w-full flex-col gap-3">
+            <div class="flex flex-col gap-1.5">
+              <span class="text-[0.7rem] text-neutral-500"
+                >${t("capture.fileMode")}</span
+              >
+              <p class="m-0 text-xs leading-snug text-neutral-500">
+                ${t("capture.fileModeHint")}
+              </p>
+              ${this.#renderFileModeRadios()}
+            </div>
             <div class="flex flex-col gap-1.5">
               <span class="text-[0.7rem] text-neutral-500"
                 >${t("capture.audioSource")}</span
@@ -887,6 +938,60 @@ export class GlCapturePage extends LitElement {
       </sonic-modal>
     `;
   }
+
+  #renderFileModeRadios() {
+    const modes: {
+      value: FileProcessMode;
+      label: string;
+      hint: string;
+    }[] = [
+      {
+        value: "hunt",
+        label: t("capture.fileModeHunt"),
+        hint: t("capture.fileModeHuntHint"),
+      },
+      {
+        value: "song",
+        label: t("capture.fileModeSong"),
+        hint: t("capture.fileModeSongHint"),
+      },
+      {
+        value: "whole",
+        label: t("capture.fileModeWhole"),
+        hint: t("capture.fileModeWholeHint"),
+      },
+    ];
+    return html`
+      <div class="flex flex-col gap-2" role="radiogroup" aria-label=${t("capture.fileMode")}>
+        ${modes.map(
+          (m) => html`
+            <label class="flex cursor-pointer items-start gap-2.5">
+              <input
+                type="radio"
+                class="mt-0.5"
+                name="gl-file-process-mode"
+                .value=${m.value}
+                .checked=${this.fileProcessMode === m.value}
+                @change=${() => this.#onFileProcessMode(m.value)}
+              />
+              <span class="flex flex-col gap-0.5">
+                <span class="text-sm text-content">${m.label}</span>
+                <span class="text-xs leading-snug text-neutral-500"
+                  >${m.hint}</span
+                >
+              </span>
+            </label>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  #onFileProcessMode = (mode: FileProcessMode): void => {
+    if (mode === this.fileProcessMode) return;
+    this.fileProcessMode = mode;
+    void this.#persistCapturePrefs();
+  };
 
   #onAudioDeviceChange = (e: Event): void => {
     const value = String(
@@ -1041,6 +1146,9 @@ export class GlCapturePage extends LitElement {
       if (err instanceof DOMException && err.name === "AbortError") {
         this.liveState = "idle";
         this.statusText = "";
+      } else if (err instanceof ImportTempoError) {
+        this.warnings = [t("capture.importNoTempo")];
+        this.liveState = "idle";
       } else {
         this.warnings = [t("capture.importFailed")];
         this.liveState = "idle";
@@ -1423,6 +1531,10 @@ function levelToDb(peak: number): string {
   const db = 20 * Math.log10(peak);
   const rounded = Math.max(-60, Math.min(0, db));
   return `${rounded.toFixed(0)} dB`;
+}
+
+function isLiveCaptureDeviceState(s: string): boolean {
+  return s === "idle" || s === "listening" || s === "suspended";
 }
 
 function stateLabel(s: CaptureLiveState, recording: boolean): string {

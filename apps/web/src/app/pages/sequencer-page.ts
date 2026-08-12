@@ -245,6 +245,9 @@ export class GlSequencerPage extends LitElement {
       z-index: 1;
       overflow: hidden;
     }
+    :host([data-rotate-clip]) .clip {
+      cursor: ew-resize;
+    }
     .clip canvas.wave {
       position: absolute;
       inset: 0;
@@ -555,6 +558,8 @@ export class GlSequencerPage extends LitElement {
   @state() private clips: Clip[] = [];
   @state() private samples: Sample[] = [];
   @state() private selectedId: string | null = null;
+  /** Circular contentOffset drag on selected clip (editor rotate parity). */
+  @state() private rotateClipTool = false;
   @state() private playing = false;
   @state() private pxPerTick = 0.05;
   @state() private snapHighlightId: string | null = null;
@@ -600,9 +605,14 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenHumanize: number | GenAuto = "auto";
   @state() private draftGenVariation: number | GenAuto = "auto";
   @state() private draftGenBpmSync: GenTriState = "auto";
+  @state() private draftGenLockTempoPow2: GenTriState = "off";
   @state() private draftGenReverse: GenTriState = "auto";
   @state() private draftGenStutter: GenTriState = "auto";
   @state() private draftGenCallResponse: GenTriState = "auto";
+  @state() private draftGenLockPitch: GenTriState = "off";
+  /** Pool for generation: all / favorites / sample class. */
+  @state() private draftGenSampleFilter: SampleClass | "all" | "favorite" =
+    "all";
   @state() private draftGenAdvanced = false;
   /** Long-press context menu (screen coords). */
   @state() private clipCtx: { clipId: string; x: number; y: number } | null =
@@ -688,6 +698,10 @@ export class GlSequencerPage extends LitElement {
         this.#persistUiState();
         void this.#boot();
       }
+    }
+    if (changed.has("rotateClipTool") || !this.hasUpdated) {
+      if (this.rotateClipTool) this.setAttribute("data-rotate-clip", "");
+      else this.removeAttribute("data-rotate-clip");
     }
     const pending = this.#pendingScrollLeft;
     if (pending != null) {
@@ -985,6 +999,19 @@ export class GlSequencerPage extends LitElement {
       <div
         class="toolbar flex shrink-0 flex-wrap items-center gap-2 px-4 pb-1.5 pt-3 max-md:gap-1.5 max-md:px-2.5 max-md:pb-1 max-md:pt-2"
       >
+        ${this.selectedId
+          ? html`<sonic-button
+              size="sm"
+              variant="outline"
+              type=${this.rotateClipTool ? "primary" : "neutral"}
+              @click=${() => {
+                this.rotateClipTool = !this.rotateClipTool;
+              }}
+            >
+              ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+              ${t("seq.rotate")}
+            </sonic-button>`
+          : nothing}
         <sonic-pop class="more ml-auto" placement="bottom-end">
           <sonic-button
             shape="circle"
@@ -1824,7 +1851,7 @@ export class GlSequencerPage extends LitElement {
     if (!this.#engine || !this.project) return null;
     const bakeCopy = opts?.bakeCopy === true;
     const cacheKey = clip
-      ? `${sampleId}:${clip.stretchMode}:${clip.lengthTick}:${clip.contentOffsetMs}:${clip.reverse ? 1 : 0}:${bakeCopy ? "bake" : "live"}`
+      ? `${sampleId}:${clip.stretchMode}:${clip.lengthTick}:${clip.contentOffsetMs}:${clip.loopEnabled ? 1 : 0}:${clip.loopLengthMs ?? 0}:${clip.reverse ? 1 : 0}:${bakeCopy ? "bake" : "live"}`
       : sampleId;
     const cached = this.#bufferCache.get(cacheKey);
     if (cached) {
@@ -1840,17 +1867,41 @@ export class GlSequencerPage extends LitElement {
       pcm.reverse();
     }
 
-    // Live play: never tile `copy` to full clip length (OOM on long clips).
+    // Live play: never tile `copy` / loop to full clip length (OOM on long clips).
     // Export/bounce still bakes a contiguous buffer for OfflineAudioContext.
-    if (clip && clip.stretchMode === "copy" && bakeCopy) {
+    if (
+      clip &&
+      bakeCopy &&
+      (clip.stretchMode === "copy" || clip.loopEnabled)
+    ) {
       const target = ticksToSamples(
         asTick(clip.lengthTick),
         this.project.bpm,
         data.sampleRate,
       );
       const offset = msToSamples(clip.contentOffsetMs, data.sampleRate);
-      pcm = new Float32Array(tileBuffer(pcm, Math.max(1, target), offset));
-    } else if (clip && clip.stretchMode !== "off" && clip.stretchMode !== "copy") {
+      if (
+        clip.loopEnabled &&
+        clip.loopLengthMs != null &&
+        clip.loopLengthMs > 0
+      ) {
+        const loopSamples = Math.max(
+          1,
+          msToSamples(clip.loopLengthMs, data.sampleRate),
+        );
+        const end = Math.min(pcm.length, offset + loopSamples);
+        const slice = pcm.subarray(Math.min(offset, pcm.length), end);
+        pcm = new Float32Array(
+          tileBuffer(slice.length > 0 ? slice : pcm, Math.max(1, target), 0),
+        );
+      } else {
+        pcm = new Float32Array(tileBuffer(pcm, Math.max(1, target), offset));
+      }
+    } else if (
+      clip &&
+      clip.stretchMode !== "off" &&
+      clip.stretchMode !== "copy"
+    ) {
       const target = ticksToSamples(
         asTick(clip.lengthTick),
         this.project.bpm,
@@ -1910,11 +1961,16 @@ export class GlSequencerPage extends LitElement {
       });
       if (!buf) continue;
       // Live `copy`: keep source buffer + force loop (no giant tile).
-      // Export bake: contentOffset already in the tiled buffer.
+      // Export bake: contentOffset / loop window already tiled into the buffer.
       const scheduledClip =
-        clip.stretchMode === "copy"
+        clip.stretchMode === "copy" || (bakeCopy && clip.loopEnabled)
           ? bakeCopy
-            ? { ...clip, contentOffsetMs: 0 }
+            ? {
+                ...clip,
+                contentOffsetMs: 0,
+                loopEnabled: false,
+                loopLengthMs: undefined,
+              }
             : { ...clip, loopEnabled: true }
           : clip;
       out.push(
@@ -2634,6 +2690,27 @@ export class GlSequencerPage extends LitElement {
               </span>
               <span class="text-[0.65rem] opacity-80">${t("seq.genSeedHint")}</span>
             </label>
+            ${this.#renderGenChoice({
+              label: t("seq.genSampleFilter"),
+              value: this.draftGenSampleFilter,
+              options: [
+                ["all", t("seq.allFilters")],
+                ["favorite", t("seq.filterFavorite")],
+                ["percussive", "percussive"],
+                ["tonal", "tonal"],
+                ["texture", "texture"],
+                ["noise", "noise"],
+                ["rhythmic", "rhythmic"],
+              ],
+              onPick: (v) => {
+                this.draftGenSampleFilter = v as SampleClass | "all" | "favorite";
+              },
+            })}
+            <span class="font-mono text-[0.65rem] text-neutral-500"
+              >${tf("seq.genSampleFilterCount", {
+                n: this.#genPoolSamples().length,
+              })}</span
+            >
             ${this.#renderGenSlider({
               label: t("seq.genDensity"),
               value: this.draftGenDensity,
@@ -2700,50 +2777,68 @@ export class GlSequencerPage extends LitElement {
             ${this.draftGenAdvanced
               ? html`
                   ${this.#renderGenChoice({
-                    label: t("seq.genKey"),
-                    value:
-                      this.draftGenKey === "auto"
-                        ? "auto"
-                        : String(this.draftGenKey),
+                    label: t("seq.genLockPitch"),
+                    value: this.draftGenLockPitch === "on" ? "on" : "off",
                     options: [
-                      ["auto", t("seq.genAuto")],
-                      ...Array.from({ length: 12 }, (_, pc) => [
-                        String(pc),
-                        keyPcLabel(pc),
-                      ] as [string, string]),
+                      ["off", t("seq.genOff")],
+                      ["on", t("seq.genOn")],
                     ],
                     onPick: (v) => {
-                      this.draftGenKey =
-                        v === "auto" ? "auto" : Number(v) >>> 0;
+                      this.draftGenLockPitch = v === "on" ? "on" : "off";
                     },
                   })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genScale"),
-                    value: this.draftGenScale,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["major", t("seq.genScaleMajor")],
-                      ["minor", t("seq.genScaleMinor")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenScale = v as GenScaleMode;
-                    },
-                  })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genPalette"),
-                    value: this.draftGenPalette,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["pop", t("seq.genPalettePop")],
-                      ["modal", t("seq.genPaletteModal")],
-                      ["jazz", t("seq.genPaletteJazz")],
-                      ["ambient", t("seq.genPaletteAmbient")],
-                      ["mixed", t("seq.genPaletteMixed")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenPalette = v as GenPaletteChoice;
-                    },
-                  })}
+                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
+                    >${t("seq.genLockPitchHint")}</span
+                  >
+                  ${this.draftGenLockPitch === "on"
+                    ? nothing
+                    : html`
+                        ${this.#renderGenChoice({
+                          label: t("seq.genKey"),
+                          value:
+                            this.draftGenKey === "auto"
+                              ? "auto"
+                              : String(this.draftGenKey),
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ...Array.from({ length: 12 }, (_, pc) => [
+                              String(pc),
+                              keyPcLabel(pc),
+                            ] as [string, string]),
+                          ],
+                          onPick: (v) => {
+                            this.draftGenKey =
+                              v === "auto" ? "auto" : Number(v) >>> 0;
+                          },
+                        })}
+                        ${this.#renderGenChoice({
+                          label: t("seq.genScale"),
+                          value: this.draftGenScale,
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ["major", t("seq.genScaleMajor")],
+                            ["minor", t("seq.genScaleMinor")],
+                          ],
+                          onPick: (v) => {
+                            this.draftGenScale = v as GenScaleMode;
+                          },
+                        })}
+                        ${this.#renderGenChoice({
+                          label: t("seq.genPalette"),
+                          value: this.draftGenPalette,
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ["pop", t("seq.genPalettePop")],
+                            ["modal", t("seq.genPaletteModal")],
+                            ["jazz", t("seq.genPaletteJazz")],
+                            ["ambient", t("seq.genPaletteAmbient")],
+                            ["mixed", t("seq.genPaletteMixed")],
+                          ],
+                          onPick: (v) => {
+                            this.draftGenPalette = v as GenPaletteChoice;
+                          },
+                        })}
+                      `}
                   ${this.#renderGenChoice({
                     label: t("seq.genForm"),
                     value: this.draftGenForm,
@@ -2791,6 +2886,22 @@ export class GlSequencerPage extends LitElement {
                     },
                   })}
                   ${this.#renderGenChoice({
+                    label: t("seq.genLockTempoPow2"),
+                    value:
+                      this.draftGenLockTempoPow2 === "on" ? "on" : "off",
+                    options: [
+                      ["off", t("seq.genOff")],
+                      ["on", t("seq.genOn")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenLockTempoPow2 =
+                        v === "on" ? "on" : "off";
+                    },
+                  })}
+                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
+                    >${t("seq.genLockTempoPow2Hint")}</span
+                  >
+                  ${this.#renderGenChoice({
                     label: t("seq.genReverse"),
                     value: this.draftGenReverse,
                     options: [
@@ -2836,6 +2947,7 @@ export class GlSequencerPage extends LitElement {
           </sonic-button>
           <sonic-button
             type="primary"
+            ?disabled=${this.#genPoolSamples().length === 0}
             @click=${() => void this.#commitGenerate()}
           >
             ${t("seq.generateConfirm")}
@@ -2863,8 +2975,9 @@ export class GlSequencerPage extends LitElement {
               <li>Poignées = in-out / tête de lecture</li>
               <li>Poignée timeline = déplacer la boucle</li>
               <li>Clip = temps / piste · Alt = sans aimant</li>
-              <li>Appui long clip = options (fade / stretch) / dupliquer</li>
+              <li>Appui long clip = options (fade / stretch / offset) / dupliquer</li>
               <li>Poignées clip = trim · poubelle = supprimer · fin = durée</li>
+              <li>${t("seq.rotateDocs")}</li>
             </ul>
           </div>
         </sonic-modal-content>
@@ -2904,11 +3017,22 @@ export class GlSequencerPage extends LitElement {
     this.draftGenHumanize = "auto";
     this.draftGenVariation = "auto";
     this.draftGenBpmSync = "auto";
+    this.draftGenLockTempoPow2 = "off";
     this.draftGenReverse = "auto";
     this.draftGenStutter = "auto";
     this.draftGenCallResponse = "auto";
+    this.draftGenLockPitch = "off";
+    this.draftGenSampleFilter = "all";
     this.draftGenAdvanced = true;
     this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+  }
+
+  #genPoolSamples(): Sample[] {
+    let list = this.samples.filter((s) => !s.deletedAt);
+    const f = this.draftGenSampleFilter;
+    if (f === "favorite") list = list.filter((s) => s.favorite);
+    else if (f !== "all") list = list.filter((s) => s.class === f);
+    return list;
   }
 
   #renderGenChoice(opts: {
@@ -3519,6 +3643,26 @@ export class GlSequencerPage extends LitElement {
           this.clips = this.clips.map((c) =>
             c.id === last.entityId ? restored : c,
           );
+          if (restored.sampleId) this.#invalidateSampleBuffers(restored.sampleId);
+        }
+      }
+    } else if (last.op === "offset" && last.entityType === "clip") {
+      const payload = last.payload as {
+        contentOffsetMs?: number;
+        prev?: { contentOffsetMs?: number };
+      };
+      if (payload.prev?.contentOffsetMs != null) {
+        const clip = this.clips.find((c) => c.id === last.entityId);
+        if (clip) {
+          const restored = {
+            ...clip,
+            contentOffsetMs: payload.prev.contentOffsetMs,
+          };
+          await db.clips.put(restored);
+          this.clips = this.clips.map((c) =>
+            c.id === last.entityId ? restored : c,
+          );
+          if (restored.sampleId) this.#invalidateSampleBuffers(restored.sampleId);
         }
       }
     }
@@ -3540,6 +3684,10 @@ export class GlSequencerPage extends LitElement {
     // Native mouse double-click (detail ≥ 2) — don't start a drag.
     if (e.detail >= 2 && clip.sampleId) {
       this.#openClipEditor(clip);
+      return;
+    }
+    if (this.rotateClipTool) {
+      this.#clipRotateDown(e, clip);
       return;
     }
     this.#fsm.reset();
@@ -4191,6 +4339,15 @@ export class GlSequencerPage extends LitElement {
     const open = !!clip;
     const fadeMax = clip ? this.#fadeMaxMs(clip) : 0;
     const label = STRETCH_LABEL[clip?.stretchMode ?? "off"];
+    const sample = clip?.sampleId
+      ? this.samples.find((s) => s.id === clip.sampleId)
+      : undefined;
+    const offsetMax = Math.max(1, sample?.durationMs ?? 1);
+    const offsetMs = clip
+      ? Math.round(
+          ((clip.contentOffsetMs % offsetMax) + offsetMax) % offsetMax,
+        )
+      : 0;
     return html`
       <sonic-modal
         align="left"
@@ -4235,6 +4392,23 @@ export class GlSequencerPage extends LitElement {
                         void this.#setClipFades(
                           clip.id,
                           clip.fadeInMs,
+                          Number((e.target as HTMLInputElement).value),
+                        )}
+                    />
+                  </label>
+                  <label
+                    class="flex flex-col gap-1.5 text-xs text-neutral-500"
+                  >
+                    ${t("seq.contentOffset")} · ${offsetMs} ms
+                    <input
+                      class="w-full accent-primary"
+                      type="range"
+                      min="0"
+                      max=${offsetMax - 1}
+                      .value=${String(offsetMs)}
+                      @input=${(e: Event) =>
+                        void this.#setClipContentOffset(
+                          clip.id,
                           Number((e.target as HTMLInputElement).value),
                         )}
                     />
@@ -4346,6 +4520,101 @@ export class GlSequencerPage extends LitElement {
     if (this.playing) await this.#resyncSchedule();
   }
 
+  #wrapContentOffsetMs(ms: number, durationMs: number): number {
+    const dur = Math.max(1, Math.round(durationMs));
+    let x = Math.round(ms) % dur;
+    if (x < 0) x += dur;
+    return x;
+  }
+
+  #clipSampleDurationMs(clip: Clip): number {
+    if (!clip.sampleId) return 1;
+    const sample = this.samples.find((s) => s.id === clip.sampleId);
+    if (sample && sample.durationMs > 0) return sample.durationMs;
+    const entry = this.#pcmCache.get(clip.sampleId);
+    if (entry?.pcm.length && entry.sampleRate > 0) {
+      return Math.max(1, Math.round((entry.pcm.length / entry.sampleRate) * 1000));
+    }
+    return 1;
+  }
+
+  #invalidateSampleBuffers(sampleId: string): void {
+    for (const key of [...this.#bufferCache.keys()]) {
+      if (key === sampleId || key.startsWith(`${sampleId}:`)) {
+        this.#bufferCache.delete(key);
+      }
+    }
+  }
+
+  async #setClipContentOffset(
+    clipId: string,
+    contentOffsetMs: number,
+  ): Promise<void> {
+    const clip = this.clips.find((c) => c.id === clipId);
+    if (!clip) return;
+    const next = this.#wrapContentOffsetMs(
+      contentOffsetMs,
+      this.#clipSampleDurationMs(clip),
+    );
+    if (next === clip.contentOffsetMs) return;
+    const updated = { ...clip, contentOffsetMs: next };
+    await db.clips.put(updated);
+    this.clips = this.clips.map((c) => (c.id === clip.id ? updated : c));
+    if (clip.sampleId) this.#invalidateSampleBuffers(clip.sampleId);
+    if (this.playing) await this.#resyncSchedule();
+  }
+
+  /** Rotate tool: drag shifts contentOffsetMs (wrap) without moving the clip. */
+  #clipRotateDown = (e: PointerEvent, clip: Clip): void => {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    const originX = e.clientX;
+    const originOffset = clip.contentOffsetMs;
+    const bpm = this.project?.bpm ?? 120;
+    const durMs = this.#clipSampleDurationMs(clip);
+    const clipW = Math.max(8, clip.lengthTick * this.pxPerTick);
+    const clipMs = ticksToMs(clip.lengthTick, bpm);
+
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - originX;
+      // Drag left → waveform moves left → positive contentOffset (editor parity).
+      const deltaMs = clipW > 0 ? (-dx / clipW) * clipMs : 0;
+      const contentOffsetMs = this.#wrapContentOffsetMs(
+        originOffset + deltaMs,
+        durMs,
+      );
+      this.clips = this.clips.map((c) =>
+        c.id === clip.id ? { ...c, contentOffsetMs } : c,
+      );
+    };
+
+    const up = async () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const updated = this.clips.find((c) => c.id === clip.id);
+      if (!updated || updated.contentOffsetMs === originOffset) return;
+      await db.clips.put(updated);
+      await db.ops.add({
+        id: createEntityId(),
+        entityType: "clip",
+        entityId: clip.id,
+        op: "offset",
+        payload: {
+          contentOffsetMs: updated.contentOffsetMs,
+          prev: { contentOffsetMs: originOffset },
+        },
+        clientSeq: Date.now(),
+        clientId: "local",
+        createdAt: nowIso(),
+      });
+      if (clip.sampleId) this.#invalidateSampleBuffers(clip.sampleId);
+      if (this.playing) await this.#resyncSchedule();
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   async #cycleStretch(clipId?: string): Promise<void> {
     const id = clipId ?? this.selectedId;
     const clip = id
@@ -4376,8 +4645,11 @@ export class GlSequencerPage extends LitElement {
       if (!ok) return;
     }
 
-    const pool = this.samples.filter((s) => !s.deletedAt);
-    if (pool.length === 0) return;
+    const pool = this.#genPoolSamples();
+    if (pool.length === 0) {
+      await glDialog.alert(t("seq.genSampleFilterEmpty"));
+      return;
+    }
 
     const analysisRows = await db.analyses.bulkGet(pool.map((s) => s.id));
     const analysisById = new Map(
@@ -4406,6 +4678,8 @@ export class GlSequencerPage extends LitElement {
       reverse: this.draftGenReverse,
       stutter: this.draftGenStutter,
       callResponse: this.draftGenCallResponse,
+      lockPitch: this.draftGenLockPitch,
+      lockTempoPow2: this.draftGenLockTempoPow2,
       tracks: this.tracks.map((t) => ({ id: t.id, index: t.index })),
       samples: pool.map((s) => {
         const a = analysisById.get(s.id);
@@ -4417,6 +4691,8 @@ export class GlSequencerPage extends LitElement {
           class: s.class,
           favorite: s.favorite,
           loopScore: s.loopScore ?? a?.loopScore,
+          loopStartMs: s.loopStartMs,
+          loopEndMs: s.loopEndMs,
           pitchHz: a?.pitchHz,
           noteName: a?.noteName,
           harmonicity: a?.harmonicity,
@@ -4481,9 +4757,10 @@ export class GlSequencerPage extends LitElement {
         contentOffsetMs: p.contentOffsetMs,
         loopEnabled: p.loopEnabled,
         loopLengthMs:
-          sample?.loopEndMs && sample.loopStartMs
+          p.loopLengthMs ??
+          (sample?.loopEndMs && sample.loopStartMs
             ? sample.loopEndMs - sample.loopStartMs
-            : undefined,
+            : undefined),
         gainDb: p.gainDb,
         fadeInMs: p.fadeInMs,
         fadeOutMs: p.fadeOutMs,

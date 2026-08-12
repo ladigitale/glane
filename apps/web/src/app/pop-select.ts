@@ -16,7 +16,8 @@ const SEARCH_THRESHOLD = 8;
 /**
  * Select via sonic-pop + sonic-menu (preferred over sonic-select).
  * Local search field when options.length >= 8.
- * Fires `gl-change` with `{ value }`.
+ * Single: fires `gl-change` with `{ value }`.
+ * Multi (`multiple`): fires `gl-change` with `{ values }` ; pop stays open.
  */
 @customElement("gl-pop-select")
 export class GlPopSelect extends LitElement {
@@ -32,6 +33,8 @@ export class GlPopSelect extends LitElement {
   ];
 
   @property() value = "";
+  /** Selected values when `multiple` (OR filter). */
+  @property({ attribute: false }) values: readonly string[] = [];
   @property({ attribute: false }) options: readonly PopSelectOption[] = [];
   @property({ attribute: false }) actions: readonly PopSelectAction[] = [];
   @property() placeholder = "…";
@@ -40,6 +43,8 @@ export class GlPopSelect extends LitElement {
   @property() label = "";
   @property() searchPlaceholder = "Rechercher…";
   @property({ type: Boolean }) disabled = false;
+  /** Multi-select: toggle options, keep pop open. */
+  @property({ type: Boolean }) multiple = false;
   /** Highlight trigger when value differs from empty / default. */
   @property({ type: Boolean }) active = false;
 
@@ -51,9 +56,28 @@ export class GlPopSelect extends LitElement {
     return this.options.filter((o) => o.label.toLowerCase().includes(q));
   }
 
-  override render() {
+  get #triggerText(): string {
+    if (this.multiple) {
+      if (this.values.length === 0) return this.placeholder;
+      const labels = this.values.map(
+        (v) => this.options.find((o) => o.value === v)?.label ?? v,
+      );
+      return labels.join(", ");
+    }
     const current = this.options.find((o) => o.value === this.value);
-    const text = current?.label ?? this.placeholder;
+    return current?.label ?? this.placeholder;
+  }
+
+  #isSelected(value: string): boolean {
+    if (this.multiple) {
+      if (value === "") return this.values.length === 0;
+      return this.values.includes(value);
+    }
+    return value === this.value;
+  }
+
+  override render() {
+    const text = this.#triggerText;
     const searchable = this.options.length >= SEARCH_THRESHOLD;
     const list = this.#filtered;
     const hasActions = this.actions.length > 0;
@@ -86,7 +110,7 @@ export class GlPopSelect extends LitElement {
         </sonic-button>
         <div
           slot="content"
-          class="flex min-w-[min(11rem,85vw)] max-w-[min(18rem,92vw)] flex-col gap-1.5 bg-neutral-0 p-2 text-content"
+          class="flex w-max min-w-[min(14rem,85vw)] max-w-[min(20rem,92vw)] flex-col gap-1.5 bg-neutral-0 p-2 text-content"
           @click=${(e: Event) => e.stopPropagation()}
         >
           ${searchable
@@ -119,10 +143,10 @@ export class GlPopSelect extends LitElement {
                     ${list.map(
                       (o) => html`
                         <sonic-menu-item
-                          ?active=${o.value === this.value}
+                          ?active=${this.#isSelected(o.value)}
                           @click=${() => this.#pick(o.value)}
                         >
-                          ${o.label}
+                          <span class="whitespace-nowrap">${o.label}</span>
                         </sonic-menu-item>
                       `,
                     )}
@@ -139,7 +163,7 @@ export class GlPopSelect extends LitElement {
                         ${a.icon
                           ? glIcon(a.icon, { slot: "prefix", size: "xs" })
                           : nothing}
-                        ${a.label}
+                        <span class="whitespace-nowrap">${a.label}</span>
                       </sonic-menu-item>
                     `,
                   )}
@@ -159,6 +183,26 @@ export class GlPopSelect extends LitElement {
   }
 
   #pick(value: string) {
+    if (this.multiple) {
+      let next: string[];
+      if (value === "") {
+        next = [];
+      } else {
+        const set = new Set(this.values);
+        if (set.has(value)) set.delete(value);
+        else set.add(value);
+        next = [...set];
+      }
+      this.values = next;
+      this.dispatchEvent(
+        new CustomEvent("gl-change", {
+          detail: { values: next },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return;
+    }
     this.#hidePop();
     if (value === this.value) return;
     this.value = value;

@@ -111,7 +111,7 @@ export class GlLibraryPage extends LitElement {
 
   @subscribe(libraryFiltersKey.tagFilter)
   @state()
-  tagFilter = "";
+  tagFilter: string[] = [];
 
   @subscribe(libraryFiltersKey.q)
   @state()
@@ -147,7 +147,7 @@ export class GlLibraryPage extends LitElement {
     set(libraryFiltersKey, {
       classFilter: "all",
       sessionFilter: "",
-      tagFilter: "",
+      tagFilter: [],
       q: "",
     });
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
@@ -188,7 +188,7 @@ export class GlLibraryPage extends LitElement {
 
   #onProjectChange = (): void => {
     set(libraryFiltersKey.sessionFilter, "");
-    set(libraryFiltersKey.tagFilter, "");
+    set(libraryFiltersKey.tagFilter, []);
     void this.#reload();
   };
 
@@ -265,8 +265,10 @@ export class GlLibraryPage extends LitElement {
     if (this.classFilter && this.classFilter !== "all") {
       list = list.filter((s) => s.class === this.classFilter);
     }
-    if (this.tagFilter) {
-      list = list.filter((s) => (s.tags ?? []).includes(this.tagFilter));
+    if (this.tagFilter.length > 0) {
+      list = list.filter((s) =>
+        this.tagFilter.some((tag) => (s.tags ?? []).includes(tag)),
+      );
     }
     const q = this.captureQuery.trim().toLowerCase();
     const scores = this.clapScores;
@@ -504,16 +506,17 @@ export class GlLibraryPage extends LitElement {
         <gl-pop-select
           class="max-w-64 max-[480px]:max-w-full max-[480px]:flex-[1_1_auto]"
           size="sm"
-          .value=${this.tagFilter}
+          multiple
+          .values=${this.tagFilter}
           .options=${[
             { value: "", label: t("library.allTags") },
             ...this.#tagOptions,
           ]}
           placeholder=${t("library.allTags")}
           searchPlaceholder=${t("library.popSearch")}
-          ?active=${!!this.tagFilter}
-          @gl-change=${(e: CustomEvent<{ value: string }>) => {
-            set(libraryFiltersKey.tagFilter, e.detail.value);
+          ?active=${this.tagFilter.length > 0}
+          @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
+            set(libraryFiltersKey.tagFilter, e.detail.values);
             this.selected = new Set();
           }}
         ></gl-pop-select>

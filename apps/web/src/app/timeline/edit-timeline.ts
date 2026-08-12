@@ -32,7 +32,8 @@ type DragMode =
   | "sel-move"
   | "scrub"
   | "scroll"
-  | "zoom";
+  | "zoom"
+  | "rotate";
 
 @customElement("gl-edit-timeline")
 export class GlEditTimeline extends LitElement {
@@ -145,9 +146,13 @@ export class GlEditTimeline extends LitElement {
   /** Absolute playhead in master sample index. */
   @property({ type: Number }) playheadSample = 0;
   @property({ type: Boolean }) playing = false;
+  /** When true, lane drag circular-shifts the waveform instead of pan/zoom. */
+  @property({ type: Boolean }) rotateMode = false;
 
   @state() private pxPerSample = 0.02;
   @state() private viewW = 800;
+  /** Live circular offset while dragging in rotate mode (samples). */
+  @state() private rotateOffsetSamples = 0;
 
   #renderer: WaveformRenderer | null = null;
   #pyramid: PeakPyramid | null = null;
@@ -164,6 +169,7 @@ export class GlEditTimeline extends LitElement {
   #ro: ResizeObserver | null = null;
   #followPlayhead = true;
   #scrubLastX = 0;
+  #rotateOriginX = 0;
 
   override firstUpdated(): void {
     const canvas = this.renderRoot.querySelector("canvas.wave");
@@ -198,6 +204,7 @@ export class GlEditTimeline extends LitElement {
       this.#pyramidSrc = this.pcm;
       this.#fittedForLen = -1;
       this.#fitIfNeeded(true);
+      if (this.rotateOffsetSamples !== 0) this.rotateOffsetSamples = 0;
     }
     const pending = this.#pendingScrollLeft;
     if (pending != null) {
@@ -211,6 +218,7 @@ export class GlEditTimeline extends LitElement {
       changed.has("pxPerSample") ||
       changed.has("startSample") ||
       changed.has("endSample") ||
+      changed.has("rotateOffsetSamples") ||
       !this.hasUpdated
     ) {
       this.#paint();
@@ -324,6 +332,12 @@ export class GlEditTimeline extends LitElement {
     this.#syncFollowScroll(true);
   }
 
+  /** Drop live circular-shift preview (e.g. commit aborted). */
+  clearRotateOffset(): void {
+    if (this.rotateOffsetSamples === 0) return;
+    this.rotateOffsetSamples = 0;
+  }
+
   #length(): number {
     return Math.max(1, this.pcm?.length ?? this.endSample ?? 1);
   }
@@ -381,6 +395,7 @@ export class GlEditTimeline extends LitElement {
       widthPx: viewportW,
       heightPx: 180,
       color: this.color,
+      circularOffsetSamples: this.rotateOffsetSamples || undefined,
     });
   }
 
@@ -489,7 +504,9 @@ export class GlEditTimeline extends LitElement {
             </div>
             <div
               class="lane"
-              style="min-width:${laneW}px"
+              style="min-width:${laneW}px;cursor:${this.rotateMode
+                ? "ew-resize"
+                : "default"}"
               @pointerdown=${this.#laneDown}
               @pointermove=${this.#laneMove}
               @pointerup=${this.#laneUp}
@@ -608,6 +625,15 @@ export class GlEditTimeline extends LitElement {
     lane.setPointerCapture(e.pointerId);
     const sample = this.#sampleAtClientX(e.clientX);
     this.#dragOriginSample = sample;
+
+    if (this.rotateMode) {
+      this.#drag = "rotate";
+      this.#rotateOriginX = e.clientX;
+      this.rotateOffsetSamples = 0;
+      this.#setFollowPlayhead(false);
+      return;
+    }
+
     this.#fsm.reset();
     this.#fsm.push({
       type: "down",
@@ -625,6 +651,15 @@ export class GlEditTimeline extends LitElement {
   };
 
   #laneMove = (e: PointerEvent): void => {
+    if (this.#drag === "rotate") {
+      const dx = e.clientX - this.#rotateOriginX;
+      // Drag left (dx < 0) → waveform moves left → positive rotate offset.
+      const next = Math.round(-dx / this.pxPerSample);
+      if (next !== this.rotateOffsetSamples) {
+        this.rotateOffsetSamples = next;
+      }
+      return;
+    }
     if (this.#drag === "trim-start") {
       const sample = this.#sampleAtClientX(e.clientX);
       this.startSample = Math.min(sample, this.endSample - 1);
@@ -751,6 +786,22 @@ export class GlEditTimeline extends LitElement {
 
   #laneUp = (e: PointerEvent): void => {
     const mode = this.#drag;
+    if (mode === "rotate") {
+      const offset = this.rotateOffsetSamples;
+      this.#drag = "none";
+      if (offset !== 0) {
+        this.dispatchEvent(
+          new CustomEvent("gl-rotate", {
+            detail: { offsetSamples: offset },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      } else {
+        this.rotateOffsetSamples = 0;
+      }
+      return;
+    }
     if (mode === "none" && e.type === "pointerup") {
       const st = this.#fsm.push({
         type: "up",

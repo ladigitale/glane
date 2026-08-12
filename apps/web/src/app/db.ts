@@ -20,6 +20,9 @@ import {
 import { normalizeThemeId, type AppThemeId } from "./theme.js";
 import { resolveBrowserLocale, type AppLocale } from "./i18n/locale.js";
 
+/** How « Traiter un fichier » segments audio (live mic always hunts). */
+export type FileProcessMode = "hunt" | "song" | "whole";
+
 export type UserPrefs = {
   id: string;
   voicePolicy: VoicePolicy;
@@ -40,6 +43,11 @@ export type UserPrefs = {
   attackSensitivity?: number;
   /** Desired live captures per minute (2–60). */
   targetCapturesPerMin?: number;
+  /**
+   * File import mode: event hunt, tempo grid slices, or whole file.
+   * Live mic ignores this (always hunt).
+   */
+  fileProcessMode?: FileProcessMode;
   /** Preferred MediaDeviceInfo.deviceId for capture (empty = browser default). */
   captureAudioDeviceId?: string;
   /**
@@ -227,6 +235,10 @@ export async function ensurePrefs(): Promise<UserPrefs> {
     prefs = { ...prefs, mlClap: false };
     dirty = true;
   }
+  if (prefs.fileProcessMode === undefined) {
+    prefs = { ...prefs, fileProcessMode: "hunt" };
+    dirty = true;
+  }
   const theme = normalizeThemeId(prefs.theme);
   if (theme !== prefs.theme) {
     prefs = { ...prefs, theme };
@@ -254,6 +266,7 @@ async function createDefaultPrefs(): Promise<UserPrefs> {
     captureAutoGain: false,
     attackSensitivity: DEFAULT_ATTACK_SENSITIVITY,
     targetCapturesPerMin: DEFAULT_TARGET_CAPTURES_PER_MIN,
+    fileProcessMode: "hunt",
     mlYamnet: true,
     mlClap: false,
   };
