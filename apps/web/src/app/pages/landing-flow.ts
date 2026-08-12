@@ -1,6 +1,25 @@
 import { LitElement, css, html } from "lit";
 import { customElement } from "lit/decorators.js";
 
+/** Timeline length (samples) for the landing waveform loop. */
+const CYCLE = 520;
+const BLOCKS: ReadonlyArray<{
+  start: number;
+  end: number;
+  kind: "silence" | "sound";
+  /** Colour index for sound blocks (-1 = silence). */
+  tag: number;
+}> = [
+  { start: 0, end: 55, kind: "silence", tag: -1 },
+  { start: 55, end: 145, kind: "sound", tag: 0 },
+  { start: 145, end: 195, kind: "silence", tag: -1 },
+  { start: 195, end: 250, kind: "sound", tag: 1 },
+  { start: 250, end: 310, kind: "silence", tag: -1 },
+  { start: 310, end: 420, kind: "sound", tag: 2 },
+  { start: 420, end: 470, kind: "silence", tag: -1 },
+  { start: 470, end: 520, kind: "sound", tag: 0 },
+];
+
 /**
  * Playback waveform (R→L): sound bursts + silence, detect filter colours
  * each section after amp rises then returns near zero.
@@ -105,33 +124,9 @@ export class GlLandingFlow extends LitElement {
     if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  /**
-   * Timeline blocks: activity bursts separated by silence.
-   * A new coloured section starts each time amp rises from ~0 then returns.
-   */
-  static readonly #CYCLE = 520;
-  static readonly #BLOCKS: ReadonlyArray<{
-    start: number;
-    end: number;
-    kind: "silence" | "sound";
-    /** Colour index for sound blocks (-1 = silence). */
-    tag: number;
-  }> = [
-    { start: 0, end: 55, kind: "silence", tag: -1 },
-    { start: 55, end: 145, kind: "sound", tag: 0 },
-    { start: 145, end: 195, kind: "silence", tag: -1 },
-    { start: 195, end: 250, kind: "sound", tag: 1 },
-    { start: 250, end: 310, kind: "silence", tag: -1 },
-    { start: 310, end: 420, kind: "sound", tag: 2 },
-    { start: 420, end: 470, kind: "silence", tag: -1 },
-    { start: 470, end: 520, kind: "sound", tag: 0 },
-  ];
-
   #block(sample: number) {
-    const local =
-      ((sample % GlLandingFlow.#CYCLE) + GlLandingFlow.#CYCLE) %
-      GlLandingFlow.#CYCLE;
-    for (const b of GlLandingFlow.#BLOCKS) {
+    const local = ((sample % CYCLE) + CYCLE) % CYCLE;
+    for (const b of BLOCKS) {
       if (local >= b.start && local < b.end) {
         return {
           ...b,
@@ -141,7 +136,7 @@ export class GlLandingFlow extends LitElement {
     }
     return {
       start: 0,
-      end: GlLandingFlow.#CYCLE,
+      end: CYCLE,
       kind: "silence" as const,
       tag: -1,
       t: 0,
@@ -167,7 +162,7 @@ export class GlLandingFlow extends LitElement {
     const b = this.#block(sample);
     if (b.kind !== "sound") return -1;
     // Rotate palette across cycles so successive bursts stay distinct
-    const cycle = Math.floor(sample / GlLandingFlow.#CYCLE);
+    const cycle = Math.floor(sample / CYCLE);
     return (b.tag + cycle) % 3;
   }
 
