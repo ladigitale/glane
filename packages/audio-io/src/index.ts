@@ -11,7 +11,7 @@ export {
   type LiveCaptureEvents,
   type LiveCaptureOpts,
 } from "./live-capture.js";
-export { audioExport, type EncodeWavOpts } from "./export/audio-export.js";
+export { audioExport, type EncodeWavOpts, type EncodeMp3Progress } from "./export/audio-export.js";
 export {
   octatrackOt,
   OT_MAX_SLICES,

@@ -11,4 +11,6 @@ export * from "./segment-pipeline.js";
 export * from "./analysis-queue.js";
 export * from "./stretch.js";
 export * from "./normalize.js";
+export * from "./dynamics.js";
+export * from "./auto-crop.js";
 export * from "./capture/event-hunter.js";

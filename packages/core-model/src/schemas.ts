@@ -177,12 +177,22 @@ export type Project = z.infer<typeof ProjectSchema>;
 export const TrackFxTypeSchema = z.enum(["none", "eq", "echo", "reverb"]);
 export type TrackFxType = z.infer<typeof TrackFxTypeSchema>;
 
+/** Echo delay as beat fractions (¼ note = 1). Clamped at apply time by BPM. */
+export const ECHO_DELAY_BEATS_MIN = 0.125;
+export const ECHO_DELAY_BEATS_MAX = 4;
+/** Web Audio DelayNode max for tempo-synced echo. */
+export const ECHO_DELAY_MAX_SEC = 4;
+
 export const TrackFxSchema = z.object({
   type: TrackFxTypeSchema.default("none"),
   /** Wet mix for echo / reverb (0–1). */
   mix: z.number().min(0).max(1).default(0.35),
-  /** Echo delay (ms). */
-  delayMs: z.number().min(20).max(1500).default(280),
+  /** Echo delay in beats (1 = quarter note). */
+  delayBeats: z
+    .number()
+    .min(ECHO_DELAY_BEATS_MIN)
+    .max(ECHO_DELAY_BEATS_MAX)
+    .default(0.5),
   /** Echo feedback (0–0.9). */
   feedback: z.number().min(0).max(0.9).default(0.35),
   /** Reverb decay / room size (0–1). */
@@ -197,7 +207,7 @@ export type TrackFx = z.infer<typeof TrackFxSchema>;
 export const DEFAULT_TRACK_FX: TrackFx = {
   type: "none",
   mix: 0.35,
-  delayMs: 280,
+  delayBeats: 0.5,
   feedback: 0.35,
   decay: 0.45,
   low: 1,
@@ -205,9 +215,42 @@ export const DEFAULT_TRACK_FX: TrackFx = {
   high: 1,
 };
 
-/** Coerce IDB / partial rows into a full TrackFx. */
+function clampFx(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/**
+ * Resolve tempo-synced echo delay to seconds (clamped for DelayNode).
+ */
+export function echoDelaySec(delayBeats: number, bpm: number): number {
+  const beats = clampFx(
+    delayBeats,
+    ECHO_DELAY_BEATS_MIN,
+    ECHO_DELAY_BEATS_MAX,
+  );
+  const sec = (beats * 60) / Math.max(1, bpm);
+  return clampFx(sec, 0.02, ECHO_DELAY_MAX_SEC);
+}
+
+/** Coerce IDB / partial rows into a full TrackFx (migrates legacy delayMs @ 120 BPM). */
 export function normalizeTrackFx(raw: unknown): TrackFx {
-  const parsed = TrackFxSchema.safeParse(raw ?? {});
+  const base =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+  if (
+    (base.delayBeats === undefined || base.delayBeats === null) &&
+    typeof base.delayMs === "number" &&
+    Number.isFinite(base.delayMs)
+  ) {
+    base.delayBeats = clampFx(
+      base.delayMs / (60_000 / 120),
+      ECHO_DELAY_BEATS_MIN,
+      ECHO_DELAY_BEATS_MAX,
+    );
+  }
+  delete base.delayMs;
+  const parsed = TrackFxSchema.safeParse(base);
   return parsed.success ? parsed.data : { ...DEFAULT_TRACK_FX };
 }
 

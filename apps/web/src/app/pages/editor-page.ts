@@ -9,6 +9,7 @@ import {
   type Sample,
   type TrackFx,
 } from "@glane/core-model";
+import { noiseGate, softCompress, autoCropPcm } from "@glane/audio-dsp";
 import { TransportEngine, bakeTrackFx } from "@glane/audio-engine";
 import { sampleOpfs } from "@glane/audio-io";
 import { LitElement, css, html, nothing } from "lit";
@@ -18,7 +19,7 @@ import { handle } from "@supersoniks/concorde/decorators";
 import { SonicToast } from "@supersoniks/concorde/toast";
 import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
-import { t } from "../i18n/messages.js";
+import { t, tf } from "../i18n/messages.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { SAMPLE_PROCESSED_EVENT } from "../process-queue.js";
 import { navigate } from "../router.js";
@@ -27,6 +28,8 @@ import {
   renameSample,
   toggleFavorite,
 } from "../sample-actions.js";
+import { demucsQueue } from "../ml/demucs-queue.js";
+import { ML_TAG } from "@glane/audio-ml";
 import {
   applyOps,
   emptyEditorState,
@@ -109,15 +112,24 @@ export class GlEditorPage extends LitElement {
   @state() private stretchModeUi: "preserve-pitch" | "resample" =
     "preserve-pitch";
   @state() private stretchModalOpen = false;
+  @state() private dynamicsModalOpen = false;
   @state() private docsModalOpen = false;
   @state() private forceRoleModalOpen = false;
   @state() private stretchDraft = 100;
+  @state() private dynamicsMode: "gate" | "compress" = "gate";
+  @state() private dynamicsThresholdDb = -36;
+  @state() private dynamicsAttackMs = 5;
+  @state() private dynamicsReleaseMs = 80;
+  @state() private dynamicsRatio = 3;
+  @state() private dynamicsMakeupDb = 3;
 
   @state() private previewFx: TrackFx = { ...DEFAULT_TRACK_FX };
   @state() private viewStart = 0;
   @state() private viewEnd = 0;
   @state() private viewMode: "global" | "vue" = "global";
   @state() private applyingFx = false;
+  @state() private separating = false;
+  @state() private separateProgress = "";
   @state() private hasClipboard = false;
   @state() private dirty = false;
   @state() private historyLen = 0;
@@ -271,6 +283,7 @@ export class GlEditorPage extends LitElement {
         @gl-transport=${this.#onTransport}
       ></gl-transport-bar>
       ${this.#renderStretchModal()}
+      ${this.#renderDynamicsModal()}
       ${this.#renderForceRoleModal()}
       ${this.#renderDocsModal()}
       <div class="max-h-24 overflow-auto font-mono text-[0.7rem] text-neutral-500">
@@ -281,6 +294,13 @@ export class GlEditorPage extends LitElement {
   }
 
   #processingMeta() {
+    if (this.separating && this.separateProgress) {
+      return html`<sonic-alert
+        class="mb-1"
+        status="info"
+        label=${this.separateProgress}
+      ></sonic-alert>`;
+    }
     const tags = this.sample?.tags ?? [];
     if (
       tags.includes("processing:pending") ||
@@ -297,6 +317,7 @@ export class GlEditorPage extends LitElement {
     this.historyLen = 0;
     this.previewFx = { ...DEFAULT_TRACK_FX };
     this.stretchModalOpen = false;
+    this.dynamicsModalOpen = false;
     this.docsModalOpen = false;
     this.forceRoleModalOpen = false;
     set(editorFormKey, {
@@ -531,6 +552,7 @@ export class GlEditorPage extends LitElement {
         gain: 1,
         pan: 0,
         fx: this.previewFx,
+        bpm: 120,
       });
     }
     this.#engine.setClips([
@@ -559,7 +581,10 @@ export class GlEditorPage extends LitElement {
   }
 
   #editMenuItems(hasSel: boolean): MoreMenuEntry[] {
-    const busy = this.applyingFx;
+    const busy = this.applyingFx || this.separating;
+    const isStem = (this.sample?.tags ?? []).some((tag) =>
+      tag.startsWith("stem:"),
+    );
     return [
       {
         label: t("editor.undo"),
@@ -612,10 +637,22 @@ export class GlEditorPage extends LitElement {
         onClick: () => void this.#cropToSelection(),
       },
       {
+        label: t("editor.autoCrop"),
+        icon: "scissors",
+        disabled: busy,
+        onClick: () => void this.#autoCrop(),
+      },
+      {
         label: t("editor.normalize"),
         icon: "maximize-2",
         active: this.hasNormalize,
         onClick: () => void this.#normalizePeak(),
+      },
+      {
+        label: t("editor.dynamics"),
+        icon: "activity",
+        disabled: busy,
+        onClick: () => this.#openDynamicsModal(),
       },
       { section: t("editor.sectionDirection") },
       {
@@ -666,9 +703,16 @@ export class GlEditorPage extends LitElement {
       {
         label: t("editor.forceRole"),
         icon: "music",
+        hint: this.sample?.forceRole ?? t("editor.forceRoleAuto"),
         onClick: () => {
           this.forceRoleModalOpen = true;
         },
+      },
+      {
+        label: t("library.separate"),
+        icon: "layers",
+        disabled: busy || isStem || !this.sampleId,
+        onClick: () => void this.#separate(),
       },
       {
         label: t("editor.delete"),
@@ -771,6 +815,199 @@ export class GlEditorPage extends LitElement {
   #commitStretchModal = (): void => {
     this.stretchModalOpen = false;
     void this.applyStretch(this.stretchDraft / 100);
+  };
+
+  #renderDynamicsModal() {
+    const gate = this.dynamicsMode === "gate";
+    return html`
+      <sonic-modal
+        align="left"
+        maxWidth="22rem"
+        .visible=${this.dynamicsModalOpen}
+        @hide=${this.#onDynamicsModalHide}
+      >
+        <sonic-modal-title>${t("editor.dynamicsTitle")}</sonic-modal-title>
+        <sonic-modal-content>
+          <div class="flex flex-col gap-3">
+            <p class="m-0 text-xs text-neutral-500">${t("editor.dynamicsHint")}</p>
+            <div class="flex flex-wrap gap-[0.35rem]" role="radiogroup">
+              <sonic-button
+                size="sm"
+                variant="outline"
+                type="neutral"
+                ?active=${gate}
+                @click=${() => {
+                  this.dynamicsMode = "gate";
+                }}
+              >
+                ${t("editor.dynamicsGate")}
+              </sonic-button>
+              <sonic-button
+                size="sm"
+                variant="outline"
+                type="neutral"
+                ?active=${!gate}
+                @click=${() => {
+                  this.dynamicsMode = "compress";
+                }}
+              >
+                ${t("editor.dynamicsCompress")}
+              </sonic-button>
+            </div>
+            <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
+              >${t("editor.dynamicsThreshold")}
+              ${this.dynamicsThresholdDb} dB
+              <input
+                type="range"
+                class="w-full"
+                min="-80"
+                max="-6"
+                step="1"
+                .valueAsNumber=${this.dynamicsThresholdDb}
+                @input=${(e: Event) => {
+                  this.dynamicsThresholdDb = (
+                    e.target as HTMLInputElement
+                  ).valueAsNumber;
+                }}
+              />
+            </label>
+            <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
+              >${t("editor.dynamicsAttack")} ${this.dynamicsAttackMs} ms
+              <input
+                type="range"
+                class="w-full"
+                min="1"
+                max="100"
+                step="1"
+                .valueAsNumber=${this.dynamicsAttackMs}
+                @input=${(e: Event) => {
+                  this.dynamicsAttackMs = (
+                    e.target as HTMLInputElement
+                  ).valueAsNumber;
+                }}
+              />
+            </label>
+            <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
+              >${t("editor.dynamicsRelease")} ${this.dynamicsReleaseMs} ms
+              <input
+                type="range"
+                class="w-full"
+                min="5"
+                max="500"
+                step="5"
+                .valueAsNumber=${this.dynamicsReleaseMs}
+                @input=${(e: Event) => {
+                  this.dynamicsReleaseMs = (
+                    e.target as HTMLInputElement
+                  ).valueAsNumber;
+                }}
+              />
+            </label>
+            ${gate
+              ? nothing
+              : html`
+                  <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
+                    >${t("editor.dynamicsRatio")}
+                    ${this.dynamicsRatio.toFixed(1)}:1
+                    <input
+                      type="range"
+                      class="w-full"
+                      min="1.5"
+                      max="12"
+                      step="0.5"
+                      .valueAsNumber=${this.dynamicsRatio}
+                      @input=${(e: Event) => {
+                        this.dynamicsRatio = (
+                          e.target as HTMLInputElement
+                        ).valueAsNumber;
+                      }}
+                    />
+                  </label>
+                  <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
+                    >${t("editor.dynamicsMakeup")} ${this.dynamicsMakeupDb} dB
+                    <input
+                      type="range"
+                      class="w-full"
+                      min="0"
+                      max="12"
+                      step="1"
+                      .valueAsNumber=${this.dynamicsMakeupDb}
+                      @input=${(e: Event) => {
+                        this.dynamicsMakeupDb = (
+                          e.target as HTMLInputElement
+                        ).valueAsNumber;
+                      }}
+                    />
+                  </label>
+                `}
+          </div>
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button hideModal variant="outline" type="neutral"
+            >${t("dialog.cancel")}</sonic-button
+          >
+          <sonic-button type="primary" @click=${this.#commitDynamicsModal}
+            >${t("dialog.ok")}</sonic-button
+          >
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
+  }
+
+  #openDynamicsModal = (): void => {
+    this.dynamicsModalOpen = true;
+  };
+
+  #onDynamicsModalHide = (): void => {
+    this.dynamicsModalOpen = false;
+  };
+
+  #commitDynamicsModal = (): void => {
+    this.dynamicsModalOpen = false;
+    void this.#applyDynamics();
+  };
+
+  #applyDynamics = async (): Promise<void> => {
+    const mode = this.dynamicsMode;
+    const thresholdDb = this.dynamicsThresholdDb;
+    const attackMs = this.dynamicsAttackMs;
+    const releaseMs = this.dynamicsReleaseMs;
+    const ratio = this.dynamicsRatio;
+    const makeupDb = this.dynamicsMakeupDb;
+    const sr = this.#sampleRate;
+    await this.#mutateView((view, sel) => {
+      const a = sel?.a ?? 0;
+      const b = sel?.b ?? view.length;
+      if (b <= a) return null;
+      const slice = view.subarray(a, b);
+      const processed =
+        mode === "gate"
+          ? noiseGate(slice, sr, {
+              thresholdDb,
+              attackMs,
+              releaseMs,
+              floor: 0,
+            })
+          : softCompress(slice, sr, {
+              thresholdDb,
+              ratio,
+              attackMs,
+              releaseMs,
+              kneeDb: 6,
+              makeupDb,
+            });
+      const next = view.slice();
+      next.set(processed, a);
+      return {
+        pcm: next,
+        status:
+          mode === "gate"
+            ? t("editor.dynamicsDoneGate")
+            : t("editor.dynamicsDoneCompress"),
+        selStart: a,
+        selEnd: b,
+      };
+    });
   };
 
   #renderForceRoleModal() {
@@ -1061,6 +1298,7 @@ export class GlEditorPage extends LitElement {
         gain: 1,
         pan: 0,
         fx,
+        bpm: 120,
       });
       // Ensure clip routes through the bus if FX was previously none.
       await this.#restartPlay();
@@ -1143,6 +1381,32 @@ export class GlEditorPage extends LitElement {
     const b = Math.max(this.selStart, this.selEnd);
     if (b <= a) return;
     await this.#pushOp({ op: "trim", startSample: a, endSample: b });
+  };
+
+  #autoCrop = (): void => {
+    void this.#mutateView((view, sel) => {
+      const a = sel?.a ?? 0;
+      const b = sel?.b ?? view.length;
+      if (b <= a + 1) return null;
+      const slice = view.subarray(a, b);
+      const result = autoCropPcm(slice, this.#sampleRate);
+      if (!result.cropped) {
+        toast(t("editor.autoCropNone"), "warning");
+        return null;
+      }
+      const next = new Float32Array(
+        a + result.pcm.length + (view.length - b),
+      );
+      if (a > 0) next.set(view.subarray(0, a), 0);
+      next.set(result.pcm, a);
+      if (b < view.length) next.set(view.subarray(b), a + result.pcm.length);
+      return {
+        pcm: next,
+        status: t("editor.autoCropDone"),
+        selStart: a,
+        selEnd: a + result.pcm.length,
+      };
+    });
   };
 
   #commitSelectionAsLoop = async (): Promise<void> => {
@@ -1322,6 +1586,77 @@ export class GlEditorPage extends LitElement {
     if (!this.sampleId) return;
     const updated = await toggleFavorite(this.sampleId);
     if (updated) this.sample = updated;
+  };
+
+  #separate = async (): Promise<void> => {
+    if (!this.sampleId || !this.sample || this.separating) return;
+    const tags = this.sample.tags ?? [];
+    if (tags.some((tag) => tag.startsWith("stem:"))) {
+      await glDialog.alert(t("library.separateSkipStem"));
+      return;
+    }
+    if (tags.includes(ML_TAG.demucs) || tags.includes(ML_TAG.demucsRunning)) {
+      await glDialog.alert(t("library.separateAlready"));
+      return;
+    }
+    if (this.dirty) {
+      const leave = await this.confirmLeave();
+      if (!leave) return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.separate"),
+      message: t("library.separateConfirm"),
+    });
+    if (!ok) return;
+    this.#haltPlay();
+    this.separating = true;
+    this.separateProgress = t("library.separateLoading");
+    const unsub = demucsQueue.subscribe((s) => {
+      if (s.currentSampleId !== this.sampleId && s.remaining > 0) {
+        this.separateProgress = tf("library.separateBatchProgress", {
+          i: Math.min(s.waveDone + 1, Math.max(1, s.waveTotal)),
+          n: s.waveTotal,
+          label: t("library.separating"),
+        });
+        return;
+      }
+      const pct = Math.round(s.ratio * 100);
+      const label =
+        s.phase === "loading"
+          ? `${t("library.separateLoading")} ${pct}%`
+          : `${t("library.separating")} ${pct}%`;
+      this.separateProgress =
+        s.waveTotal > 1
+          ? tf("library.separateBatchProgress", {
+              i: Math.min(s.waveDone + 1, s.waveTotal),
+              n: s.waveTotal,
+              label,
+            })
+          : label;
+    });
+    try {
+      const snap = await demucsQueue.enqueueAndWait(this.sampleId);
+      const fresh = await db.samples.get(this.sampleId);
+      if (fresh?.tags?.includes(ML_TAG.demucs)) {
+        toast(t("library.separateDone"), "success");
+        this.#skipLeaveGuard = true;
+        this.dirty = false;
+        navigate({ name: "library" });
+        return;
+      }
+      if (snap.lastError) {
+        throw new Error(snap.lastError);
+      }
+      await glDialog.alert(t("library.separateAlready"));
+    } catch (e) {
+      await glDialog.alert(
+        `${t("library.separateFailed")}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      unsub();
+      this.separating = false;
+      this.separateProgress = "";
+    }
   };
 
   #remove = async (): Promise<void> => {

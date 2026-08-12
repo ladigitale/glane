@@ -3,7 +3,7 @@
  * Units and useful ranges documented per field.
  */
 export const DSP_THRESHOLDS = {
-  version: "1.5.3",
+  version: "1.5.5",
   frameSize: 1024,
   hopSize: 256,
   /** Adaptive noise floor: 10th percentile over this window (ms). */
@@ -34,6 +34,12 @@ export const DSP_THRESHOLDS = {
     minPeriodMs: 250,
     xfadeMinMs: 20,
     xfadeMaxMs: 200,
+    /** Reject weak periodicity (keep field-raw trim instead). */
+    minScore: 0.55,
+    /** RMS below peak × this = silence (trailing trim). */
+    silenceRelPeak: 0.08,
+    /** Extra fraction of a period: 3.7 beats may round to 4 into quiet tail. */
+    squareSlack: 0.4,
   },
   percussive: {
     attackMaxMs: 20,
@@ -45,6 +51,31 @@ export const DSP_THRESHOLDS = {
     minDurationMs: 80,
     releasePostRollMs: 40,
     maxDurationMs: 20000,
+  },
+  /**
+   * Post-extract auto-crop (polish / editor / batch).
+   * Snaps start to a later louder attack when the head is quiet pre-roll.
+   */
+  autoCrop: {
+    hopMs: 5,
+    /** First window used to decide if the head is “quiet”. */
+    headMs: 50,
+    /** Head peak / global peak below this → look for a later attack. */
+    headQuietRelPeak: 0.32,
+    /** Attack candidate must reach this fraction of global peak. */
+    attackRelPeak: 0.45,
+    /** Envelope rise vs previous lookback frames. */
+    rmsRiseFactor: 2.2,
+    riseLookbackFrames: 4,
+    backtrackMs: 12,
+    preRollMs: 4,
+    postRollMs: 40,
+    /** Skip crop if lead-in / tail trim shorter than this. */
+    minLeadMs: 18,
+    minDurationMs: 60,
+    /** Trailing silence relative to remaining peak. */
+    tailSilenceRelPeak: 0.08,
+    tailHoldMs: 80,
   },
   /**
    * Live envelope hunter — RMS only (no DFT). Capture stays cheap;

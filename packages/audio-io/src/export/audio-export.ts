@@ -97,10 +97,29 @@ function encodeWavFromChannels(
   return new Blob([header, asBlobPart(pcm)], { type: "audio/wav" });
 }
 
+export type EncodeMp3Progress = {
+  /** 0…1 overall (convert + encode). */
+  ratio: number;
+};
+
+async function yieldToUi(): Promise<void> {
+  const sched = (
+    globalThis as unknown as {
+      scheduler?: { yield?: () => Promise<void> };
+    }
+  ).scheduler;
+  if (sched?.yield) {
+    await sched.yield();
+    return;
+  }
+  await new Promise<void>((r) => setTimeout(r, 0));
+}
+
 async function encodeMp3FromChannels(
   channels: Float32Array[],
   sampleRate: number,
   bitrateKbps = 192,
+  onProgress?: (p: EncodeMp3Progress) => void,
 ): Promise<Blob> {
   // Maintained fork — npm `lamejs` 1.2.1 breaks under Vite (MPEGMode / circular deps).
   const { Mp3Encoder } = await import("@breezystack/lamejs");
@@ -110,15 +129,26 @@ async function encodeMp3FromChannels(
   const left = channels[0] ?? new Float32Array(0);
   const right = channels[1] ?? left;
   const block = 1152;
+  const yieldEvery = 48;
   const parts: BlobPart[] = [];
   const leftI16 = new Int16Array(left.length);
   const rightI16 = new Int16Array(right.length);
-  for (let i = 0; i < left.length; i++) {
-    const sl = Math.max(-1, Math.min(1, left[i]!));
-    leftI16[i] = sl < 0 ? sl * 0x8000 : sl * 0x7fff;
-    const sr = Math.max(-1, Math.min(1, right[i]!));
-    rightI16[i] = sr < 0 ? sr * 0x8000 : sr * 0x7fff;
+  const total = Math.max(1, left.length);
+  const convChunk = block * yieldEvery;
+
+  for (let i = 0; i < left.length; i += convChunk) {
+    const end = Math.min(i + convChunk, left.length);
+    for (let j = i; j < end; j++) {
+      const sl = Math.max(-1, Math.min(1, left[j]!));
+      leftI16[j] = sl < 0 ? sl * 0x8000 : sl * 0x7fff;
+      const sr = Math.max(-1, Math.min(1, right[j]!));
+      rightI16[j] = sr < 0 ? sr * 0x8000 : sr * 0x7fff;
+    }
+    onProgress?.({ ratio: (end / total) * 0.35 });
+    await yieldToUi();
   }
+
+  let blocks = 0;
   for (let i = 0; i < leftI16.length; i += block) {
     const l = leftI16.subarray(i, i + block);
     const r = rightI16.subarray(i, i + block);
@@ -127,9 +157,17 @@ async function encodeMp3FromChannels(
         ? encoder.encodeBuffer(l)
         : encoder.encodeBuffer(l, r);
     if (mp3buf.length > 0) parts.push(new Uint8Array(mp3buf));
+    blocks += 1;
+    if (blocks % yieldEvery === 0) {
+      onProgress?.({
+        ratio: 0.35 + (Math.min(i + block, leftI16.length) / total) * 0.65,
+      });
+      await yieldToUi();
+    }
   }
   const end = encoder.flush();
   if (end.length > 0) parts.push(new Uint8Array(end));
+  onProgress?.({ ratio: 1 });
   return new Blob(parts, { type: "audio/mpeg" });
 }
 
@@ -294,11 +332,16 @@ export const audioExport = {
   resampleChannels,
   audioBufferToPlanarFloat,
   zipStore,
-  async encodeMp3(buffer: AudioBuffer, bitrateKbps = 192): Promise<Blob> {
+  async encodeMp3(
+    buffer: AudioBuffer,
+    bitrateKbps = 192,
+    onProgress?: (p: EncodeMp3Progress) => void,
+  ): Promise<Blob> {
     return encodeMp3FromChannels(
       audioBufferToPlanarFloat(buffer),
       buffer.sampleRate,
       bitrateKbps,
+      onProgress,
     );
   },
   downloadBlob,

@@ -1,5 +1,7 @@
 import {
   DEFAULT_TRACK_FX,
+  ECHO_DELAY_MAX_SEC,
+  echoDelaySec,
   normalizeTrackFx,
   type TrackFx,
   type TrackFxType,
@@ -11,13 +13,15 @@ export type TrackInsertConfig = {
   gain: number;
   pan: number;
   fx: TrackFx;
+  /** Project tempo — resolves echo delayBeats → seconds. */
+  bpm?: number;
 };
 
 type InsertHandles = {
   type: TrackFxType;
   /** Disconnect insert nodes (input → gain stays). */
   dispose: () => void;
-  apply: (fx: TrackFx) => void;
+  apply: (fx: TrackFx, bpm?: number) => void;
 };
 
 export type TrackBus = {
@@ -114,21 +118,22 @@ function buildEcho(
   input: GainNode,
   gain: GainNode,
   fx: TrackFx,
+  bpm: number,
 ): InsertHandles {
   const dry = ctx.createGain();
   const wet = ctx.createGain();
-  const delay = ctx.createDelay(2);
+  const delay = ctx.createDelay(ECHO_DELAY_MAX_SEC);
   const feedback = ctx.createGain();
   const merge = ctx.createGain();
 
-  const apply = (next: TrackFx) => {
+  const apply = (next: TrackFx, nextBpm = bpm) => {
     const mix = clamp(next.mix, 0, 1);
     dry.gain.value = 1 - mix * 0.85;
     wet.gain.value = mix;
-    delay.delayTime.value = clamp(next.delayMs, 20, 1500) / 1000;
+    delay.delayTime.value = echoDelaySec(next.delayBeats, nextBpm);
     feedback.gain.value = clamp(next.feedback, 0, 0.9);
   };
-  apply(fx);
+  apply(fx, bpm);
 
   input.connect(dry);
   dry.connect(merge);
@@ -213,17 +218,23 @@ function buildInsert(
   input: GainNode,
   gain: GainNode,
   fx: TrackFx,
+  bpm: number,
 ): InsertHandles {
   switch (fx.type) {
     case "eq":
       return buildEq(ctx, input, gain, fx);
     case "echo":
-      return buildEcho(ctx, input, gain, fx);
+      return buildEcho(ctx, input, gain, fx, bpm);
     case "reverb":
       return buildReverb(ctx, input, gain, fx);
     default:
       return buildNone(input, gain);
   }
+}
+
+function configBpm(config: TrackInsertConfig): number {
+  const b = config.bpm;
+  return Number.isFinite(b) && (b as number) > 0 ? (b as number) : 120;
 }
 
 export function createTrackBus(
@@ -232,13 +243,14 @@ export function createTrackBus(
   config: TrackInsertConfig,
 ): TrackBus {
   const fx = normalizeTrackFx(config.fx ?? DEFAULT_TRACK_FX);
+  const bpm = configBpm(config);
   const input = ctx.createGain();
   input.gain.value = 1;
   const gain = ctx.createGain();
   gain.gain.value = clamp(config.gain, 0, 2);
   const pan = ctx.createStereoPanner();
   pan.pan.value = clamp(config.pan, -1, 1);
-  const insert = buildInsert(ctx, input, gain, fx);
+  const insert = buildInsert(ctx, input, gain, fx, bpm);
   gain.connect(pan);
   pan.connect(destination);
   return { input, gain, pan, insert };
@@ -251,6 +263,7 @@ export function updateTrackBus(
   config: TrackInsertConfig,
 ): void {
   const fx = normalizeTrackFx(config.fx ?? DEFAULT_TRACK_FX);
+  const bpm = configBpm(config);
   bus.gain.gain.value = clamp(config.gain, 0, 2);
   bus.pan.pan.value = clamp(config.pan, -1, 1);
   try {
@@ -262,10 +275,10 @@ export function updateTrackBus(
 
   if (bus.insert.type !== fx.type) {
     bus.insert.dispose();
-    bus.insert = buildInsert(ctx, bus.input, bus.gain, fx);
+    bus.insert = buildInsert(ctx, bus.input, bus.gain, fx, bpm);
     return;
   }
-  bus.insert.apply(fx);
+  bus.insert.apply(fx, bpm);
 }
 
 export function disposeTrackBus(bus: TrackBus): void {
@@ -289,10 +302,14 @@ export function wireOfflineTrackBus(
 }
 
 /** Extra samples for echo/reverb tails when baking (editor / offline). */
-export function fxTailSamples(fx: TrackFx, sampleRate: number): number {
+export function fxTailSamples(
+  fx: TrackFx,
+  sampleRate: number,
+  bpm = 120,
+): number {
   const n = normalizeTrackFx(fx);
   if (n.type === "echo") {
-    const delay = (clamp(n.delayMs, 20, 1500) / 1000) * sampleRate;
+    const delay = echoDelaySec(n.delayBeats, bpm) * sampleRate;
     return Math.floor(delay * (2 + n.feedback * 10));
   }
   if (n.type === "reverb") {
@@ -310,13 +327,16 @@ export async function bakeTrackFx(
   pcm: Float32Array,
   sampleRate: number,
   fx: TrackFx,
+  bpm = 120,
 ): Promise<Float32Array> {
   const normalized = normalizeTrackFx(fx);
   if (normalized.type === "none" || pcm.length === 0) {
     return new Float32Array(pcm);
   }
   const tail =
-    normalized.type === "eq" ? 0 : fxTailSamples(normalized, sampleRate);
+    normalized.type === "eq"
+      ? 0
+      : fxTailSamples(normalized, sampleRate, bpm);
   const length = Math.max(1, pcm.length + tail);
   const offline = new OfflineAudioContext(2, length, sampleRate);
   const buf = offline.createBuffer(1, pcm.length, sampleRate);
@@ -329,6 +349,7 @@ export async function bakeTrackFx(
     gain: 1,
     pan: 0,
     fx: normalized,
+    bpm,
   });
   const src = offline.createBufferSource();
   src.buffer = buf;

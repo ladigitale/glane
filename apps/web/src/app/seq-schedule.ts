@@ -179,11 +179,15 @@ export function clipToScheduled(
 }
 
 /** Track bus config for TransportEngine (gain / pan / FX insert). */
-export function trackToInsertConfig(tr: Track): TrackInsertConfig {
+export function trackToInsertConfig(
+  tr: Track,
+  bpm = 120,
+): TrackInsertConfig {
   return {
     id: tr.id,
     gain: gainDbToLin(tr.gainDb),
     pan: Number.isFinite(tr.pan) ? tr.pan : 0,
     fx: normalizeTrackFx(tr.fx),
+    bpm,
   };
 }

@@ -18,6 +18,7 @@ Field-recording instrument: capture → segment → library → arrange.
 - **Yarn 1** workspaces (`apps/web`, `packages/*`) — not pnpm
 - **Lit** + `@supersoniks/concorde`; custom elements `gl-*`
 - **Local-first P0–P4**: OPFS + IndexedDB; API/sync in **P5**
+- **T2 ML** (`@glane/audio-ml`): Demucs stems, YAMNet tags, CLAP search (ADR-0020)
 - **API**: FrankenPHP + Symfony + API Platform + Postgres (Tadaaa-family Compose)
 - Mercure: off until P5 (`MERCURE_ENABLED=0`)
 
@@ -133,8 +134,9 @@ Front: `apps/web` — Lit custom elements `gl-*` + `@supersoniks/concorde`.
 ## Architecture
 
 - **`apps/web/src/app/`** — product UI (capture, library, editor, sequencer, …)
-- **`packages/*`** — audio DSP / engine / IO / gestures / waveform / core-model
+- **`packages/*`** — audio DSP / engine / IO / ML / gestures / waveform / core-model
 - Local-first until P5: IndexedDB/OPFS first; Concorde Endpoint/API when sync lands
+- T2 enrichment: `@glane/audio-ml` — Demucs stems, YAMNet tags, CLAP search / similar (ADR-0020)
 
 ## Sync agent files
 

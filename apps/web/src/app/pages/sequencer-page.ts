@@ -38,10 +38,12 @@ import tailwind from "../../css/tailwind";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
-import { t } from "../i18n/messages.js";
+import { t, tf } from "../i18n/messages.js";
 import {
   keyPcLabel,
   planSequence,
+  parseStemFromTags,
+  resolveYamnetSlugs,
   type GenAuto,
   type GenFormStyle,
   type GenGrooveChoice,
@@ -49,6 +51,7 @@ import {
   type GenScaleMode,
   type GenTriState,
 } from "../generative.js";
+import { clapFeatureFromAnalysis } from "../ml/clap-runtime.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { SAMPLE_PROCESSED_EVENT } from "../process-queue.js";
 import { exportFormKey, seqDrawerKey } from "../dp-keys.js";
@@ -73,6 +76,7 @@ import {
   type BounceResult,
   type SoundCloudStatus,
 } from "../export-publish.js";
+import { exportToast } from "../export-toast.js";
 import { seqOctatrackExport } from "../seq-octatrack-export.js";
 import { listenShare, type ListenMeta } from "../listen-share.js";
 import { auth } from "../auth.js";
@@ -107,6 +111,11 @@ const MIN_BARS = 1;
 const MAX_BARS = 256;
 const MIN_BPM = 40;
 const MAX_BPM = 300;
+/** Live play: only decode/stretch clips in this window ahead of the playhead. */
+const PLAY_PRELOAD_BEATS = 16;
+/** Cap decoded PCM / AudioBuffer caches (mobile OOM on big gens). */
+const PCM_CACHE_MAX = 32;
+const BUFFER_CACHE_MAX = 48;
 
 type SeqConfigModal = "bpm" | "bars" | "generate" | "docs" | null;
 const STRETCH_ORDER: StretchMode[] = [
@@ -634,6 +643,10 @@ export class GlSequencerPage extends LitElement {
   #wavePaintRaf = 0;
   #pendingScrollLeft: number | null = null;
   #raf = 0;
+  /** Bumps to cancel in-flight schedule hydration. */
+  #hydrateGen = 0;
+  /** Tick horizon already covered by the live schedule window. */
+  #scheduledToTick = 0;
   #tlRo: ResizeObserver | null = null;
   /** While true, scroll the lane so the playhead stays centered. */
   #followPlayhead = true;
@@ -983,48 +996,55 @@ export class GlSequencerPage extends LitElement {
           >
             ${glIcon("more-vertical", { size: "sm" })}
           </sonic-button>
-          <sonic-menu slot="content" direction="column" align="left" size="sm">
-            <sonic-menu-item
-              ?disabled=${!this.project}
-              @click=${() => this.#openSeqModal("bpm")}
-            >
-              ${glIcon("gauge", { slot: "prefix", size: "xs" })}
-              ${t("seq.bpmTitle")} · ${bpm}
-            </sonic-menu-item>
-            <sonic-menu-item
-              ?disabled=${!this.project}
-              @click=${() => this.#openSeqModal("bars")}
-            >
-              ${glIcon("ruler", { slot: "prefix", size: "xs" })}
-              ${t("seq.barsTitle")} · ${bars} ${t("seq.barsUnit")}
-            </sonic-menu-item>
-            <sonic-divider></sonic-divider>
-            <sonic-menu-item @click=${() => void this.#undo()}>
-              ${glIcon("undo", { slot: "prefix", size: "xs" })}
-              ${t("seq.undo")}
-            </sonic-menu-item>
-            <sonic-menu-item
-              ?disabled=${!this.project ||
-              this.samples.length === 0 ||
-              this.tracks.length === 0}
-              @click=${() => this.#openSeqModal("generate")}
-            >
-              ${glIcon("wand", { slot: "prefix", size: "xs" })}
-              ${t("seq.generate")}
-            </sonic-menu-item>
-            <sonic-menu-item
-              ?disabled=${!this.project || this.clips.length === 0}
-              @click=${() => void this.#toggleExportPanel()}
-            >
-              ${glIcon("download", { slot: "prefix", size: "xs" })}
-              ${t("export.open")}
-            </sonic-menu-item>
-            <sonic-divider></sonic-divider>
-            <sonic-menu-item @click=${() => this.#openSeqModal("docs")}>
-              ${glIcon("book-open", { slot: "prefix", size: "xs" })}
-              ${t("seq.docs")}
-            </sonic-menu-item>
-          </sonic-menu>
+          <div
+            slot="content"
+            class="max-h-[min(70dvh,24rem)] overflow-y-auto overscroll-contain"
+          >
+            <sonic-menu direction="column" align="left" size="sm">
+              <sonic-menu-item
+                ?disabled=${!this.project}
+                @click=${() => this.#openSeqModal("bpm")}
+              >
+                ${glIcon("gauge", { slot: "prefix", size: "xs" })}
+                ${t("seq.bpmTitle")} · ${bpm}
+              </sonic-menu-item>
+              <sonic-menu-item
+                ?disabled=${!this.project}
+                @click=${() => this.#openSeqModal("bars")}
+              >
+                ${glIcon("ruler", { slot: "prefix", size: "xs" })}
+                ${t("seq.barsTitle")} · ${bars} ${t("seq.barsUnit")}
+              </sonic-menu-item>
+              <sonic-divider></sonic-divider>
+              <sonic-menu-item @click=${() => void this.#undo()}>
+                ${glIcon("undo", { slot: "prefix", size: "xs" })}
+                ${t("seq.undo")}
+              </sonic-menu-item>
+              <sonic-menu-item
+                ?disabled=${!this.project ||
+                this.samples.length === 0 ||
+                this.tracks.length === 0}
+                @click=${() => this.#openSeqModal("generate")}
+              >
+                ${glIcon("wand", { slot: "prefix", size: "xs" })}
+                ${t("seq.generate")}
+              </sonic-menu-item>
+              <sonic-menu-item
+                ?disabled=${!this.project ||
+                this.clips.length === 0 ||
+                Boolean(this.exportBusy)}
+                @click=${() => void this.#toggleExportPanel()}
+              >
+                ${glIcon("download", { slot: "prefix", size: "xs" })}
+                ${this.exportBusy ?? t("export.open")}
+              </sonic-menu-item>
+              <sonic-divider></sonic-divider>
+              <sonic-menu-item @click=${() => this.#openSeqModal("docs")}>
+                ${glIcon("book-open", { slot: "prefix", size: "xs" })}
+                ${t("seq.docs")}
+              </sonic-menu-item>
+            </sonic-menu>
+          </div>
         </sonic-pop>
       </div>
       ${this.#renderExportModal()}
@@ -1675,7 +1695,10 @@ export class GlSequencerPage extends LitElement {
   }
 
   #syncTrackBuses(): void {
-    this.#engine?.syncTrackBuses(this.tracks.map(trackToInsertConfig));
+    const bpm = this.project?.bpm ?? 120;
+    this.#engine?.syncTrackBuses(
+      this.tracks.map((tr) => trackToInsertConfig(tr, bpm)),
+    );
   }
 
   async #toggleMute(tr: Track): Promise<void> {
@@ -1702,7 +1725,9 @@ export class GlSequencerPage extends LitElement {
     tr.gainDb = gainDb;
     this.tracks = [...this.tracks];
     this.#bounceCache = null;
-    this.#engine?.setTrackInsert(trackToInsertConfig(tr));
+    this.#engine?.setTrackInsert(
+      trackToInsertConfig(tr, this.project?.bpm ?? 120),
+    );
     if (!commit) {
       if (this.playing && !this.#gainWriteBusy) {
         this.#gainWriteBusy = true;
@@ -1725,7 +1750,9 @@ export class GlSequencerPage extends LitElement {
     tr.fx = fx;
     this.tracks = [...this.tracks];
     this.#bounceCache = null;
-    this.#engine?.setTrackInsert(trackToInsertConfig(tr));
+    this.#engine?.setTrackInsert(
+      trackToInsertConfig(tr, this.project?.bpm ?? 120),
+    );
     if (commit) await db.tracks.put(tr);
   }
 
@@ -1733,7 +1760,12 @@ export class GlSequencerPage extends LitElement {
     sampleId: string,
   ): Promise<{ pcm: Float32Array; sampleRate: number } | null> {
     const cached = this.#pcmCache.get(sampleId);
-    if (cached) return cached;
+    if (cached) {
+      // Refresh LRU order
+      this.#pcmCache.delete(sampleId);
+      this.#pcmCache.set(sampleId, cached);
+      return cached;
+    }
     const sample = await db.samples.get(sampleId);
     if (!sample) return null;
     const data = await loadSampleAudio(sample);
@@ -1743,6 +1775,11 @@ export class GlSequencerPage extends LitElement {
       sampleRate: data.sampleRate,
     };
     this.#pcmCache.set(sampleId, entry);
+    while (this.#pcmCache.size > PCM_CACHE_MAX) {
+      const oldest = this.#pcmCache.keys().next().value;
+      if (oldest == null) break;
+      this.#pcmCache.delete(oldest);
+    }
     return entry;
   }
 
@@ -1782,13 +1819,19 @@ export class GlSequencerPage extends LitElement {
   async #loadBufferForSample(
     sampleId: string,
     clip?: Clip,
+    opts?: { bakeCopy?: boolean },
   ): Promise<AudioBuffer | null> {
     if (!this.#engine || !this.project) return null;
+    const bakeCopy = opts?.bakeCopy === true;
     const cacheKey = clip
-      ? `${sampleId}:${clip.stretchMode}:${clip.lengthTick}:${clip.contentOffsetMs}:${clip.reverse ? 1 : 0}`
+      ? `${sampleId}:${clip.stretchMode}:${clip.lengthTick}:${clip.contentOffsetMs}:${clip.reverse ? 1 : 0}:${bakeCopy ? "bake" : "live"}`
       : sampleId;
     const cached = this.#bufferCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      this.#bufferCache.delete(cacheKey);
+      this.#bufferCache.set(cacheKey, cached);
+      return cached;
+    }
     const data = await this.#ensureSamplePcm(sampleId);
     if (!data) return null;
     let pcm = data.pcm.slice();
@@ -1797,7 +1840,9 @@ export class GlSequencerPage extends LitElement {
       pcm.reverse();
     }
 
-    if (clip && clip.stretchMode === "copy") {
+    // Live play: never tile `copy` to full clip length (OOM on long clips).
+    // Export/bounce still bakes a contiguous buffer for OfflineAudioContext.
+    if (clip && clip.stretchMode === "copy" && bakeCopy) {
       const target = ticksToSamples(
         asTick(clip.lengthTick),
         this.project.bpm,
@@ -1805,7 +1850,7 @@ export class GlSequencerPage extends LitElement {
       );
       const offset = msToSamples(clip.contentOffsetMs, data.sampleRate);
       pcm = new Float32Array(tileBuffer(pcm, Math.max(1, target), offset));
-    } else if (clip && clip.stretchMode !== "off") {
+    } else if (clip && clip.stretchMode !== "off" && clip.stretchMode !== "copy") {
       const target = ticksToSamples(
         asTick(clip.lengthTick),
         this.project.bpm,
@@ -1822,30 +1867,55 @@ export class GlSequencerPage extends LitElement {
     const buf = this.#engine.ctx.createBuffer(1, pcm.length, data.sampleRate);
     buf.copyToChannel(pcm, 0);
     this.#bufferCache.set(cacheKey, buf);
+    while (this.#bufferCache.size > BUFFER_CACHE_MAX) {
+      const oldest = this.#bufferCache.keys().next().value;
+      if (oldest == null) break;
+      this.#bufferCache.delete(oldest);
+    }
     return buf;
   }
 
-  async #buildSchedule(opts?: { ignoreLoop?: boolean }) {
+  #playPreloadTicks(): number {
+    return PLAY_PRELOAD_BEATS * PPQ;
+  }
+
+  async #buildSchedule(opts?: {
+    ignoreLoop?: boolean;
+    /** Only clips intersecting this tick window (live play). Omit = all. */
+    windowTicks?: { from: number; to: number };
+    /** Bake stretchMode `copy` into a full buffer (export only). */
+    bakeCopy?: boolean;
+  }) {
     if (!this.#engine || !this.project) return [];
     this.#syncTrackBuses();
     const audible = audibleTrackIds(this.tracks);
-    // With a loop selection: every clip that intersects the range (not only
-    // those fully contained / starting inside).
-    const range = opts?.ignoreLoop ? null : this.#loopSelRange();
+    const loopRange = opts?.ignoreLoop ? null : this.#loopSelRange();
+    const win = opts?.windowTicks;
+    const bakeCopy = opts?.bakeCopy === true;
     const out = [];
     for (const clip of this.clips) {
       if (!audible.has(clip.trackId)) continue;
       if (!clip.sampleId) continue;
-      if (range) {
-        const clipEnd = clip.startTick + clip.lengthTick;
-        if (clipEnd <= range.start || clip.startTick >= range.end) continue;
+      const clipEnd = clip.startTick + clip.lengthTick;
+      if (loopRange) {
+        if (clipEnd <= loopRange.start || clip.startTick >= loopRange.end) {
+          continue;
+        }
       }
-      const buf = await this.#loadBufferForSample(clip.sampleId, clip);
+      if (win) {
+        if (clipEnd <= win.from || clip.startTick >= win.to) continue;
+      }
+      const buf = await this.#loadBufferForSample(clip.sampleId, clip, {
+        bakeCopy,
+      });
       if (!buf) continue;
-      // `copy` bakes contentOffset into the tiled buffer.
+      // Live `copy`: keep source buffer + force loop (no giant tile).
+      // Export bake: contentOffset already in the tiled buffer.
       const scheduledClip =
         clip.stretchMode === "copy"
-          ? { ...clip, contentOffsetMs: 0 }
+          ? bakeCopy
+            ? { ...clip, contentOffsetMs: 0 }
+            : { ...clip, loopEnabled: true }
           : clip;
       out.push(
         clipToScheduled(
@@ -1860,9 +1930,47 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #resyncSchedule(): Promise<void> {
-    if (!this.#engine || !this.playing) return;
-    const scheduled = await this.#buildSchedule();
+    if (!this.#engine || !this.playing || !this.project) return;
+    const ph = this.playheadTick;
+    const preload = this.#playPreloadTicks();
+    const scheduled = await this.#buildSchedule({
+      windowTicks: { from: ph, to: ph + preload },
+    });
     this.#engine.setClips(scheduled);
+    this.#scheduledToTick = ph + preload;
+  }
+
+  /** Keep decoding a moving window ahead of the playhead (no full-seq preload). */
+  #armScheduleHydration(fromTick: number): void {
+    const gen = ++this.#hydrateGen;
+    this.#scheduledToTick = fromTick + this.#playPreloadTicks();
+    const pump = async () => {
+      while (this.playing && gen === this.#hydrateGen && this.#engine && this.project) {
+        const ph = this.playheadTick;
+        const preload = this.#playPreloadTicks();
+        const needTo = ph + preload;
+        // Also warm the transport loop start when we're near the end.
+        const loop = this.#transportLoopRange();
+        let from = ph;
+        let to = needTo;
+        if (loop && ph + preload >= loop.end) {
+          from = Math.min(from, loop.start);
+          to = Math.max(to, loop.start + preload);
+        }
+        if (to <= this.#scheduledToTick && !(loop && ph + preload >= loop.end)) {
+          await new Promise<void>((r) => setTimeout(r, 120));
+          continue;
+        }
+        const scheduled = await this.#buildSchedule({
+          windowTicks: { from, to },
+        });
+        if (!this.playing || gen !== this.#hydrateGen || !this.#engine) return;
+        this.#engine.setClips(scheduled);
+        this.#scheduledToTick = to;
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+    };
+    void pump();
   }
 
   /** Hard sequence length from project.bars (not extended by clips). */
@@ -2895,6 +3003,7 @@ export class GlSequencerPage extends LitElement {
     };
     await db.projects.put(this.project);
     this.#syncTransportLoop();
+    this.#syncTrackBuses();
     if (this.playing) await this.#resyncSchedule();
   }
 
@@ -2915,62 +3024,122 @@ export class GlSequencerPage extends LitElement {
     this.scStatus = await exportPublish.fetchSoundCloudStatus();
   }
 
+  #setExportProgress(msg: string): void {
+    this.exportBusy = msg;
+    exportToast.progress(msg);
+  }
+
+  #beginExportJob(): boolean {
+    if (this.exportBusy) {
+      exportToast.progress(t("export.busy"));
+      return false;
+    }
+    this.exportOpen = false;
+    this.exportError = null;
+    this.exportPermalink = null;
+    this.exportLibraryOk = null;
+    return true;
+  }
+
+  #onBounceProgress = (p: {
+    stage: "mix" | "wav" | "mp3";
+    ratio?: number;
+  }): void => {
+    if (p.stage === "mix") {
+      this.#setExportProgress(t("export.bouncing"));
+      return;
+    }
+    if (p.stage === "wav") {
+      this.#setExportProgress(t("export.encodingWav"));
+      return;
+    }
+    const pct = Math.round((p.ratio ?? 0) * 100);
+    this.#setExportProgress(tf("export.encodingMp3Pct", { pct }));
+  };
+
   async #ensureBounce(needMp3 = false): Promise<BounceResult | null> {
     if (!this.#engine || !this.project) return null;
     if (this.#bounceCache && (!needMp3 || this.#bounceCache.mp3)) {
       return this.#bounceCache;
     }
-    this.exportBusy = t("export.bouncing");
+    this.#setExportProgress(t("export.bouncing"));
     this.exportError = null;
     try {
       this.#engine ??= new TransportEngine();
       if (!this.#bounceCache) {
-        const scheduled = await this.#buildSchedule({ ignoreLoop: true });
+        const scheduled = await this.#buildSchedule({
+          ignoreLoop: true,
+          bakeCopy: true,
+        });
         if (scheduled.length === 0) {
           this.exportError = t("export.empty");
           return null;
         }
-        this.exportBusy = t("export.encodingWav");
         this.#bounceCache = await exportPublish.bounceProject({
           engine: this.#engine,
           clips: scheduled,
           project: this.project,
           lengthTick: this.#projectLengthTick(),
-          tracks: this.tracks.map(trackToInsertConfig),
+          tracks: this.tracks.map((tr) =>
+            trackToInsertConfig(tr, this.project!.bpm),
+          ),
           encodeMp3: false,
+          onProgress: this.#onBounceProgress,
         });
       }
       if (needMp3 && !this.#bounceCache.mp3) {
-        this.exportBusy = t("export.encodingMp3");
-        await exportPublish.ensureMp3(this.#bounceCache);
+        this.#setExportProgress(t("export.encodingMp3"));
+        await exportPublish.ensureMp3(this.#bounceCache, (ratio) => {
+          this.#setExportProgress(
+            tf("export.encodingMp3Pct", { pct: Math.round(ratio * 100) }),
+          );
+        });
       }
       return this.#bounceCache;
     } catch (e) {
       this.exportError =
         e instanceof Error ? e.message : t("export.error");
       return null;
+    }
+  }
+
+  async #exportDownload(kind: "wav" | "mp3"): Promise<void> {
+    if (!this.#beginExportJob()) return;
+    try {
+      const bounce = await this.#ensureBounce(kind === "mp3");
+      if (!bounce) {
+        exportToast.fail(this.exportError ?? t("export.error"));
+        return;
+      }
+      const blob =
+        kind === "wav"
+          ? bounce.wav
+          : await exportPublish.ensureMp3(bounce, (ratio) => {
+              this.#setExportProgress(
+                tf("export.encodingMp3Pct", { pct: Math.round(ratio * 100) }),
+              );
+            });
+      exportPublish.downloadExport(this.exportTitle || "glane", kind, blob);
+      exportToast.done(t("export.doneDownload"));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
     } finally {
       this.exportBusy = null;
     }
   }
 
-  async #exportDownload(kind: "wav" | "mp3"): Promise<void> {
-    const bounce = await this.#ensureBounce(kind === "mp3");
-    if (!bounce) return;
-    const blob =
-      kind === "wav" ? bounce.wav : await exportPublish.ensureMp3(bounce);
-    exportPublish.downloadExport(this.exportTitle || "glane", kind, blob);
-  }
-
   async #exportToLibrary(): Promise<void> {
     if (!this.project) return;
-    this.exportLibraryOk = null;
-    this.exportPermalink = null;
-    const bounce = await this.#ensureBounce(false);
-    if (!bounce) return;
-    this.exportBusy = t("export.savingLibrary");
-    this.exportError = null;
+    if (!this.#beginExportJob()) return;
     try {
+      const bounce = await this.#ensureBounce(false);
+      if (!bounce) {
+        exportToast.fail(this.exportError ?? t("export.error"));
+        return;
+      }
+      this.#setExportProgress(t("export.savingLibrary"));
       const sample = await saveBounceToLibrary(
         this.project.id,
         bounce.buffer,
@@ -2978,9 +3147,13 @@ export class GlSequencerPage extends LitElement {
       );
       await this.#loadSamples();
       this.exportLibraryOk = sample.userName ?? sample.name;
+      exportToast.done(
+        `${t("export.toLibraryDone")} — ${this.exportLibraryOk}`,
+      );
     } catch (e) {
-      this.exportError =
-        e instanceof Error ? e.message : t("export.error");
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
     } finally {
       this.exportBusy = null;
     }
@@ -2988,31 +3161,44 @@ export class GlSequencerPage extends LitElement {
 
   async #exportOctatrackSlices(): Promise<void> {
     if (!this.#engine || !this.project) return;
-    this.exportBusy = t("export.octatrackSlices");
-    this.exportError = null;
+    if (!this.#beginExportJob()) return;
+    this.#setExportProgress(t("export.octatrackSlices"));
     try {
       this.#engine ??= new TransportEngine();
-      const scheduled = await this.#buildSchedule({ ignoreLoop: true });
+      const scheduled = await this.#buildSchedule({
+        ignoreLoop: true,
+        bakeCopy: true,
+      });
       if (scheduled.length === 0) {
         this.exportError = t("export.empty");
+        exportToast.fail(t("export.empty"));
         return;
       }
       const { blob } = await seqOctatrackExport.buildZip({
         engine: this.#engine,
         clips: scheduled,
         tracks: this.tracks,
-        trackInserts: this.tracks.map(trackToInsertConfig),
+        trackInserts: this.tracks.map((tr) =>
+          trackToInsertConfig(tr, this.project!.bpm),
+        ),
         project: this.project,
         lengthTick: this.#projectLengthTick(),
         title: this.exportTitle || this.project.title || "glane",
+        onProgress: ({ done, total }) => {
+          this.#setExportProgress(
+            tf("export.octatrackProgress", { done, total }),
+          );
+        },
       });
       seqOctatrackExport.download(
         this.exportTitle || this.project.title || "glane",
         blob,
       );
+      exportToast.done(t("export.doneDownload"));
     } catch (e) {
-      this.exportError =
-        e instanceof Error ? e.message : t("export.error");
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
     } finally {
       this.exportBusy = null;
     }
@@ -3041,12 +3227,15 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #scUpload(): Promise<void> {
-    const bounce = await this.#ensureBounce(true);
-    if (!bounce?.mp3) return;
-    this.exportBusy = t("export.uploading");
-    this.exportError = null;
-    this.exportPermalink = null;
+    if (!this.#beginExportJob()) return;
     try {
+      const bounce = await this.#ensureBounce(true);
+      if (!bounce?.mp3) {
+        exportToast.fail(this.exportError ?? t("export.error"));
+        return;
+      }
+      this.#setExportProgress(t("export.uploading"));
+      this.exportPermalink = null;
       const r = await exportPublish.uploadToSoundCloud({
         mp3: bounce.mp3,
         title: this.exportTitle || "Glane",
@@ -3054,34 +3243,55 @@ export class GlSequencerPage extends LitElement {
       });
       if ("error" in r) {
         this.exportError = r.error;
+        exportToast.fail(r.error);
       } else {
         this.exportPermalink = r.permalink_url ?? null;
+        exportToast.done(t("export.uploaded"));
       }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
     } finally {
       this.exportBusy = null;
     }
   }
 
   async #bandcampAssist(): Promise<void> {
-    const bounce = await this.#ensureBounce(true);
-    if (!bounce?.mp3) return;
-    exportPublish.downloadExport(
-      this.exportTitle || "glane",
-      "mp3",
-      bounce.mp3,
-    );
-    await exportPublish.openBandcampAssist(this.exportTitle || "Glane");
+    if (!this.#beginExportJob()) return;
+    try {
+      const bounce = await this.#ensureBounce(true);
+      if (!bounce?.mp3) {
+        exportToast.fail(this.exportError ?? t("export.error"));
+        return;
+      }
+      exportPublish.downloadExport(
+        this.exportTitle || "glane",
+        "mp3",
+        bounce.mp3,
+      );
+      exportToast.done(t("export.doneDownload"));
+      await exportPublish.openBandcampAssist(this.exportTitle || "Glane");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
+    } finally {
+      this.exportBusy = null;
+    }
   }
 
   async #publishListen(): Promise<void> {
-    this.exportBusy = t("export.bouncing");
-    this.exportError = null;
+    if (!this.#beginExportJob()) return;
+    this.#setExportProgress(t("export.bouncing"));
     try {
       const bounce = await this.#ensureBounce(true);
       if (!bounce?.mp3) {
         this.exportError = t("export.empty");
+        exportToast.fail(t("export.empty"));
         return;
       }
+      this.#setExportProgress(t("export.uploading"));
       const durationMs = Math.round(
         (bounce.buffer.length / bounce.buffer.sampleRate) * 1000,
       );
@@ -3097,12 +3307,18 @@ export class GlSequencerPage extends LitElement {
           r.error === "authentication_required"
             ? t("export.listenNeedLogin")
             : r.error;
+        exportToast.fail(this.exportError);
         return;
       }
       this.listenMeta = {
         ...r.meta,
         url: listenShare.frontListenUrl(r.meta.token),
       };
+      exportToast.done(t("export.listenPublished"));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
     } finally {
       this.exportBusy = null;
     }
@@ -3130,6 +3346,7 @@ export class GlSequencerPage extends LitElement {
   };
 
   #haltTransport(resetTick?: number): void {
+    this.#hydrateGen++;
     if (this.playing && this.#engine && this.project) {
       this.playheadTick = samplesToTicks(
         this.#engine.playheadSample(),
@@ -3151,14 +3368,6 @@ export class GlSequencerPage extends LitElement {
     }
     this.loadingPlay = true;
     try {
-      const scheduled = await this.#buildSchedule();
-      if (scheduled.length === 0) {
-        this.loadingPlay = false;
-        return;
-      }
-      this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
-      this.#engine.setClips(scheduled);
-
       const range = this.#transportLoopRange();
       let fromTick = this.playheadTick;
       if (range) {
@@ -3173,14 +3382,21 @@ export class GlSequencerPage extends LitElement {
           this.#engine.sampleRate,
         );
         this.#engine.setLoop(true, startS, endS);
-        // Keep playhead if already inside the loop; else snap to loop start
-        // (custom region) or 0 (full-seq).
         if (fromTick < range.start || fromTick >= range.end) {
           fromTick = this.#loopSelRange() ? range.start : 0;
         }
       } else {
         this.#engine.setLoop(false, asSampleIndex(0), asSampleIndex(0));
       }
+
+      // Decode only the next ~16 beats — never the whole sequence up front.
+      const preload = this.#playPreloadTicks();
+      const scheduled = await this.#buildSchedule({
+        windowTicks: { from: fromTick, to: fromTick + preload },
+      });
+      this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
+      this.#engine.setClips(scheduled);
+
       const from = ticksToSamples(
         asTick(fromTick),
         this.project.bpm,
@@ -3192,9 +3408,9 @@ export class GlSequencerPage extends LitElement {
       this.#setFollowPlayhead(true);
       this.playheadTick = fromTick;
       this.#syncFollowScroll();
+      this.#armScheduleHydration(fromTick);
       const tick = () => {
         if (!this.#engine || !this.playing || !this.project) return;
-        // Manual scrub / seek-bar owns the playhead while active.
         if (!this.#scrubbing) {
           const ph = this.#engine.playheadSample();
           this.playheadTick = samplesToTicks(
@@ -3886,6 +4102,9 @@ export class GlSequencerPage extends LitElement {
         this.#engine.sampleRate,
       );
       this.#engine.seek(sample);
+      void this.#resyncSchedule().then(() => {
+        if (this.playing) this.#armScheduleHydration(next);
+      });
     }
     this.#syncFollowScroll(true);
   }
@@ -4190,6 +4409,8 @@ export class GlSequencerPage extends LitElement {
       tracks: this.tracks.map((t) => ({ id: t.id, index: t.index })),
       samples: pool.map((s) => {
         const a = analysisById.get(s.id);
+        const features = a?.features as Record<string, unknown> | undefined;
+        const clap = clapFeatureFromAnalysis(features);
         return {
           id: s.id,
           durationMs: s.durationMs,
@@ -4204,6 +4425,14 @@ export class GlSequencerPage extends LitElement {
           analysisBpm: a?.bpm,
           forceRole: s.forceRole,
           tags: s.tags,
+          subclass: s.subclass,
+          confidence: s.confidence,
+          interestScore: s.interestScore,
+          rating: s.rating,
+          parentSampleId: s.parentSampleId,
+          stem: parseStemFromTags(s.tags),
+          yamnet: resolveYamnetSlugs(s.tags, features),
+          clapVector: clap?.vector,
         };
       }),
     });

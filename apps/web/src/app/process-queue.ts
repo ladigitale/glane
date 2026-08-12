@@ -3,6 +3,8 @@ import { sampleOpfs } from "@glane/audio-io";
 import type { ProcessWorkerResponse } from "@glane/audio-dsp";
 import { db, type ProcessJob } from "./db.js";
 import { cullExcessProcessedSamples } from "./sample-interest-cull.js";
+import { enqueueYamnetEnrich } from "./ml/enrich-queue.js";
+import { enqueueClapEmbed } from "./ml/clap-queue.js";
 
 export type { ProcessJob, ProcessJobStatus } from "./db.js";
 
@@ -139,6 +141,8 @@ export const processQueue = (() => {
         revision: (sample.revision ?? 0) + 1,
       });
       void cullExcessProcessedSamples(sample.sessionId).catch(() => undefined);
+      void enqueueYamnetEnrich(msg.sampleId).catch(() => undefined);
+      void enqueueClapEmbed(msg.sampleId).catch(() => undefined);
     }
 
     await db.processJobs.put({

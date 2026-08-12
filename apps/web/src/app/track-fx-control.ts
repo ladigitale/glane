@@ -18,12 +18,45 @@ const FX_LABEL: Record<TrackFxType, string> = {
 
 const FX_TYPES = Object.keys(FX_LABEL) as TrackFxType[];
 
+/** Musical echo delay choices (beats; 1 = quarter note). */
+const ECHO_DELAY_CHOICES: ReadonlyArray<{ beats: number; label: string }> = [
+  { beats: 0.25, label: "1/16" },
+  { beats: 0.5, label: "1/8" },
+  { beats: 0.75, label: "1/8." },
+  { beats: 1, label: "1/4" },
+  { beats: 1.5, label: "1/4." },
+  { beats: 2, label: "1/2" },
+  { beats: 3, label: "3/4" },
+  { beats: 4, label: "1/1" },
+];
+
+function echoDelayLabel(beats: number): string {
+  const hit = ECHO_DELAY_CHOICES.find(
+    (c) => Math.abs(c.beats - beats) < 0.001,
+  );
+  if (hit) return hit.label;
+  return `${beats.toFixed(2)} t`;
+}
+
+function nearestEchoDelay(beats: number): number {
+  let best = ECHO_DELAY_CHOICES[0]!.beats;
+  let bestD = Infinity;
+  for (const c of ECHO_DELAY_CHOICES) {
+    const d = Math.abs(c.beats - beats);
+    if (d < bestD) {
+      bestD = d;
+      best = c.beats;
+    }
+  }
+  return best;
+}
+
 function fxHint(fx: TrackFx): string {
   if (fx.type === "eq") {
     return `${fx.low.toFixed(1)}/${fx.mid.toFixed(1)}/${fx.high.toFixed(1)}`;
   }
   if (fx.type === "echo") {
-    return `${Math.round(fx.delayMs)} ms · mix ${fx.mix.toFixed(2)}`;
+    return `${echoDelayLabel(fx.delayBeats)} · mix ${fx.mix.toFixed(2)}`;
   }
   if (fx.type === "reverb") {
     return `decay ${fx.decay.toFixed(2)} · mix ${fx.mix.toFixed(2)}`;
@@ -193,14 +226,34 @@ export class GlTrackFxControl extends LitElement {
       `;
     }
     if (fx.type === "echo") {
+      const delayBeats = nearestEchoDelay(fx.delayBeats);
       return html`
         <div class="flex flex-col gap-2 text-content">
           ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
             this.#patch({ mix: v }, false),
           )}
-          ${this.#slider("Délai ms", fx.delayMs, 20, 1500, 1, (v) =>
-            this.#patch({ delayMs: v }, false),
-          )}
+          <label
+            class="grid grid-cols-[1fr_auto] items-center gap-x-2 gap-y-1 text-sm text-neutral-500"
+          >
+            <span>Délai</span>
+            <span class="font-mono text-xs">${echoDelayLabel(delayBeats)}</span>
+            <select
+              class="col-span-full m-0 w-full rounded border border-neutral-200 bg-neutral-0 px-2 py-1 text-sm text-content"
+              .value=${String(delayBeats)}
+              @change=${(e: Event) => {
+                const v = Number((e.target as HTMLSelectElement).value);
+                this.#patch({ delayBeats: v }, true);
+              }}
+            >
+              ${ECHO_DELAY_CHOICES.map(
+                (c) => html`
+                  <option value=${c.beats} ?selected=${c.beats === delayBeats}>
+                    ${c.label}
+                  </option>
+                `,
+              )}
+            </select>
+          </label>
           ${this.#slider("Feedback", fx.feedback, 0, 0.9, 0.01, (v) =>
             this.#patch({ feedback: v }, false),
           )}

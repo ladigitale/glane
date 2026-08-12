@@ -2,6 +2,7 @@ import { normalizePeak } from "./normalize.js";
 import { processTextureClip } from "./loop/seamless.js";
 import { DSP_THRESHOLDS } from "./config/thresholds.js";
 import { computeInterestScore } from "./interest-score.js";
+import { autoCropPcm } from "./auto-crop.js";
 
 export type ProcessJobKind = "oneshot" | "texture";
 
@@ -75,12 +76,17 @@ export function runProcessJob(
     }
   }
 
-  const out = normalizePeak(pcm, target);
+  const cropped = kind === "oneshot" ? autoCropPcm(pcm, sampleRate) : null;
+  const source = cropped?.cropped ? cropped.pcm : pcm;
+  const out = normalizePeak(source, target);
   const durationMs = Math.round((out.length / sampleRate) * 1000);
   const loopScore = kind === "texture" ? 0.35 : undefined;
+  const tags = ["peak-norm", "processing:done"];
+  if (cropped?.attackCropped) tags.unshift("auto-crop-attack");
+  if (cropped?.tailCropped) tags.unshift("auto-crop-tail");
   return {
     pcm: out,
-    tags: ["peak-norm", "processing:done"],
+    tags,
     durationMs,
     loopProposed: kind === "texture",
     loopStartMs: kind === "texture" ? 0 : undefined,

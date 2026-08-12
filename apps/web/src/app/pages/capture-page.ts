@@ -35,6 +35,7 @@ import {
 import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { deleteSample } from "../sample-actions.js";
+import { importForHunt } from "../import-for-hunt.js";
 import { processQueue } from "../process-queue.js";
 import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
 import {
@@ -207,6 +208,8 @@ export class GlCapturePage extends LitElement {
   @state() private clockMs = 0;
   @state() private statusText = "";
   @state() private autoGain = false;
+  @state() private mlYamnet = true;
+  @state() private mlClap = false;
   /** Internal 0–100; auto-tuned toward targetCapturesPerMin. */
   @state() private attackSensitivity = DEFAULT_ATTACK_SENSITIVITY;
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
@@ -216,6 +219,9 @@ export class GlCapturePage extends LitElement {
   @state() private scoutBlocked = false;
   @state() private audioDeviceId = "";
   @state() private audioInputs: AudioInputOption[] = [];
+  @state() private importBusy = false;
+  @state() private importRatio = 0;
+  @state() private importExtracted = 0;
 
   #live: LiveCapture | null = null;
   #hunter: EventHunter | null = null;
@@ -234,6 +240,7 @@ export class GlCapturePage extends LitElement {
   #captureTimes: number[] = [];
   #lastRateAdjustMs = 0;
   #scoutStarting = false;
+  #importAbort: AbortController | null = null;
 
   @handle(captureFormKey.autoGain)
   onAutoGainFromForm(v: "1" | null): void {
@@ -302,6 +309,8 @@ export class GlCapturePage extends LitElement {
     );
     this.#unsubProc?.();
     this.#unsubProc = null;
+    this.#importAbort?.abort();
+    this.#importAbort = null;
     void this.#shutdownMic();
     super.disconnectedCallback();
   }
@@ -315,6 +324,7 @@ export class GlCapturePage extends LitElement {
   };
 
   #onKey = (e: KeyboardEvent): void => {
+    if (this.importBusy) return;
     if (
       !isSpaceKey(e) ||
       shouldIgnoreShortcut(e) ||
@@ -356,6 +366,8 @@ export class GlCapturePage extends LitElement {
   async #loadCapturePrefs(): Promise<void> {
     const prefs = await ensurePrefs();
     this.autoGain = prefs.captureAutoGain ?? false;
+    this.mlYamnet = prefs.mlYamnet !== false;
+    this.mlClap = prefs.mlClap === true;
     this.attackSensitivity =
       prefs.attackSensitivity ?? DEFAULT_ATTACK_SENSITIVITY;
     this.targetCapturesPerMin = clampTargetPerMin(
@@ -370,6 +382,8 @@ export class GlCapturePage extends LitElement {
     await db.prefs.put({
       ...prefs,
       captureAutoGain: this.autoGain,
+      mlYamnet: this.mlYamnet,
+      mlClap: this.mlClap,
       attackSensitivity: this.attackSensitivity,
       targetCapturesPerMin: this.targetCapturesPerMin,
       captureAudioDeviceId: this.audioDeviceId || undefined,
@@ -475,6 +489,12 @@ export class GlCapturePage extends LitElement {
               },
             },
             {
+              label: t("capture.importFile"),
+              icon: "upload",
+              disabled: this.importBusy || this.listening,
+              onClick: this.#pickImportFile,
+            },
+            {
               label: t("capture.toLibrary"),
               icon: "library",
               onClick: () => navigate({ name: "library" }),
@@ -482,6 +502,13 @@ export class GlCapturePage extends LitElement {
           ],
         })}
       </div>
+      <input
+        id="import-hunt-audio"
+        class="sr-only"
+        type="file"
+        accept=".wav,.wave,.mp3,audio/wav,audio/wave,audio/x-wav,audio/mpeg,audio/mp3"
+        @change=${(e: Event) => void this.#onImportFile(e)}
+      />
       <div
         class="rec-wrap flex min-h-[7.5rem] items-center justify-center py-6 pb-5"
       >
@@ -490,6 +517,7 @@ export class GlCapturePage extends LitElement {
           shape="circle"
           size="2xl"
           icon
+          ?disabled=${this.importBusy}
           data-aria-label=${this.listening
             ? t("capture.stop")
             : t("capture.start")}
@@ -567,15 +595,50 @@ export class GlCapturePage extends LitElement {
         </div>
       </div>
       <p>
-        ${this.listening
-          ? t("capture.hintRecording")
-          : this.micOpen
-            ? t("capture.hintScout")
-            : this.scoutBlocked
-              ? t("capture.hintScoutBlocked")
-              : t("capture.empty")}
+        ${this.importBusy
+          ? t("capture.importBusy")
+          : this.listening
+            ? t("capture.hintRecording")
+            : this.micOpen
+              ? t("capture.hintScout")
+              : this.scoutBlocked
+                ? t("capture.hintScoutBlocked")
+                : t("capture.empty")}
       </p>
-      ${this.liveState !== "idle" && this.liveState !== "listening"
+      ${this.importBusy
+        ? html`
+            <div class="flex flex-col gap-2">
+              <div
+                class="h-2 overflow-hidden rounded bg-neutral-100"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow=${Math.round(this.importRatio * 100)}
+                aria-label=${t("capture.importBusy")}
+              >
+                <i
+                  class="block h-full bg-primary"
+                  style="width:${Math.round(this.importRatio * 100)}%"
+                ></i>
+              </div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-mono text-[0.8rem] text-neutral-500"
+                  >${this.importExtracted} · ${Math.round(this.importRatio * 100)}%</span
+                >
+                <sonic-button
+                  type="neutral"
+                  variant="outline"
+                  size="xs"
+                  @click=${this.#cancelImport}
+                  >${t("capture.importCancel")}</sonic-button
+                >
+              </div>
+            </div>
+          `
+        : nothing}
+      ${!this.importBusy &&
+      this.liveState !== "idle" &&
+      this.liveState !== "listening"
         ? html`<p
             class="font-mono text-[0.85rem] text-neutral-500 ${this.liveState.startsWith(
               "event",
@@ -584,6 +647,11 @@ export class GlCapturePage extends LitElement {
               : ""}"
           >
             ${stateLabel(this.liveState, this.listening)}
+          </p>`
+        : nothing}
+      ${this.statusText && !this.importBusy
+        ? html`<p class="font-mono text-[0.8rem] text-neutral-500">
+            ${this.statusText}
           </p>`
         : nothing}
       ${this.#renderRateModal()}
@@ -783,6 +851,34 @@ export class GlCapturePage extends LitElement {
                       </p>
                     `}
             </div>
+            <label class="flex cursor-pointer items-start gap-2.5">
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                .checked=${this.mlYamnet}
+                @change=${this.#onMlYamnetChange}
+              />
+              <span class="flex flex-col gap-0.5">
+                <span class="text-sm text-content">${t("capture.mlYamnet")}</span>
+                <span class="text-xs leading-snug text-neutral-500"
+                  >${t("capture.mlYamnetHint")}</span
+                >
+              </span>
+            </label>
+            <label class="flex cursor-pointer items-start gap-2.5">
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                .checked=${this.mlClap}
+                @change=${this.#onMlClapChange}
+              />
+              <span class="flex flex-col gap-0.5">
+                <span class="text-sm text-content">${t("capture.mlClap")}</span>
+                <span class="text-xs leading-snug text-neutral-500"
+                  >${t("capture.mlClapHint")}</span
+                >
+              </span>
+            </label>
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
@@ -797,6 +893,18 @@ export class GlCapturePage extends LitElement {
       (e as CustomEvent<{ value?: string }>).detail?.value ?? "",
     );
     void this.#applyAudioDevice(value);
+  };
+
+  #onMlYamnetChange = (e: Event): void => {
+    const on = (e.target as HTMLInputElement).checked;
+    this.mlYamnet = on;
+    void this.#persistCapturePrefs();
+  };
+
+  #onMlClapChange = (e: Event): void => {
+    const on = (e.target as HTMLInputElement).checked;
+    this.mlClap = on;
+    void this.#persistCapturePrefs();
   };
 
   async #refreshAudioInputs(): Promise<void> {
@@ -847,12 +955,104 @@ export class GlCapturePage extends LitElement {
   }
 
   #toggle = async (): Promise<void> => {
+    if (this.importBusy) return;
     if (this.listening) {
       await this.#stopRecording();
       return;
     }
     await this.#startRecording();
   };
+
+  #pickImportFile = (): void => {
+    if (this.importBusy) return;
+    if (this.listening) {
+      this.warnings = [t("capture.importBlocked")];
+      return;
+    }
+    this.renderRoot
+      .querySelector<HTMLInputElement>("#import-hunt-audio")
+      ?.click();
+  };
+
+  #cancelImport = (): void => {
+    this.#importAbort?.abort();
+  };
+
+  async #onImportFile(ev: Event): Promise<void> {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0] ?? null;
+    input.value = "";
+    if (!file || this.importBusy) return;
+    if (this.listening) {
+      this.warnings = [t("capture.importBlocked")];
+      return;
+    }
+
+    this.warnings = [];
+    this.extracted = [];
+    this.sampleCount = 0;
+    this.importBusy = true;
+    this.importRatio = 0;
+    this.importExtracted = 0;
+    this.liveState = "extracting";
+
+    const abort = new AbortController();
+    this.#importAbort = abort;
+
+    await this.#shutdownMic();
+
+    try {
+      const projectId = await projectWorkspace.currentId();
+      const name =
+        (this.captureName ?? "").trim() ||
+        file.name.replace(/\.(wav|wave|mp3)$/i, "").trim() ||
+        `Fichier ${new Date().toLocaleString("fr-FR")}`;
+      this.captureName = name;
+      this.#syncCaptureForm();
+
+      const result = await importForHunt.processFile({
+        file,
+        projectId,
+        captureName: name,
+        openFloorFactor: sensitivityToOpenFloor(this.attackSensitivity),
+        signal: abort.signal,
+        onProgress: (p) => {
+          this.importRatio = p.ratio;
+          this.importExtracted = p.extracted;
+        },
+        onSample: (sample) => {
+          this.extracted = [
+            {
+              id: sample.id,
+              class: sample.class,
+              tags: sample.tags ?? [],
+              loopProposed: Boolean(sample.loopProposed),
+            },
+            ...this.extracted,
+          ].slice(0, 40);
+          this.sampleCount = this.extracted.length;
+          this.importExtracted = this.sampleCount;
+        },
+      });
+
+      this.statusText = tf("capture.importDone", { n: String(result.extracted) });
+      this.liveState = "characterized";
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        this.liveState = "idle";
+        this.statusText = "";
+      } else {
+        this.warnings = [t("capture.importFailed")];
+        this.liveState = "idle";
+        console.error("[glane] import-for-hunt failed", err);
+      }
+    } finally {
+      this.#importAbort = null;
+      this.importBusy = false;
+      this.importRatio = 0;
+      void this.#startScout();
+    }
+  }
 
   /** Open mic + hunter without writing samples (threshold warm-up). */
   async #startScout(): Promise<void> {

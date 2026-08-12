@@ -42,6 +42,17 @@ export type UserPrefs = {
   targetCapturesPerMin?: number;
   /** Preferred MediaDeviceInfo.deviceId for capture (empty = browser default). */
   captureAudioDeviceId?: string;
+  /**
+   * T2 YAMNet semantic tags after polish (ADR-0020). Default on.
+   * Set false to skip model download / inference.
+   */
+  mlYamnet?: boolean;
+  /**
+   * T2 CLAP embeddings after polish (search / similar). Default **off**
+   * (large first download); enable in capture settings. Similar/search can
+   * still load on demand.
+   */
+  mlClap?: boolean;
 };
 
 export type ProcessJobStatus = "pending" | "running" | "done" | "error";
@@ -208,6 +219,14 @@ export async function ensurePrefs(): Promise<UserPrefs> {
     prefs = { ...prefs, targetCapturesPerMin: DEFAULT_TARGET_CAPTURES_PER_MIN };
     dirty = true;
   }
+  if (prefs.mlYamnet === undefined) {
+    prefs = { ...prefs, mlYamnet: true };
+    dirty = true;
+  }
+  if (prefs.mlClap === undefined) {
+    prefs = { ...prefs, mlClap: false };
+    dirty = true;
+  }
   const theme = normalizeThemeId(prefs.theme);
   if (theme !== prefs.theme) {
     prefs = { ...prefs, theme };
@@ -235,6 +254,8 @@ async function createDefaultPrefs(): Promise<UserPrefs> {
     captureAutoGain: false,
     attackSensitivity: DEFAULT_ATTACK_SENSITIVITY,
     targetCapturesPerMin: DEFAULT_TARGET_CAPTURES_PER_MIN,
+    mlYamnet: true,
+    mlClap: false,
   };
   await db.prefs.put(prefs);
   return prefs;

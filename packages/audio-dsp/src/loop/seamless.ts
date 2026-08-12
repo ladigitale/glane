@@ -1,4 +1,5 @@
 import { snapToRisingZeroCrossing } from "../detect/descriptors.js";
+import { optimizeLoop } from "./optimize.js";
 
 export type SeamlessLoopResult = {
   /** Processed loop body (ready to play looped). */
@@ -135,9 +136,11 @@ function softenExtremities(
 }
 
 /**
- * Texture prep from a capture section (field fidelity):
- * 1. ZC-aligned slice (no repetition / stacking)
- * 2. soften extremities to avoid clicks
+ * Texture prep from a capture section:
+ * 1. If periodicity is clear → crop to N complete periods (“square” loop),
+ *    trimming trailing silence (music often ends mid-bar otherwise).
+ * 2. Else field-raw: ZC-aligned slice of almost the whole take.
+ * 3. Soften extremities to avoid clicks.
  * No envelope flatten — that pumped noise and crushed dynamics.
  * Peak-norm (global scale only) is applied by `runProcessJob` after this.
  */
@@ -147,7 +150,31 @@ export function processTextureClip(
 ): SeamlessLoopResult | null {
   if (input.length < sampleRate * 0.15) return null;
 
-  // Keep almost the whole take — trim only tiny edge noise, no period crop + copy
+  const period = optimizeLoop(input, sampleRate);
+  if (period) {
+    const { start, end } = risingLoopBounds(
+      input,
+      period.loopStartSample,
+      period.loopEndSample,
+    );
+    const body = new Float32Array(input.subarray(start, end));
+    if (body.length >= 64) {
+      softenExtremities(body, sampleRate);
+      return {
+        pcm: body,
+        loopScore: period.loopScore,
+        xfadeMs: period.xfadeMs,
+        tags: [
+          "loop-proposed",
+          "seamless",
+          "loop-period",
+          `loop-x${period.periodCount}`,
+        ],
+      };
+    }
+  }
+
+  // Fallback: keep almost the whole take — trim only tiny edge noise
   const a = Math.floor(input.length * 0.01);
   const b = Math.floor(input.length * 0.99);
   const { start, end } = risingLoopBounds(input, a, b);

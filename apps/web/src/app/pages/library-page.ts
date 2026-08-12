@@ -5,16 +5,35 @@ import {
   type Session,
 } from "@glane/core-model";
 import { TransportEngine } from "@glane/audio-engine";
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import tailwind from "../../css/tailwind";
 import { subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
-import { db } from "../db.js";
+import { db, ensurePrefs } from "../db.js";
 import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { processQueue } from "../process-queue.js";
+import {
+  SAMPLE_ML_EVENT,
+} from "../ml/enrich-queue.js";
+import {
+  SAMPLE_CLAP_EVENT,
+  CLAP_STATUS_EVENT,
+  rankLibraryByText,
+  rankSimilarSamples,
+  type ClapStatusDetail,
+} from "../ml/clap-queue.js";
+import { clapFeatureFromAnalysis } from "../ml/clap-runtime.js";
+import {
+  DEMUCS_QUEUE_EVENT,
+  SAMPLE_STEMS_EVENT,
+  demucsQueue,
+  enqueueDemucsSeparate,
+  type DemucsQueueSnapshot,
+} from "../ml/demucs-queue.js";
+import { ML_TAG } from "@glane/audio-ml";
 import {
   copySampleToProject,
   copySamplesToProject,
@@ -26,6 +45,7 @@ import {
   renameSample,
   setFavoriteMany,
   toggleFavorite,
+  autoCropSamples,
 } from "../sample-actions.js";
 import { libraryMachineExport, type MachineTarget } from "../library-machine-export.js";
 import {
@@ -104,6 +124,13 @@ export class GlLibraryPage extends LitElement {
   @state() private viewportH = 600;
   @state() private playingId: string | null = null;
   @state() private batchBusy = false;
+  @state() private separatingId: string | null = null;
+  @state() private separateProgress = "";
+  /** CLAP semantic rank (id → score); null = classic filter only. */
+  @state() private clapScores: Map<string, number> | null = null;
+  @state() private clapBusy = false;
+  @state() private clapStatus = "";
+  #clapTimer: number | null = null;
 
   #pointerStartX = 0;
   #pointerStartY = 0;
@@ -111,7 +138,9 @@ export class GlLibraryPage extends LitElement {
   #lastTapAt = 0;
   #lastTapId: string | null = null;
   #unsubProc: (() => void) | null = null;
+  #unsubDemucs: (() => void) | null = null;
   #lastProcRemaining = -1;
+  #demucsWaveActive = false;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -122,6 +151,11 @@ export class GlLibraryPage extends LitElement {
       q: "",
     });
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
+    window.addEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
+    window.addEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
+    window.addEventListener(SAMPLE_CLAP_EVENT, this.#onMlDone);
+    window.addEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
+    window.addEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
     void this.#reload();
     this.#unsubProc = processQueue.subscribe((s) => {
       if (s.remaining !== this.#lastProcRemaining) {
@@ -129,19 +163,97 @@ export class GlLibraryPage extends LitElement {
         void this.#reload();
       }
     });
+    this.#unsubDemucs = demucsQueue.subscribe((s) => this.#applyDemucsSnap(s));
   }
 
   override disconnectedCallback(): void {
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
+    window.removeEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
+    window.removeEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
+    window.removeEventListener(SAMPLE_CLAP_EVENT, this.#onMlDone);
+    window.removeEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
+    window.removeEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
+    if (this.#clapTimer != null) window.clearTimeout(this.#clapTimer);
     this.#unsubProc?.();
+    this.#unsubDemucs?.();
     this.#engine?.stop();
     super.disconnectedCallback();
+  }
+
+  override updated(changed: PropertyValues): void {
+    if (changed.has("captureQuery") || changed.has("samples")) {
+      this.#scheduleClapSearch();
+    }
   }
 
   #onProjectChange = (): void => {
     set(libraryFiltersKey.sessionFilter, "");
     set(libraryFiltersKey.tagFilter, "");
     void this.#reload();
+  };
+
+  #onMlDone = (): void => {
+    void this.#reload();
+  };
+
+  #onDemucsQueue = (ev: Event): void => {
+    const d = (ev as CustomEvent<DemucsQueueSnapshot>).detail;
+    if (d) this.#applyDemucsSnap(d);
+  };
+
+  #applyDemucsSnap(s: DemucsQueueSnapshot): void {
+    const active = s.remaining > 0 || s.phase !== "idle";
+    if (active) this.#demucsWaveActive = true;
+    this.separatingId = s.currentSampleId;
+    if (!active) {
+      if (this.#demucsWaveActive && s.waveTotal > 0) {
+        this.#demucsWaveActive = false;
+        void glDialog.alert(
+          tf("library.separateBatchDone", {
+            ok: s.ok,
+            skipped: s.skipped,
+            failed: s.failed,
+          }),
+        );
+        void this.#reload();
+      }
+      this.separateProgress = "";
+      return;
+    }
+    const i = Math.min(s.waveDone + 1, Math.max(1, s.waveTotal));
+    const pct = Math.round(s.ratio * 100);
+    const label =
+      s.phase === "loading"
+        ? `${t("library.separateLoading")} ${pct}%`
+        : `${t("library.separating")} ${pct}%`;
+    this.separateProgress = tf("library.separateBatchProgress", {
+      i,
+      n: s.waveTotal,
+      label,
+    });
+  }
+
+  #onClapStatus = (ev: Event): void => {
+    const d = (ev as CustomEvent<ClapStatusDetail>).detail;
+    if (!d) return;
+    if (d.phase === "idle") {
+      this.clapStatus = "";
+      this.clapBusy = false;
+      return;
+    }
+    this.clapBusy = true;
+    const pct =
+      d.ratio != null ? ` ${Math.round(d.ratio * 100)}%` : "";
+    if (d.phase === "loading-model") {
+      this.clapStatus = `${t("library.clapLoadingModel")}${pct}`;
+    } else if (d.phase === "embedding") {
+      this.clapStatus = `${t("library.clapEmbedding")}${pct}`;
+    } else if (d.phase === "searching") {
+      this.clapStatus = `${t("library.clapSearching")}${pct}`;
+    } else if (d.phase === "error") {
+      this.clapStatus = d.message ?? t("library.similarNone");
+      this.clapBusy = false;
+    }
   };
 
   get #filtered(): Sample[] {
@@ -157,16 +269,75 @@ export class GlLibraryPage extends LitElement {
       list = list.filter((s) => (s.tags ?? []).includes(this.tagFilter));
     }
     const q = this.captureQuery.trim().toLowerCase();
+    const scores = this.clapScores;
     if (q) {
-      list = list.filter(
-        (s) =>
-          (s.captureName ?? "").toLowerCase().includes(q) ||
-          s.name.toLowerCase().includes(q) ||
-          (s.userName ?? "").toLowerCase().includes(q) ||
-          (s.tags ?? []).some((tag) => tag.toLowerCase().includes(q)),
-      );
+      if (scores && scores.size > 0) {
+        const classic = new Set(
+          list
+            .filter(
+              (s) =>
+                (s.captureName ?? "").toLowerCase().includes(q) ||
+                s.name.toLowerCase().includes(q) ||
+                (s.userName ?? "").toLowerCase().includes(q) ||
+                (s.tags ?? []).some((tag) => tag.toLowerCase().includes(q)),
+            )
+            .map((s) => s.id),
+        );
+        list = list.filter((s) => classic.has(s.id) || scores.has(s.id));
+        list = [...list].sort((a, b) => {
+          const sa = scores.get(a.id) ?? (classic.has(a.id) ? 0.05 : 0);
+          const sb = scores.get(b.id) ?? (classic.has(b.id) ? 0.05 : 0);
+          return sb - sa;
+        });
+      } else {
+        list = list.filter(
+          (s) =>
+            (s.captureName ?? "").toLowerCase().includes(q) ||
+            s.name.toLowerCase().includes(q) ||
+            (s.userName ?? "").toLowerCase().includes(q) ||
+            (s.tags ?? []).some((tag) => tag.toLowerCase().includes(q)),
+        );
+      }
     }
     return list;
+  }
+
+  #scheduleClapSearch(): void {
+    if (this.#clapTimer != null) window.clearTimeout(this.#clapTimer);
+    this.#clapTimer = window.setTimeout(() => {
+      this.#clapTimer = null;
+      void this.#runClapSearch();
+    }, 400);
+  }
+
+  async #runClapSearch(): Promise<void> {
+    const q = this.captureQuery.trim();
+    if (q.length < 3) {
+      this.clapScores = null;
+      return;
+    }
+    const prefs = await ensurePrefs();
+    // Auto semantic only when opt-in; otherwise classic text filter only.
+    if (prefs.mlClap !== true) {
+      this.clapScores = null;
+      return;
+    }
+    this.clapBusy = true;
+    try {
+      const ranked = await rankLibraryByText(
+        q,
+        this.samples.filter((s) => !s.deletedAt).map((s) => s.id),
+        { minScore: 0.12, limit: 40 },
+      );
+      this.clapScores =
+        ranked.length > 0
+          ? new Map(ranked.map((r) => [r.id, r.score]))
+          : null;
+    } catch {
+      this.clapScores = null;
+    } finally {
+      this.clapBusy = false;
+    }
   }
 
   get #sessionOptions(): { id: string; label: string; count: number }[] {
@@ -241,6 +412,18 @@ export class GlLibraryPage extends LitElement {
         onClick: () => void this.#batchCopyToProject(),
       },
       {
+        label: t("library.batchSeparate"),
+        icon: "layers",
+        disabled: noSel,
+        onClick: () => void this.#batchSeparate(),
+      },
+      {
+        label: t("library.batchAutoCrop"),
+        icon: "crop",
+        disabled: noSel,
+        onClick: () => void this.#batchAutoCrop(),
+      },
+      {
         label: t("library.exportMachine"),
         icon: "download",
         disabled: noExport,
@@ -274,6 +457,7 @@ export class GlLibraryPage extends LitElement {
           size="sm"
           inlineContent
           placeholder=${t("library.search")}
+          title=${t("library.semanticHint")}
         >
           ${glIcon("search", { slot: "prefix", size: "sm" })}
         </sonic-input>
@@ -359,6 +543,19 @@ export class GlLibraryPage extends LitElement {
           items: batchItems,
         })}
       </div>
+
+      ${this.separateProgress
+        ? html`<sonic-alert
+            class="mb-3"
+            status="info"
+            label=${this.separateProgress}
+          ></sonic-alert>`
+        : nothing}
+      ${this.clapBusy || this.clapStatus
+        ? html`<p class="mb-2 font-mono text-[0.7rem] text-neutral-500">
+            ${this.clapStatus || t("library.similarBusy")}
+          </p>`
+        : nothing}
 
       <div
         class="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-neutral-100 px-[0.65rem] py-2"
@@ -462,6 +659,16 @@ export class GlLibraryPage extends LitElement {
                               label: t("library.duplicate"),
                               icon: "copy",
                               onClick: () => void this.#duplicate(s),
+                            },
+                            {
+                              label: t("library.similar"),
+                              icon: "audio-lines",
+                              onClick: () => void this.#similar(s),
+                            },
+                            {
+                              label: t("library.separate"),
+                              icon: "layers",
+                              onClick: () => void this.#separate(s),
                             },
                             {
                               label: t("library.copyToProject"),
@@ -807,6 +1014,112 @@ export class GlLibraryPage extends LitElement {
       return;
     }
     await this.#reload();
+  }
+
+  async #similar(s: Sample): Promise<void> {
+    const analysis = await db.analyses.get(s.id);
+    const hasEmbed = !!clapFeatureFromAnalysis(
+      analysis?.features as Record<string, unknown>,
+    );
+    if (!hasEmbed) {
+      const ok = await glDialog.confirm({
+        title: t("library.similar"),
+        message: t("library.similarConfirm"),
+      });
+      if (!ok) return;
+    }
+    this.clapBusy = true;
+    try {
+      const ranked = await rankSimilarSamples(
+        s.id,
+        this.samples.filter((x) => !x.deletedAt).map((x) => x.id),
+        { minScore: 0.18, limit: 12 },
+      );
+      if (ranked.length === 0) {
+        await glDialog.alert(t("library.similarNone"));
+        return;
+      }
+      const byId = new Map(this.samples.map((x) => [x.id, x]));
+      const lines = ranked.map((r) => {
+        const row = byId.get(r.id);
+        const name = row?.userName ?? row?.name ?? r.id.slice(0, 8);
+        return `${Math.round(r.score * 100)}% — ${name}`;
+      });
+      await glDialog.alert({
+        title: t("library.similarTitle"),
+        message: lines.join("\n"),
+      });
+      this.selected = new Set(ranked.map((r) => r.id));
+    } catch (e) {
+      await glDialog.alert(
+        `${t("library.similarNone")}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      this.clapBusy = false;
+      this.clapStatus = "";
+    }
+  }
+
+  #eligibleForSeparate(s: Sample): boolean {
+    const tags = s.tags ?? [];
+    if (tags.some((tag) => tag.startsWith("stem:"))) return false;
+    if (tags.includes(ML_TAG.demucs) || tags.includes(ML_TAG.demucsRunning)) {
+      return false;
+    }
+    return true;
+  }
+
+  async #separate(s: Sample): Promise<void> {
+    const tags = s.tags ?? [];
+    if (tags.some((tag) => tag.startsWith("stem:"))) {
+      await glDialog.alert(t("library.separateSkipStem"));
+      return;
+    }
+    if (tags.includes(ML_TAG.demucs) || tags.includes(ML_TAG.demucsRunning)) {
+      await glDialog.alert(t("library.separateAlready"));
+      return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.separate"),
+      message: t("library.separateConfirm"),
+    });
+    if (!ok) return;
+    enqueueDemucsSeparate(s.id);
+  }
+
+  async #batchSeparate(): Promise<void> {
+    const ids = this.#selectedInView();
+    if (ids.length === 0) return;
+    const byId = new Map(this.samples.map((s) => [s.id, s]));
+    const eligible = ids.filter((id) => {
+      const s = byId.get(id);
+      return s ? this.#eligibleForSeparate(s) : false;
+    });
+    if (eligible.length === 0) {
+      await glDialog.alert(t("library.separateNoneEligible"));
+      return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.batchSeparate"),
+      message: tf("library.separateBatchConfirm", { n: eligible.length }),
+    });
+    if (!ok) return;
+    enqueueDemucsSeparate(eligible);
+  }
+
+  async #batchAutoCrop(): Promise<void> {
+    const ids = this.#selectedInView();
+    if (ids.length === 0) return;
+    this.batchBusy = true;
+    try {
+      const { cropped, skipped } = await autoCropSamples(ids);
+      await this.#reload();
+      await glDialog.alert(
+        tf("library.batchAutoCropDone", { cropped, skipped }),
+      );
+    } finally {
+      this.batchBusy = false;
+    }
   }
 
   async #copyToProject(s: Sample): Promise<void> {

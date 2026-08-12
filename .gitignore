@@ -22,4 +22,5 @@ apps/api/.env.local
 # Build
 packages/*/dist/
 apps/web/dist/
+apps/web/public/ml/mediapipe-wasm/
 coverage/

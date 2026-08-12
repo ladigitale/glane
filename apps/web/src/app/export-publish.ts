@@ -23,6 +23,44 @@ export type BounceResult = {
   mp3: Blob | null;
 };
 
+export type BounceProgressStage = "mix" | "wav" | "mp3";
+
+export type BounceProgress = {
+  stage: BounceProgressStage;
+  /** Present for `mp3` (0…1). */
+  ratio?: number;
+};
+
+async function yieldToUi(): Promise<void> {
+  const sched = (
+    globalThis as unknown as {
+      scheduler?: { yield?: () => Promise<void> };
+    }
+  ).scheduler;
+  if (sched?.yield) {
+    await sched.yield();
+    return;
+  }
+  await new Promise<void>((r) => setTimeout(r, 0));
+}
+
+async function applyMasterGainAsync(
+  buffer: AudioBuffer,
+  gainDb: number,
+): Promise<void> {
+  const gain = Math.pow(10, gainDb / 20);
+  if (gain === 1) return;
+  const chunk = 128_000;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c);
+    for (let i = 0; i < data.length; i += chunk) {
+      const end = Math.min(i + chunk, data.length);
+      for (let j = i; j < end; j++) data[j]! *= gain;
+      await yieldToUi();
+    }
+  }
+}
+
 async function bounceProject(opts: {
   engine: TransportEngine;
   clips: ScheduledClip[];
@@ -31,6 +69,7 @@ async function bounceProject(opts: {
   tracks?: TrackInsertConfig[];
   /** Default: wav only. Pass true when the caller needs MP3. */
   encodeMp3?: boolean;
+  onProgress?: (p: BounceProgress) => void;
 }): Promise<BounceResult> {
   const {
     engine,
@@ -39,6 +78,7 @@ async function bounceProject(opts: {
     lengthTick,
     tracks = [],
     encodeMp3 = false,
+    onProgress,
   } = opts;
   const durationSamples = ticksToSamples(
     asTick(lengthTick),
@@ -48,21 +88,21 @@ async function bounceProject(opts: {
   const prev = engine.master.gain.value;
   engine.master.gain.value = 1;
   try {
+    onProgress?.({ stage: "mix" });
+    await yieldToUi();
     const buffer = await engine.renderOffline(
       clips,
       Number(asSampleIndex(Math.max(1, durationSamples))),
       tracks,
     );
-    const gain = Math.pow(10, project.masterGainDb / 20);
-    if (gain !== 1) {
-      for (let c = 0; c < buffer.numberOfChannels; c++) {
-        const data = buffer.getChannelData(c);
-        for (let i = 0; i < data.length; i++) data[i]! *= gain;
-      }
-    }
+    await applyMasterGainAsync(buffer, project.masterGainDb);
+    onProgress?.({ stage: "wav" });
+    await yieldToUi();
     const wav = audioExport.encodeWav(buffer, "int16");
     const mp3 = encodeMp3
-      ? await audioExport.encodeMp3(buffer, 192)
+      ? await audioExport.encodeMp3(buffer, 192, (p) =>
+          onProgress?.({ stage: "mp3", ratio: p.ratio }),
+        )
       : null;
     return { buffer, wav, mp3 };
   } finally {
@@ -70,9 +110,14 @@ async function bounceProject(opts: {
   }
 }
 
-async function ensureMp3(bounce: BounceResult): Promise<Blob> {
+async function ensureMp3(
+  bounce: BounceResult,
+  onProgress?: (ratio: number) => void,
+): Promise<Blob> {
   if (bounce.mp3) return bounce.mp3;
-  bounce.mp3 = await audioExport.encodeMp3(bounce.buffer, 192);
+  bounce.mp3 = await audioExport.encodeMp3(bounce.buffer, 192, (p) =>
+    onProgress?.(p.ratio),
+  );
   return bounce.mp3;
 }
 

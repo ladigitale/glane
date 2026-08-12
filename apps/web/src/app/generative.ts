@@ -18,8 +18,22 @@ import {
   type HarmonicPalette,
   type MelodyEvent,
 } from "./generative-refs";
+import {
+  mlScoreAdjust,
+  roleHintFromStem,
+  roleHintFromYamnet,
+  withClapCohesion,
+  type SampleMlCues,
+} from "./generative-cues";
 
 export type { ExprRole };
+export type { SampleMlCues };
+export {
+  parseStemFromTags,
+  parseYamnetSlugs,
+  resolveYamnetSlugs,
+  withClapCohesion,
+} from "./generative-cues";
 
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -89,6 +103,16 @@ export type SequenceSampleIn = {
   analysisBpm?: number;
   forceRole?: ExprRole | null;
   tags?: string[];
+  /** T2 ML / library enrichment (YAMNet, Demucs, CLAP, interest). */
+  subclass?: string;
+  confidence?: number;
+  interestScore?: number;
+  rating?: number;
+  parentSampleId?: string;
+  stem?: SampleMlCues["stem"];
+  yamnet?: string[];
+  clapVector?: number[];
+  clapCohesion?: number;
 };
 
 export type SequenceClipPlan = {
@@ -378,7 +402,9 @@ export function inferExprRole(s: SequenceSampleIn): ExprRole {
   return "perc";
 }
 
-/** Manual forceRole → tag `role:*` → inference. */
+/**
+ * Manual forceRole → tag `role:*` → Demucs stem → YAMNet → DSP inference.
+ */
 export function resolveExprRole(s: SequenceSampleIn): ExprRole {
   if (s.forceRole) {
     const p = ExprRoleSchema.safeParse(s.forceRole);
@@ -386,6 +412,10 @@ export function resolveExprRole(s: SequenceSampleIn): ExprRole {
   }
   const fromTag = parseExprRoleTag(s.tags);
   if (fromTag) return fromTag;
+  const fromStem = roleHintFromStem(s.stem, s.yamnet, s.subclass);
+  if (fromStem) return fromStem;
+  const fromYamnet = roleHintFromYamnet(s.yamnet, s.subclass);
+  if (fromYamnet) return fromYamnet;
   return inferExprRole(s);
 }
 
@@ -1153,6 +1183,7 @@ function scoreSampleForRole(s: SequenceSampleIn, role: ExprRole): number {
   }
   if (role === "bass" && (sampleSourceMidi(s) ?? 60) < 52) score -= 1;
   if (role === "chord" && (s.harmonicity ?? 0) > 0.35) score -= 1;
+  score += mlScoreAdjust(s, role, inferred);
   return score;
 }
 
@@ -1604,11 +1635,36 @@ function pickFades(opts: {
   return { fadeInMs, fadeOutMs, fadeCurve };
 }
 
+/** Beat duration in ms for tempo-synced FX. */
+function beatMs(bpm: number): number {
+  return 60_000 / Math.max(1, bpm);
+}
+
+function pickBeatFrac(rnd: () => number, beatFracs: readonly number[]): number {
+  return beatFracs[Math.floor(rnd() * beatFracs.length)] ?? 1;
+}
+
+/**
+ * Reverb decay tuned so impulse length ≈ N beats.
+ * Engine: durationSec = 0.6 + decay * 2.4 (track-insert).
+ */
+function bpmSyncedReverbDecay(
+  bpm: number,
+  rnd: () => number,
+  beatFracs: readonly number[],
+): number {
+  const beatSec = beatMs(bpm) / 1000;
+  const frac = beatFracs[Math.floor(rnd() * beatFracs.length)] ?? 2;
+  const targetSec = beatSec * frac;
+  return clamp((targetSec - 0.6) / 2.4, 0.05, 1);
+}
+
 function pickTrackMix(
   role: ExprRole,
   trackIndex: number,
   trackCount: number,
   energy: number,
+  bpm: number,
   rnd: () => number,
 ): Omit<SequenceTrackPlan, "trackId"> {
   const spread =
@@ -1638,7 +1694,7 @@ function pickTrackMix(
             ? normalizeTrackFx({
                 type: "reverb",
                 mix: 0.18 + rnd() * 0.15,
-                decay: 0.25 + rnd() * 0.25,
+                decay: bpmSyncedReverbDecay(bpm, rnd, [0.75, 1, 1.5]),
               })
             : normalizeTrackFx({
                 type: "eq",
@@ -1676,7 +1732,7 @@ function pickTrackMix(
         fx: normalizeTrackFx({
           type: "reverb",
           mix: 0.28 + rnd() * 0.2,
-          decay: 0.4 + rnd() * 0.3,
+          decay: bpmSyncedReverbDecay(bpm, rnd, [1.5, 2, 3]),
         }),
       };
     case "lead":
@@ -1688,13 +1744,13 @@ function pickTrackMix(
             ? normalizeTrackFx({
                 type: "echo",
                 mix: 0.22 + rnd() * 0.18,
-                delayMs: 180 + rnd() * 220,
+                delayBeats: pickBeatFrac(rnd, [0.5, 0.75, 1, 1.5]),
                 feedback: 0.25 + rnd() * 0.25,
               })
             : normalizeTrackFx({
                 type: "reverb",
                 mix: 0.2 + rnd() * 0.2,
-                decay: 0.35 + rnd() * 0.3,
+                decay: bpmSyncedReverbDecay(bpm, rnd, [1, 1.5, 2]),
               }),
       };
     case "texture":
@@ -1704,7 +1760,7 @@ function pickTrackMix(
         fx: normalizeTrackFx({
           type: "reverb",
           mix: 0.4 + rnd() * 0.25,
-          decay: 0.55 + rnd() * 0.35,
+          decay: bpmSyncedReverbDecay(bpm, rnd, [3, 4, 6]),
         }),
       };
     case "loop":
@@ -1716,7 +1772,7 @@ function pickTrackMix(
             ? normalizeTrackFx({
                 type: "reverb",
                 mix: 0.2 + rnd() * 0.15,
-                decay: 0.35 + rnd() * 0.25,
+                decay: bpmSyncedReverbDecay(bpm, rnd, [1, 1.5, 2.5]),
               })
             : { ...DEFAULT_TRACK_FX },
       };
@@ -1729,7 +1785,7 @@ function pickTrackMix(
             ? normalizeTrackFx({
                 type: "echo",
                 mix: 0.15 + rnd() * 0.15,
-                delayMs: 120 + rnd() * 180,
+                delayBeats: pickBeatFrac(rnd, [0.25, 0.5, 0.75]),
                 feedback: 0.2 + rnd() * 0.2,
               })
             : { ...DEFAULT_TRACK_FX },
@@ -1744,13 +1800,13 @@ function pickTrackMix(
             ? normalizeTrackFx({
                 type: "echo",
                 mix: 0.3 + rnd() * 0.25,
-                delayMs: 200 + rnd() * 400,
+                delayBeats: pickBeatFrac(rnd, [1, 1.5, 2]),
                 feedback: 0.3 + rnd() * 0.35,
               })
             : normalizeTrackFx({
                 type: "reverb",
                 mix: 0.35 + rnd() * 0.3,
-                decay: 0.5 + rnd() * 0.4,
+                decay: bpmSyncedReverbDecay(bpm, rnd, [2, 3, 5]),
               }),
       };
   }
@@ -1827,8 +1883,18 @@ export function planSequence(opts: {
 
   const ticksPerBar = beatsPerBar * ppq;
   const seqEnd = bars * ticksPerBar;
-  const pool = [...samples].sort((a, b) => {
+  const enriched = withClapCohesion(samples);
+  const pool = [...enriched].sort((a, b) => {
     if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+    const ai = a.interestScore ?? -1;
+    const bi = b.interestScore ?? -1;
+    if (ai !== bi) return bi - ai;
+    const ar = a.rating ?? 0;
+    const br = b.rating ?? 0;
+    if (ar !== br) return br - ar;
+    const ac = a.clapCohesion ?? -1;
+    const bc = b.clapCohesion ?? -1;
+    if (ac !== bc) return bc - ac;
     return a.id.localeCompare(b.id);
   });
 
@@ -1856,7 +1922,7 @@ export function planSequence(opts: {
   );
   const trackPlans: SequenceTrackPlan[] = sortedTracks.map((track, ti) => {
     const role = roles[ti] ?? "perc";
-    const mix = pickTrackMix(role, ti, sortedTracks.length, energy, rnd);
+    const mix = pickTrackMix(role, ti, sortedTracks.length, energy, bpm, rnd);
     return { trackId: track.id, ...mix };
   });
 

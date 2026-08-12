@@ -4,6 +4,7 @@ import {
   type Sample,
   type Session,
 } from "@glane/core-model";
+import { autoCropPcm } from "@glane/audio-dsp";
 import { sampleOpfs } from "@glane/audio-io";
 import { db } from "./db.js";
 import { loadSampleAudio } from "./load-sample-audio.js";
@@ -279,7 +280,7 @@ function stripAudioExt(name: string): string {
   return base || name;
 }
 
-function isImportableAudio(file: File): boolean {
+export function isImportableAudio(file: File): boolean {
   const n = file.name.toLowerCase();
   if (/\.(wav|wave|mp3)$/.test(n)) return true;
   const t = file.type.toLowerCase();
@@ -292,7 +293,7 @@ function isImportableAudio(file: File): boolean {
   );
 }
 
-function audioBufferToMonoPcm(buf: AudioBuffer): Float32Array {
+export function audioBufferToMonoPcm(buf: AudioBuffer): Float32Array {
   const frames = buf.length;
   const out = new Float32Array(frames);
   if (buf.numberOfChannels === 1) {
@@ -318,6 +319,14 @@ async function decodeAudioFile(file: File): Promise<AudioBuffer> {
   }
 }
 
+/** Decode WAV/MP3 to mono PCM for library import or offline hunt. */
+export async function decodeAudioFileToMono(
+  file: File,
+): Promise<{ pcm: Float32Array; sampleRate: number }> {
+  const buffer = await decodeAudioFile(file);
+  return { pcm: audioBufferToMonoPcm(buffer), sampleRate: buffer.sampleRate };
+}
+
 export type ImportAudioResult = {
   imported: number;
   failed: number;
@@ -336,21 +345,20 @@ export async function importAudioFiles(
 
   for (const file of list) {
     try {
-      const buffer = await decodeAudioFile(file);
-      const pcm = audioBufferToMonoPcm(buffer);
+      const { pcm, sampleRate } = await decodeAudioFileToMono(file);
       if (pcm.length === 0) {
         failed++;
         continue;
       }
-      session ??= await ensureImportSession(projectId, buffer.sampleRate);
+      session ??= await ensureImportSession(projectId, sampleRate);
       const id = createEntityId();
       const now = nowIso();
       const durationMs = Math.max(
         1,
-        Math.round((pcm.length / buffer.sampleRate) * 1000),
+        Math.round((pcm.length / sampleRate) * 1000),
       );
       const label = stripAudioExt(file.name);
-      await sampleOpfs.savePcm(id, pcm, buffer.sampleRate, 1);
+      await sampleOpfs.savePcm(id, pcm, sampleRate, 1);
       const sample: Sample = {
         id,
         sessionId: session.id,
@@ -417,4 +425,51 @@ export async function saveBounceToLibrary(
   };
   await db.samples.put(sample);
   return sample;
+}
+
+export type AutoCropSamplesResult = {
+  cropped: number;
+  skipped: number;
+};
+
+/** Snap starts to louder delayed attacks + trim quiet tails (OPFS + Dexie). */
+export async function autoCropSamples(
+  ids: string[],
+): Promise<AutoCropSamplesResult> {
+  let cropped = 0;
+  let skipped = 0;
+  for (const id of ids) {
+    const audio = await sampleOpfs.loadPcm(id);
+    if (!audio || audio.pcm.length === 0) {
+      skipped++;
+      continue;
+    }
+    const result = autoCropPcm(audio.pcm, audio.sampleRate);
+    if (!result.cropped) {
+      skipped++;
+      continue;
+    }
+    await sampleOpfs.savePcm(id, result.pcm, audio.sampleRate, 1);
+    const sample = await db.samples.get(id);
+    if (sample) {
+      const tags = [...(sample.tags ?? [])];
+      if (result.attackCropped && !tags.includes("auto-crop-attack")) {
+        tags.push("auto-crop-attack");
+      }
+      if (result.tailCropped && !tags.includes("auto-crop-tail")) {
+        tags.push("auto-crop-tail");
+      }
+      await db.samples.update(id, {
+        durationMs: Math.max(
+          1,
+          Math.round((result.pcm.length / audio.sampleRate) * 1000),
+        ),
+        tags,
+        updatedAt: nowIso(),
+        revision: (sample.revision ?? 0) + 1,
+      });
+    }
+    cropped++;
+  }
+  return { cropped, skipped };
 }

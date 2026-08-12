@@ -43,35 +43,40 @@ export function renderMoreMenu(opts: {
       >
         ${glIcon(icon, { size: "sm" })}
       </sonic-button>
-      <sonic-menu slot="content" direction="column" align="left" size=${size}>
-        ${opts.items.map((item) => {
-          if (item === "divider") {
-            return html`<sonic-divider></sonic-divider>`;
-          }
-          if ("section" in item) {
+      <div
+        slot="content"
+        class="max-h-[min(70dvh,24rem)] overflow-y-auto overscroll-contain"
+      >
+        <sonic-menu direction="column" align="left" size=${size}>
+          ${opts.items.map((item) => {
+            if (item === "divider") {
+              return html`<sonic-divider></sonic-divider>`;
+            }
+            if ("section" in item) {
+              return html`
+                <sonic-divider
+                  label=${item.section}
+                  align="left"
+                  size=${size}
+                ></sonic-divider>
+              `;
+            }
             return html`
-              <sonic-divider
-                label=${item.section}
-                align="left"
-                size=${size}
-              ></sonic-divider>
+              <sonic-menu-item
+                ?disabled=${item.disabled}
+                ?active=${item.active}
+                type=${item.danger ? "danger" : "default"}
+                @click=${item.onClick}
+              >
+                ${item.icon
+                  ? glIcon(item.icon, { slot: "prefix", size: "xs" })
+                  : nothing}
+                ${item.hint ? `${item.label} · ${item.hint}` : item.label}
+              </sonic-menu-item>
             `;
-          }
-          return html`
-            <sonic-menu-item
-              ?disabled=${item.disabled}
-              ?active=${item.active}
-              type=${item.danger ? "danger" : "default"}
-              @click=${item.onClick}
-            >
-              ${item.icon
-                ? glIcon(item.icon, { slot: "prefix", size: "xs" })
-                : nothing}
-              ${item.hint ? `${item.label} · ${item.hint}` : item.label}
-            </sonic-menu-item>
-          `;
-        })}
-      </sonic-menu>
+          })}
+        </sonic-menu>
+      </div>
     </sonic-pop>
   `;
 }

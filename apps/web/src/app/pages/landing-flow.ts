@@ -2,7 +2,8 @@ import { LitElement, css, html } from "lit";
 import { customElement } from "lit/decorators.js";
 
 /**
- * Abstract loop: field wave → gleaned peaks → arrange grid → listen pulse.
+ * Playback waveform (R→L): sound bursts + silence, detect filter colours
+ * each section after amp rises then returns near zero.
  * Paused when prefers-reduced-motion.
  */
 @customElement("gl-landing-flow")
@@ -104,6 +105,72 @@ export class GlLandingFlow extends LitElement {
     if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  /**
+   * Timeline blocks: activity bursts separated by silence.
+   * A new coloured section starts each time amp rises from ~0 then returns.
+   */
+  static readonly #CYCLE = 520;
+  static readonly #BLOCKS: ReadonlyArray<{
+    start: number;
+    end: number;
+    kind: "silence" | "sound";
+    /** Colour index for sound blocks (-1 = silence). */
+    tag: number;
+  }> = [
+    { start: 0, end: 55, kind: "silence", tag: -1 },
+    { start: 55, end: 145, kind: "sound", tag: 0 },
+    { start: 145, end: 195, kind: "silence", tag: -1 },
+    { start: 195, end: 250, kind: "sound", tag: 1 },
+    { start: 250, end: 310, kind: "silence", tag: -1 },
+    { start: 310, end: 420, kind: "sound", tag: 2 },
+    { start: 420, end: 470, kind: "silence", tag: -1 },
+    { start: 470, end: 520, kind: "sound", tag: 0 },
+  ];
+
+  #block(sample: number) {
+    const local =
+      ((sample % GlLandingFlow.#CYCLE) + GlLandingFlow.#CYCLE) %
+      GlLandingFlow.#CYCLE;
+    for (const b of GlLandingFlow.#BLOCKS) {
+      if (local >= b.start && local < b.end) {
+        return {
+          ...b,
+          t: (local - b.start) / (b.end - b.start),
+        };
+      }
+    }
+    return {
+      start: 0,
+      end: GlLandingFlow.#CYCLE,
+      kind: "silence" as const,
+      tag: -1,
+      t: 0,
+    };
+  }
+
+  /** Envelope: rise → texture → fall to ~0 (section boundary at silences). */
+  #amp(sample: number): number {
+    const b = this.#block(sample);
+    if (b.kind === "silence") return 0.02;
+    const floor = 0.02;
+    const env = Math.sin(b.t * Math.PI); // 0 → 1 → 0
+    const s = sample * 0.09;
+    const texture =
+      Math.abs(Math.sin(s * 1.2 + b.tag) * 0.35) +
+      Math.abs(Math.sin(s * 2.7 - 0.5) * 0.22) +
+      Math.abs(Math.sin(s * 6.1) * 0.1);
+    const peak = 0.55 + (b.tag % 3) * 0.12;
+    return Math.min(1, floor + env * (peak * 0.55 + texture));
+  }
+
+  #tagIndex(sample: number): number {
+    const b = this.#block(sample);
+    if (b.kind !== "sound") return -1;
+    // Rotate palette across cycles so successive bursts stay distinct
+    const cycle = Math.floor(sample / GlLandingFlow.#CYCLE);
+    return (b.tag + cycle) % 3;
+  }
+
   #paint(t: number): void {
     const c = this.#canvas;
     if (!c) return;
@@ -113,81 +180,118 @@ export class GlLandingFlow extends LitElement {
     const h = this.#cssH;
     ctx.clearRect(0, 0, w, h);
 
-    const cycle = 10;
-    const phase = this.#reduced ? 2.5 : t % cycle;
     const primary =
       getComputedStyle(this).getPropertyValue("--sc-primary").trim() ||
       "#04d289";
     const muted =
       getComputedStyle(this).getPropertyValue("--sc-neutral-4").trim() ||
-      "rgba(128,128,140,0.35)";
+      "rgba(128,128,140,0.4)";
+    const mid =
+      getComputedStyle(this).getPropertyValue("--sc-neutral-7").trim() ||
+      "rgba(120,120,130,0.55)";
 
-    // 1) Continuous field wave
+    const tags = [primary, "#5b8def", "#e8a04a"] as const;
+
+    const midY = h * 0.52;
+    const maxAmp = h * 0.32;
+    const step = 3;
+    const pxPerSample = 2.5;
+    const speed = this.#reduced ? 0 : 130; // css-px / s, scroll R→L
+    const scroll = t * speed;
+    const filterX = w * 0.42;
+    const filterW = Math.max(18, w * 0.045);
+
+    // Zero line
     ctx.strokeStyle = muted;
-    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.35;
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    const mid = h * 0.55;
-    for (let x = 0; x <= w; x += 4) {
-      const y =
-        mid +
-        Math.sin(x * 0.018 + phase * 1.2) * (h * 0.06) +
-        Math.sin(x * 0.041 - phase * 0.7) * (h * 0.03);
-      if (x === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
+    ctx.moveTo(0, midY);
+    ctx.lineTo(w, midY);
     ctx.stroke();
-
-    // 2–3) Peaks detach then settle into a light grid
-    const settle = Math.min(1, Math.max(0, (phase - 2) / 3));
-    const arrange = Math.min(1, Math.max(0, (phase - 5) / 2.5));
-    const peaks = [
-      { bx: 0.22, h0: 0.22, h1: 0.28 },
-      { bx: 0.5, h0: 0.38, h1: 0.42 },
-      { bx: 0.78, h0: 0.18, h1: 0.26 },
-    ];
-    const baseY = mid + h * 0.12;
-    for (let i = 0; i < peaks.length; i++) {
-      const p = peaks[i]!;
-      const xLoose = w * (0.15 + i * 0.28 + Math.sin(phase + i) * 0.04);
-      const xGrid = w * p.bx;
-      const x = xLoose + (xGrid - xLoose) * arrange;
-      const ph = h * (p.h0 + (p.h1 - p.h0) * settle);
-      const alpha = 0.25 + 0.75 * settle;
-      ctx.fillStyle = primary;
-      ctx.globalAlpha = alpha;
-      const bw = Math.max(6, w * 0.028);
-      ctx.fillRect(x - bw / 2, baseY - ph, bw, ph);
-      // diamond head
-      const hy = baseY - ph - bw * 0.15;
-      ctx.beginPath();
-      ctx.moveTo(x, hy - bw * 0.85);
-      ctx.lineTo(x + bw * 0.55, hy);
-      ctx.lineTo(x, hy + bw * 0.35);
-      ctx.lineTo(x - bw * 0.55, hy);
-      ctx.closePath();
-      ctx.fill();
-    }
     ctx.globalAlpha = 1;
 
-    // 4) Listen pulse (link ring)
-    const pulse = Math.min(1, Math.max(0, (phase - 7.5) / 2));
-    if (pulse > 0 || this.#reduced) {
-      const px = w * 0.5;
-      const py = h * 0.22;
-      const r = 10 + pulse * 18;
-      ctx.strokeStyle = primary;
-      ctx.globalAlpha = 0.15 + 0.55 * (this.#reduced ? 0.7 : pulse);
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(px, py, r, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.globalAlpha = 0.8;
-      ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-      ctx.fillStyle = primary;
-      ctx.fill();
+    // Filter band (detect window)
+    ctx.fillStyle = primary;
+    ctx.globalAlpha = 0.08;
+    ctx.fillRect(
+      filterX - filterW / 2,
+      midY - maxAmp - 8,
+      filterW,
+      maxAmp * 2 + 16,
+    );
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = primary;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(filterX, midY - maxAmp - 10);
+    ctx.lineTo(filterX, midY + maxAmp + 10);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Soft section washes left of filter (clear colour blocks)
+    {
+      let x = 0;
+      let prevTag = this.#tagIndex((0 + scroll) / pxPerSample);
+      let runStart = 0;
+      const flush = (endX: number, tag: number) => {
+        if (tag < 0 || endX <= runStart) return;
+        if (endX > filterX - filterW / 2) endX = filterX - filterW / 2;
+        if (endX <= runStart) return;
+        ctx.fillStyle = tags[tag as 0 | 1 | 2];
+        ctx.globalAlpha = 0.14;
+        ctx.fillRect(runStart, midY - maxAmp - 4, endX - runStart, maxAmp * 2 + 8);
+      };
+      for (; x <= filterX - filterW / 2 + step; x += step) {
+        const tag = this.#tagIndex((x + scroll) / pxPerSample);
+        if (tag !== prevTag) {
+          flush(x, prevTag);
+          runStart = x;
+          prevTag = tag;
+        }
+      }
+      flush(filterX - filterW / 2, prevTag);
       ctx.globalAlpha = 1;
     }
+
+    // Waveform bars scrolling right → left
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1.75;
+    for (let x = 0; x <= w; x += step) {
+      const sample = (x + scroll) / pxPerSample;
+      const a = this.#amp(sample);
+      const silent = a < 0.04;
+      const half = silent ? 1.5 : Math.max(2, a * maxAmp);
+      const inFilter = Math.abs(x - filterX) <= filterW / 2;
+      const past = x < filterX - filterW / 2;
+      const tag = this.#tagIndex(sample);
+
+      if (past) {
+        if (silent || tag < 0) {
+          ctx.strokeStyle = muted;
+          ctx.globalAlpha = 0.2;
+        } else {
+          ctx.strokeStyle = tags[tag as 0 | 1 | 2];
+          ctx.globalAlpha = 0.75 + a * 0.25;
+          ctx.lineWidth = 2;
+        }
+      } else if (inFilter) {
+        ctx.strokeStyle = silent ? muted : primary;
+        ctx.globalAlpha = silent ? 0.35 : 0.95;
+        ctx.lineWidth = silent ? 1.5 : 2.4;
+      } else {
+        ctx.strokeStyle = silent ? muted : a > 0.5 ? mid : muted;
+        ctx.globalAlpha = silent ? 0.18 : 0.35 + a * 0.4;
+        ctx.lineWidth = 1.75;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(x, midY - half);
+      ctx.lineTo(x, midY + half);
+      ctx.stroke();
+      ctx.lineWidth = 1.75;
+    }
+    ctx.globalAlpha = 1;
   }
 
   override render() {

@@ -27,6 +27,7 @@ export type SeqOtExportOpts = {
   project: Project;
   lengthTick: number;
   title: string;
+  onProgress?: (p: { done: number; total: number }) => void;
 };
 
 function applyMasterGain(buffer: AudioBuffer, gainDb: number): void {
@@ -165,6 +166,12 @@ async function buildZip(opts: SeqOtExportOpts): Promise<{
 
   const files: { path: string; data: Uint8Array }[] = [];
   const stemNames: string[] = [];
+  const stemTracks = [...tracks]
+    .sort((a, b) => a.index - b.index)
+    .filter((tr) => clips.some((c) => c.trackId === tr.id));
+  const totalStems = 1 + stemTracks.length;
+  let done = 0;
+  const report = () => opts.onProgress?.({ done, total: totalStems });
 
   const pushStem = async (stem: string, buffer: AudioBuffer) => {
     const wav = await bufferToOtWav(buffer, targetFrames);
@@ -177,8 +184,11 @@ async function buildZip(opts: SeqOtExportOpts): Promise<{
     files.push({ path: `${stem}.wav`, data: wav });
     files.push({ path: `${stem}.ot`, data: ot });
     stemNames.push(stem);
+    done += 1;
+    report();
   };
 
+  report();
   const masterBuf = await renderBuffer(
     engine,
     clips,
@@ -189,9 +199,8 @@ async function buildZip(opts: SeqOtExportOpts): Promise<{
   await pushStem("master", masterBuf);
 
   const used = new Set<string>(["master"]);
-  for (const tr of [...tracks].sort((a, b) => a.index - b.index)) {
+  for (const tr of stemTracks) {
     const trackClips = clips.filter((c) => c.trackId === tr.id);
-    if (trackClips.length === 0) continue;
     const insert = trackInserts.find((t) => t.id === tr.id);
     if (!insert) continue;
     let stem = `${String(tr.index + 1).padStart(2, "0")}-${sanitizeStem(tr.name)}`;

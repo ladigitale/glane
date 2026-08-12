@@ -8,8 +8,8 @@ import { DSP_THRESHOLDS } from "../config/thresholds.ts";
 import { runProcessJob } from "../process-job.ts";
 
 describe("EnvelopeHunter", () => {
-  it("exposes live thresholds 1.5.3", () => {
-    assert.equal(DSP_THRESHOLDS.version, "1.5.3");
+  it("exposes live thresholds 1.5.5", () => {
+    assert.equal(DSP_THRESHOLDS.version, "1.5.5");
     assert.ok(DSP_THRESHOLDS.live.maxDurationMs >= 20_000);
     assert.ok(DSP_THRESHOLDS.live.openFloorMin < DSP_THRESHOLDS.live.openFloorFactor);
     assert.ok(DSP_THRESHOLDS.live.openFloorMax > DSP_THRESHOLDS.live.openFloorFactor);
