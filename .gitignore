@@ -23,4 +23,6 @@ apps/api/.env.local
 packages/*/dist/
 apps/web/dist/
 apps/web/public/ml/mediapipe-wasm/
+# ORT is bundled via Vite ?url imports from onnxruntime-web — do not vendor under public/.
+apps/web/public/ml/ort/
 coverage/

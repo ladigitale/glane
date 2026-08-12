@@ -59,6 +59,16 @@ export default defineConfig({
     copyMediapipeWasm(),
     VitePWA({
       registerType: "autoUpdate",
+      // ML WASM/ORT are fetched on demand (Cache Storage / HF); do not SW-precache.
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,ico,svg,png,woff2,webp}"],
+        globIgnores: [
+          "**/ml/**",
+          "**/*ort-wasm*",
+          "**/*.wasm",
+          "**/*.onnx",
+        ],
+      },
       manifest: {
         name: "Glane",
         short_name: "Glane",
