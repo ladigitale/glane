@@ -9,6 +9,7 @@ import {
   type ClapEmbeddingFeatures,
 } from "@glane/audio-ml";
 import ortWasmMjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
+import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
 
 export const CLAP_MODEL_ID = "Xenova/clap-htsat-unfused";
 export const CLAP_STATUS_EVENT = "glane:clap-status";
@@ -52,13 +53,18 @@ function absoluteUrl(path: string): string {
 async function loadTransformers(): Promise<Transformers> {
   if (!tfPromise) {
     tfPromise = import("@huggingface/transformers").then((tf) => {
-      const wasmBase = absoluteUrl(ortWasmMjsUrl).replace(
-        /ort-wasm-simd-threaded\.jsep\.mjs$/,
-        "",
-      );
+      // Vite hashes the asset (`….jsep-xxxx.mjs`); a directory prefix would make ORT
+      // request the unhashed name (404 → SPA HTML → "Failed to fetch … module").
+      // Pass explicit hashed URLs (same pattern as demucs-runtime).
       try {
         const wasm = tf.env.backends?.onnx?.wasm;
-        if (wasm) wasm.wasmPaths = wasmBase;
+        if (wasm) {
+          wasm.numThreads = 1;
+          wasm.wasmPaths = {
+            mjs: absoluteUrl(ortWasmMjsUrl),
+            wasm: absoluteUrl(ortWasmUrl),
+          };
+        }
       } catch {
         /* older env shape */
       }
