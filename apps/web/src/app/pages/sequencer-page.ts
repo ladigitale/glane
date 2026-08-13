@@ -18,7 +18,15 @@ import {
   type TrackFx,
 } from "@glane/core-model";
 import { TransportEngine } from "@glane/audio-engine";
-import { stretchBuffer, tileBuffer } from "@glane/audio-dsp";
+import {
+  frameCount,
+  interleavedToAudioBuffer,
+  mapInterleavedChannels,
+  reverseInterleaved,
+  stretchBuffer,
+  tileBuffer,
+  toMonoPcm,
+} from "@glane/audio-dsp";
 import {
   GestureFsm,
   LONGPRESS_MS,
@@ -186,6 +194,10 @@ export class GlSequencerPage extends LitElement {
       right: 0;
       z-index: 5;
       box-shadow: -4px 0 10px color-mix(in srgb, #000 28%, transparent);
+    }
+    /* FX pop is position:fixed but trapped in this sticky stacking context — elevate while open. */
+    .track-label.fx-open {
+      z-index: 40;
     }
     .mute-sw {
       position: relative;
@@ -579,6 +591,8 @@ export class GlSequencerPage extends LitElement {
   @state() private drawerOpen = true;
 
   @state() private dropTrackId: string | null = null;
+  /** Track whose FX pop is open — elevates sticky label above siblings. */
+  @state() private fxPopTrackId: string | null = null;
   /** Playhead in ticks — px derived at render so zoom stays aligned. */
   @state() private playheadTick = 0;
   @state() private loadingPlay = false;
@@ -660,7 +674,10 @@ export class GlSequencerPage extends LitElement {
   #lastTapAt = 0;
   #selDragging = false;
   #bufferCache = new Map<string, AudioBuffer>();
-  #pcmCache = new Map<string, { pcm: Float32Array; sampleRate: number }>();
+  #pcmCache = new Map<
+    string,
+    { pcm: Float32Array; sampleRate: number; channelCount: number }
+  >();
   #wavePaintToken = 0;
   #wavePaintRaf = 0;
   #pendingScrollLeft: number | null = null;
@@ -1456,6 +1473,7 @@ export class GlSequencerPage extends LitElement {
     const laneClips = this.clips.filter((c) => c.trackId === tr.id);
     const xfades = trackXfadeZones(laneClips);
     const lin = gainDbToLin(tr.gainDb);
+    const fxOpen = this.fxPopTrackId === tr.id;
     return html`
       <div class="track">
         <div
@@ -1477,7 +1495,9 @@ export class GlSequencerPage extends LitElement {
           ${laneClips.map((c) => this.#renderClip(c))}
         </div>
         <div
-          class="track-label flex flex-col justify-center gap-0.5 px-1.5 py-1.5 text-xs text-neutral-500"
+          class="track-label flex flex-col justify-center gap-0.5 px-1.5 py-1.5 text-xs text-neutral-500 ${fxOpen
+            ? "fx-open"
+            : ""}"
         >
           <span class="truncate text-content">${tr.name}</span>
           <div class="flex flex-wrap items-center gap-0.5">
@@ -1509,6 +1529,8 @@ export class GlSequencerPage extends LitElement {
               .fx=${tr.fx}
               @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
                 void this.#onTrackFx(tr, e.detail.fx, e.detail.commit)}
+              @gl-fx-pop=${(e: CustomEvent<{ open: boolean }>) =>
+                this.#onTrackFxPop(tr.id, e.detail.open)}
             ></gl-track-fx-control>
           </div>
           <span class="font-mono text-[0.6rem] opacity-75"
@@ -1517,6 +1539,14 @@ export class GlSequencerPage extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  #onTrackFxPop(trackId: string, open: boolean) {
+    this.fxPopTrackId = open
+      ? trackId
+      : this.fxPopTrackId === trackId
+        ? null
+        : this.fxPopTrackId;
   }
 
   #renderClip(c: Clip) {
@@ -1582,12 +1612,12 @@ export class GlSequencerPage extends LitElement {
     this.#engine ??= new TransportEngine();
     const data = await loadSampleAudio(s);
     if (!data) return;
-    const buf = this.#engine.ctx.createBuffer(
-      1,
-      data.pcm.length,
+    const buf = interleavedToAudioBuffer(
+      this.#engine.ctx,
+      data.pcm,
       data.sampleRate,
+      data.channelCount,
     );
-    buf.copyToChannel(new Float32Array(data.pcm), 0);
     this.#engine.audition(buf, 5);
   }
 
@@ -1858,7 +1888,11 @@ export class GlSequencerPage extends LitElement {
 
   async #ensureSamplePcm(
     sampleId: string,
-  ): Promise<{ pcm: Float32Array; sampleRate: number } | null> {
+  ): Promise<{
+    pcm: Float32Array;
+    sampleRate: number;
+    channelCount: number;
+  } | null> {
     const cached = this.#pcmCache.get(sampleId);
     if (cached) {
       // Refresh LRU order
@@ -1873,6 +1907,7 @@ export class GlSequencerPage extends LitElement {
     const entry = {
       pcm: new Float32Array(data.pcm),
       sampleRate: data.sampleRate,
+      channelCount: data.channelCount ?? 1,
     };
     this.#pcmCache.set(sampleId, entry);
     while (this.#pcmCache.size > PCM_CACHE_MAX) {
@@ -1904,10 +1939,14 @@ export class GlSequencerPage extends LitElement {
     const track = this.tracks.find((t) => t.id === clip.trackId);
     const cssW = Math.max(8, clip.lengthTick * this.pxPerTick);
     const cssH = Math.max(24, (track?.heightPx ?? 56) - 8);
-    const pcm = clip.reverse ? Float32Array.from(entry.pcm).reverse() : entry.pcm;
+    const ch = entry.channelCount ?? 1;
+    const wavePcm = toMonoPcm(
+      clip.reverse ? reverseInterleaved(entry.pcm, ch) : entry.pcm,
+      ch,
+    );
     paintStretchedWave(
       canvas,
-      pcm,
+      wavePcm,
       clip.stretchMode,
       Math.max(1, clipSamples),
       offsetSamples,
@@ -1934,10 +1973,11 @@ export class GlSequencerPage extends LitElement {
     }
     const data = await this.#ensureSamplePcm(sampleId);
     if (!data) return null;
-    let pcm = data.pcm.slice();
+    const ch = data.channelCount ?? 1;
+    let pcm: Float32Array = new Float32Array(data.pcm);
 
     if (clip?.reverse) {
-      pcm.reverse();
+      pcm = new Float32Array(reverseInterleaved(pcm, ch));
     }
 
     // Live play: never tile `copy` / loop to full clip length (OOM on long clips).
@@ -1962,13 +2002,27 @@ export class GlSequencerPage extends LitElement {
           1,
           msToSamples(clip.loopLengthMs, data.sampleRate),
         );
-        const end = Math.min(pcm.length, offset + loopSamples);
-        const slice = pcm.subarray(Math.min(offset, pcm.length), end);
+        const frames = frameCount(pcm, ch);
+        const start = Math.min(offset, frames);
+        const end = Math.min(frames, offset + loopSamples);
         pcm = new Float32Array(
-          tileBuffer(slice.length > 0 ? slice : pcm, Math.max(1, target), 0),
+          mapInterleavedChannels(pcm, ch, (plane) => {
+            const slice = plane.subarray(start, end);
+            return new Float32Array(
+              tileBuffer(
+                slice.length > 0 ? slice : plane,
+                Math.max(1, target),
+                0,
+              ),
+            );
+          }),
         );
       } else {
-        pcm = new Float32Array(tileBuffer(pcm, Math.max(1, target), offset));
+        pcm = new Float32Array(
+          mapInterleavedChannels(pcm, ch, (plane) =>
+            new Float32Array(tileBuffer(plane, Math.max(1, target), offset)),
+          ),
+        );
       }
     } else if (
       clip &&
@@ -1980,16 +2034,25 @@ export class GlSequencerPage extends LitElement {
         this.project.bpm,
         data.sampleRate,
       );
-      const ratio = pcm.length / Math.max(1, target);
+      const frames = frameCount(pcm, ch);
+      const ratio = frames / Math.max(1, target);
       if (Math.abs(ratio - 1) > 0.01) {
         const mode =
           clip.stretchMode === "resample" ? "resample" : "preserve-pitch";
-        pcm = new Float32Array(stretchBuffer(pcm, ratio, mode));
+        pcm = new Float32Array(
+          mapInterleavedChannels(pcm, ch, (plane) =>
+            new Float32Array(stretchBuffer(plane, ratio, mode)),
+          ),
+        );
       }
     }
 
-    const buf = this.#engine.ctx.createBuffer(1, pcm.length, data.sampleRate);
-    buf.copyToChannel(pcm, 0);
+    const buf = interleavedToAudioBuffer(
+      this.#engine.ctx,
+      pcm,
+      data.sampleRate,
+      ch,
+    );
     this.#bufferCache.set(cacheKey, buf);
     while (this.#bufferCache.size > BUFFER_CACHE_MAX) {
       const oldest = this.#bufferCache.keys().next().value;
@@ -2013,6 +2076,9 @@ export class GlSequencerPage extends LitElement {
     if (!this.#engine || !this.project) return [];
     this.#syncTrackBuses();
     const audible = audibleTrackIds(this.tracks);
+    const trackFxById = new Map(
+      this.tracks.map((tr) => [tr.id, tr.fx] as const),
+    );
     const loopRange = opts?.ignoreLoop ? null : this.#loopSelRange();
     const win = opts?.windowTicks;
     const bakeCopy = opts?.bakeCopy === true;
@@ -2052,6 +2118,7 @@ export class GlSequencerPage extends LitElement {
           buf,
           this.project.bpm,
           this.#engine.sampleRate,
+          trackFxById.get(clip.trackId),
         ),
       );
     }
@@ -4804,7 +4871,13 @@ export class GlSequencerPage extends LitElement {
     if (sample && sample.durationMs > 0) return sample.durationMs;
     const entry = this.#pcmCache.get(clip.sampleId);
     if (entry?.pcm.length && entry.sampleRate > 0) {
-      return Math.max(1, Math.round((entry.pcm.length / entry.sampleRate) * 1000));
+      return Math.max(
+        1,
+        Math.round(
+          (frameCount(entry.pcm, entry.channelCount ?? 1) / entry.sampleRate) *
+            1000,
+        ),
+      );
     }
     return 1;
   }

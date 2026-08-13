@@ -174,8 +174,8 @@ export const ProjectSchema = z.object({
 export type Project = z.infer<typeof ProjectSchema>;
 
 /**
- * One light insert per track (ADR-0016):
- * None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato.
+ * One light wet insert per track (ADR-0016), plus always-on tone + A/R envelope.
+ * Wet: None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato.
  */
 export const TrackFxTypeSchema = z.enum([
   "none",
@@ -193,6 +193,18 @@ export const ECHO_DELAY_BEATS_MIN = 0.125;
 export const ECHO_DELAY_BEATS_MAX = 4;
 /** Web Audio DelayNode max for tempo-synced echo. */
 export const ECHO_DELAY_MAX_SEC = 4;
+
+/** Always-on high-pass (Hz). Floor = open. */
+export const TRACK_HP_HZ_MIN = 20;
+export const TRACK_HP_HZ_MAX = 2_000;
+export const TRACK_HP_HZ_OPEN = TRACK_HP_HZ_MIN;
+/** Always-on low-pass (Hz). Ceiling = open. */
+export const TRACK_LP_HZ_MIN = 200;
+export const TRACK_LP_HZ_MAX = 20_000;
+export const TRACK_LP_HZ_OPEN = TRACK_LP_HZ_MAX;
+/** Track one-shot envelope (ms) — raises clip fades via Math.max. */
+export const TRACK_ATTACK_MS_MAX = 500;
+export const TRACK_RELEASE_MS_MAX = 2_000;
 
 export const TrackFxSchema = z.object({
   type: TrackFxTypeSchema.default("none"),
@@ -218,6 +230,14 @@ export const TrackFxSchema = z.object({
   low: z.number().min(0).max(2).default(1),
   mid: z.number().min(0).max(2).default(1),
   high: z.number().min(0).max(2).default(1),
+  /** High-pass cutoff Hz (always-on; TRACK_HP_HZ_OPEN = bypass). */
+  hpHz: z.number().min(TRACK_HP_HZ_MIN).max(TRACK_HP_HZ_MAX).default(TRACK_HP_HZ_OPEN),
+  /** Low-pass cutoff Hz (always-on; TRACK_LP_HZ_OPEN = bypass). */
+  lpHz: z.number().min(TRACK_LP_HZ_MIN).max(TRACK_LP_HZ_MAX).default(TRACK_LP_HZ_OPEN),
+  /** Attack envelope for one-shots (ms). */
+  attackMs: z.number().min(0).max(TRACK_ATTACK_MS_MAX).default(0),
+  /** Release envelope for one-shots (ms). */
+  releaseMs: z.number().min(0).max(TRACK_RELEASE_MS_MAX).default(0),
 });
 export type TrackFx = z.infer<typeof TrackFxSchema>;
 
@@ -233,6 +253,10 @@ export const DEFAULT_TRACK_FX: TrackFx = {
   low: 1,
   mid: 1,
   high: 1,
+  hpHz: TRACK_HP_HZ_OPEN,
+  lpHz: TRACK_LP_HZ_OPEN,
+  attackMs: 0,
+  releaseMs: 0,
 };
 
 function clampFx(n: number, lo: number, hi: number): number {
@@ -272,6 +296,33 @@ export function normalizeTrackFx(raw: unknown): TrackFx {
   delete base.delayMs;
   const parsed = TrackFxSchema.safeParse(base);
   return parsed.success ? parsed.data : { ...DEFAULT_TRACK_FX };
+}
+
+/** Wet insert selected (not none). */
+export function trackFxHasWet(fx: TrackFx): boolean {
+  return normalizeTrackFx(fx).type !== "none";
+}
+
+/** HP/LP not at open defaults. */
+export function trackFxHasTone(fx: TrackFx): boolean {
+  const n = normalizeTrackFx(fx);
+  return n.hpHz > TRACK_HP_HZ_OPEN + 0.5 || n.lpHz < TRACK_LP_HZ_OPEN - 0.5;
+}
+
+/** Non-zero track A/R envelope. */
+export function trackFxHasEnvelope(fx: TrackFx): boolean {
+  const n = normalizeTrackFx(fx);
+  return n.attackMs > 0 || n.releaseMs > 0;
+}
+
+/** Needs a live track bus (wet and/or tone filters). */
+export function trackFxNeedsBus(fx: TrackFx): boolean {
+  return trackFxHasWet(fx) || trackFxHasTone(fx);
+}
+
+/** Anything to bake / show as active (wet, tone, or envelope). */
+export function trackFxIsActive(fx: TrackFx): boolean {
+  return trackFxNeedsBus(fx) || trackFxHasEnvelope(fx);
 }
 
 export const TrackSchema = z.object({

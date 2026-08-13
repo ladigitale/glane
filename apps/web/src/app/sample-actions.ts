@@ -4,7 +4,7 @@ import {
   type Sample,
   type Session,
 } from "@glane/core-model";
-import { autoCropPcm } from "@glane/audio-dsp";
+import { autoCropPcm, audioBufferToInterleaved, durationMsFromPcm, sliceFrames, toMonoPcm } from "@glane/audio-dsp";
 import { sampleOpfs } from "@glane/audio-io";
 import { db } from "./db.js";
 import { loadSampleAudio } from "./load-sample-audio.js";
@@ -132,7 +132,7 @@ async function ensureStubSession(
     endedAt: now,
     durationMs: 0,
     sampleRate,
-    channelCount: 1,
+    channelCount: 2,
     title,
     notes,
     status: "ready",
@@ -193,7 +193,12 @@ export async function cloneSample(
   const label = displayName(source);
   const nextLabel = opts.nameSuffix ? withCopySuffix(label) : label;
 
-  await sampleOpfs.savePcm(id, audio.pcm, audio.sampleRate);
+  await sampleOpfs.savePcm(
+    id,
+    audio.pcm,
+    audio.sampleRate,
+    audio.channelCount ?? 1,
+  );
 
   const cloned: Sample = {
     ...source,
@@ -209,7 +214,11 @@ export async function cloneSample(
     sourceOffsetMs: 0,
     durationMs: Math.max(
       1,
-      Math.round((audio.pcm.length / audio.sampleRate) * 1000),
+      durationMsFromPcm(
+        audio.pcm,
+        audio.sampleRate,
+        audio.channelCount ?? 1,
+      ),
     ),
     createdAt: now,
     updatedAt: now,
@@ -294,19 +303,8 @@ export function isImportableAudio(file: File): boolean {
 }
 
 export function audioBufferToMonoPcm(buf: AudioBuffer): Float32Array {
-  const frames = buf.length;
-  const out = new Float32Array(frames);
-  if (buf.numberOfChannels === 1) {
-    out.set(buf.getChannelData(0));
-    return out;
-  }
-  for (let c = 0; c < buf.numberOfChannels; c++) {
-    const ch = buf.getChannelData(c);
-    for (let i = 0; i < frames; i++) out[i]! += ch[i]!;
-  }
-  const inv = 1 / buf.numberOfChannels;
-  for (let i = 0; i < frames; i++) out[i]! *= inv;
-  return out;
+  const { pcm, channelCount } = audioBufferToInterleaved(buf);
+  return toMonoPcm(pcm, channelCount);
 }
 
 async function decodeAudioFile(file: File): Promise<AudioBuffer> {
@@ -319,12 +317,20 @@ async function decodeAudioFile(file: File): Promise<AudioBuffer> {
   }
 }
 
+/** Decode WAV/MP3 to interleaved PCM (stereo preserved when present). */
+export async function decodeAudioFileToPcm(
+  file: File,
+): Promise<{ pcm: Float32Array; sampleRate: number; channelCount: number }> {
+  const buffer = await decodeAudioFile(file);
+  return audioBufferToInterleaved(buffer);
+}
+
 /** Decode WAV/MP3 to mono PCM for library import or offline hunt. */
 export async function decodeAudioFileToMono(
   file: File,
 ): Promise<{ pcm: Float32Array; sampleRate: number }> {
-  const buffer = await decodeAudioFile(file);
-  return { pcm: audioBufferToMonoPcm(buffer), sampleRate: buffer.sampleRate };
+  const { pcm, sampleRate, channelCount } = await decodeAudioFileToPcm(file);
+  return { pcm: toMonoPcm(pcm, channelCount), sampleRate };
 }
 
 export type ImportAudioResult = {
@@ -345,7 +351,7 @@ export async function importAudioFiles(
 
   for (const file of list) {
     try {
-      const { pcm, sampleRate } = await decodeAudioFileToMono(file);
+      const { pcm, sampleRate, channelCount } = await decodeAudioFileToPcm(file);
       if (pcm.length === 0) {
         failed++;
         continue;
@@ -355,10 +361,10 @@ export async function importAudioFiles(
       const now = nowIso();
       const durationMs = Math.max(
         1,
-        Math.round((pcm.length / sampleRate) * 1000),
+        durationMsFromPcm(pcm, sampleRate, channelCount),
       );
       const label = stripAudioExt(file.name);
-      await sampleOpfs.savePcm(id, pcm, sampleRate, 1);
+      await sampleOpfs.savePcm(id, pcm, sampleRate, channelCount);
       const sample: Sample = {
         id,
         sessionId: session.id,
@@ -386,24 +392,26 @@ export async function importAudioFiles(
   return { imported: samples.length, failed, samples };
 }
 
-/** Persist a bounced mix as a new sample in the project library (mono PCM). */
+/** Persist a bounced mix as a new sample in the project library. */
 export async function saveBounceToLibrary(
   projectId: string,
   buffer: AudioBuffer,
   name: string,
 ): Promise<Sample> {
-  const pcm = audioBufferToMonoPcm(buffer);
+  const { pcm, channelCount, sampleRate } = audioBufferToInterleaved(buffer);
   if (pcm.length === 0) {
     throw new Error("empty_bounce");
   }
-  const sampleRate = buffer.sampleRate;
   const session = await ensureExportSession(projectId, sampleRate);
   const id = createEntityId();
   const now = nowIso();
   const label = name.trim() || "Export";
-  const durationMs = Math.max(1, Math.round((pcm.length / sampleRate) * 1000));
+  const durationMs = Math.max(
+    1,
+    durationMsFromPcm(pcm, sampleRate, channelCount),
+  );
 
-  await sampleOpfs.savePcm(id, pcm, sampleRate, 1);
+  await sampleOpfs.savePcm(id, pcm, sampleRate, channelCount);
 
   const sample: Sample = {
     id,
@@ -444,12 +452,26 @@ export async function autoCropSamples(
       skipped++;
       continue;
     }
-    const result = autoCropPcm(audio.pcm, audio.sampleRate);
+    const result = autoCropPcm(
+      toMonoPcm(audio.pcm, audio.channelCount),
+      audio.sampleRate,
+    );
     if (!result.cropped) {
       skipped++;
       continue;
     }
-    await sampleOpfs.savePcm(id, result.pcm, audio.sampleRate, 1);
+    const nextPcm = sliceFrames(
+      audio.pcm,
+      audio.channelCount,
+      result.startSample,
+      result.endSample,
+    );
+    await sampleOpfs.savePcm(
+      id,
+      nextPcm,
+      audio.sampleRate,
+      audio.channelCount,
+    );
     const sample = await db.samples.get(id);
     if (sample) {
       const tags = [...(sample.tags ?? [])];
@@ -460,11 +482,11 @@ export async function autoCropSamples(
         tags.push("auto-crop-tail");
       }
       await db.samples.update(id, {
+        tags,
         durationMs: Math.max(
           1,
-          Math.round((result.pcm.length / audio.sampleRate) * 1000),
+          durationMsFromPcm(nextPcm, audio.sampleRate, audio.channelCount),
         ),
-        tags,
         updatedAt: nowIso(),
         revision: (sample.revision ?? 0) + 1,
       });

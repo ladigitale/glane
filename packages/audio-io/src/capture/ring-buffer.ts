@@ -94,6 +94,7 @@ export class RingBuffer {
 export function ringCapacityForSeconds(
   seconds: number,
   sampleRate: number,
+  channelCount = 1,
 ): number {
-  return Math.floor(seconds * sampleRate);
+  return Math.floor(seconds * sampleRate * Math.max(1, channelCount | 0));
 }

@@ -1,8 +1,13 @@
 import {
   DEFAULT_TRACK_FX,
   ECHO_DELAY_MAX_SEC,
+  TRACK_HP_HZ_MAX,
+  TRACK_HP_HZ_MIN,
+  TRACK_LP_HZ_MAX,
+  TRACK_LP_HZ_MIN,
   echoDelaySec,
   normalizeTrackFx,
+  trackFxIsActive,
   type TrackFx,
   type TrackFxType,
 } from "@glane/core-model";
@@ -19,13 +24,17 @@ export type TrackInsertConfig = {
 
 type InsertHandles = {
   type: TrackFxType;
-  /** Disconnect insert nodes (input → gain stays). */
+  /** Disconnect insert nodes (tone out → gain stays). */
   dispose: () => void;
   apply: (fx: TrackFx, bpm?: number) => void;
 };
 
 export type TrackBus = {
   input: GainNode;
+  /** Always-on high-pass (before wet insert). */
+  hp: BiquadFilterNode;
+  /** Always-on low-pass (before wet insert). */
+  lp: BiquadFilterNode;
   gain: GainNode;
   pan: StereoPannerNode;
   insert: InsertHandles;
@@ -76,12 +85,21 @@ function stopOsc(osc: OscillatorNode): void {
   safeDisconnect(osc);
 }
 
-function buildNone(input: GainNode, gain: GainNode): InsertHandles {
-  input.connect(gain);
+function applyToneFilters(
+  hp: BiquadFilterNode,
+  lp: BiquadFilterNode,
+  fx: TrackFx,
+): void {
+  hp.frequency.value = clamp(fx.hpHz, TRACK_HP_HZ_MIN, TRACK_HP_HZ_MAX);
+  lp.frequency.value = clamp(fx.lpHz, TRACK_LP_HZ_MIN, TRACK_LP_HZ_MAX);
+}
+
+function buildNone(from: AudioNode, gain: GainNode): InsertHandles {
+  from.connect(gain);
   return {
     type: "none",
     dispose: () => {
-      safeDisconnect(input, gain);
+      safeDisconnect(from, gain);
     },
     apply: () => undefined,
   };
@@ -89,7 +107,7 @@ function buildNone(input: GainNode, gain: GainNode): InsertHandles {
 
 function buildEq(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
 ): InsertHandles {
@@ -131,7 +149,7 @@ function buildEq(
 
 function buildEcho(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
   bpm: number,
@@ -183,7 +201,7 @@ function buildEcho(
 
 function buildReverb(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
 ): InsertHandles {
@@ -235,7 +253,7 @@ function buildReverb(
 
 function buildChorus(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
 ): InsertHandles {
@@ -298,7 +316,7 @@ function buildChorus(
 
 function buildTremolo(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
 ): InsertHandles {
@@ -336,7 +354,7 @@ function buildTremolo(
 
 function buildVibrato(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
 ): InsertHandles {
@@ -373,7 +391,7 @@ function buildVibrato(
 
 function buildInsert(
   ctx: BaseAudioContext,
-  input: GainNode,
+  input: AudioNode,
   gain: GainNode,
   fx: TrackFx,
   bpm: number,
@@ -410,14 +428,23 @@ export function createTrackBus(
   const bpm = configBpm(config);
   const input = ctx.createGain();
   input.gain.value = 1;
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.Q.value = 0.707;
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.Q.value = 0.707;
+  applyToneFilters(hp, lp, fx);
   const gain = ctx.createGain();
   gain.gain.value = clamp(config.gain, 0, 2);
   const pan = ctx.createStereoPanner();
   pan.pan.value = clamp(config.pan, -1, 1);
-  const insert = buildInsert(ctx, input, gain, fx, bpm);
+  input.connect(hp);
+  hp.connect(lp);
+  const insert = buildInsert(ctx, lp, gain, fx, bpm);
   gain.connect(pan);
   pan.connect(destination);
-  return { input, gain, pan, insert };
+  return { input, hp, lp, gain, pan, insert };
 }
 
 export function updateTrackBus(
@@ -430,6 +457,7 @@ export function updateTrackBus(
   const bpm = configBpm(config);
   bus.gain.gain.value = clamp(config.gain, 0, 2);
   bus.pan.pan.value = clamp(config.pan, -1, 1);
+  applyToneFilters(bus.hp, bus.lp, fx);
   try {
     bus.pan.disconnect();
   } catch {
@@ -439,7 +467,7 @@ export function updateTrackBus(
 
   if (bus.insert.type !== fx.type) {
     bus.insert.dispose();
-    bus.insert = buildInsert(ctx, bus.input, bus.gain, fx, bpm);
+    bus.insert = buildInsert(ctx, bus.lp, bus.gain, fx, bpm);
     return;
   }
   bus.insert.apply(fx, bpm);
@@ -448,6 +476,9 @@ export function updateTrackBus(
 export function disposeTrackBus(bus: TrackBus): void {
   bus.insert.dispose();
   try {
+    bus.input.disconnect();
+    bus.hp.disconnect();
+    bus.lp.disconnect();
     bus.gain.disconnect();
     bus.pan.disconnect();
   } catch {
@@ -491,28 +522,38 @@ export function fxTailSamples(
 }
 
 /**
- * Bake a TrackFx insert onto mono PCM via OfflineAudioContext (ADR-0016 editor).
+ * Bake a TrackFx insert onto interleaved PCM via OfflineAudioContext (ADR-0016).
  * Echo/reverb/chorus may grow the buffer by a decay tail; others keep length.
+ * Always-on HP/LP and A/R envelope bake even when wet type is none.
  */
 export async function bakeTrackFx(
   pcm: Float32Array,
   sampleRate: number,
   fx: TrackFx,
   bpm = 120,
+  channelCount = 1,
 ): Promise<Float32Array> {
   const normalized = normalizeTrackFx(fx);
-  if (normalized.type === "none" || pcm.length === 0) {
+  if (!trackFxIsActive(normalized) || pcm.length === 0) {
     return new Float32Array(pcm);
   }
+  const ch = Math.min(2, Math.max(1, Math.floor(channelCount)));
+  const frames = Math.floor(pcm.length / ch);
   const tail = fxGrowsBuffer(normalized.type)
     ? fxTailSamples(normalized, sampleRate, bpm)
     : 0;
-  const length = Math.max(1, pcm.length + tail);
+  const length = Math.max(1, frames + tail);
   const offline = new OfflineAudioContext(2, length, sampleRate);
-  const buf = offline.createBuffer(1, pcm.length, sampleRate);
-  const channel = new Float32Array(pcm.length);
-  channel.set(pcm);
-  buf.copyToChannel(channel, 0);
+  const buf = offline.createBuffer(ch, frames, sampleRate);
+  if (ch <= 1) {
+    buf.copyToChannel(Float32Array.from(pcm.subarray(0, frames)), 0);
+  } else {
+    for (let c = 0; c < ch; c++) {
+      const plane = new Float32Array(frames);
+      for (let i = 0; i < frames; i++) plane[i] = pcm[i * ch + c] ?? 0;
+      buf.copyToChannel(plane, c);
+    }
+  }
 
   const input = wireOfflineTrackBus(offline, offline.destination, {
     id: "bake",
@@ -523,19 +564,48 @@ export async function bakeTrackFx(
   });
   const src = offline.createBufferSource();
   src.buffer = buf;
-  src.connect(input);
+  const env = offline.createGain();
+  src.connect(env);
+  env.connect(input);
+
+  const dur = Math.max(0.001, frames / sampleRate);
+  const attackS = Math.max(0, normalized.attackMs / 1000);
+  const releaseS = Math.max(0, normalized.releaseMs / 1000);
+  env.gain.cancelScheduledValues(0);
+  if (attackS > 0) {
+    env.gain.setValueAtTime(0, 0);
+    env.gain.linearRampToValueAtTime(1, Math.min(attackS, dur));
+  } else {
+    env.gain.setValueAtTime(1, 0);
+  }
+  if (releaseS > 0) {
+    if (dur > releaseS) {
+      env.gain.setValueAtTime(1, dur - releaseS);
+      env.gain.linearRampToValueAtTime(0, dur);
+    } else {
+      env.gain.linearRampToValueAtTime(0, dur);
+    }
+  }
   src.start(0);
 
   const rendered = await offline.startRendering();
   const L = rendered.getChannelData(0);
   const R =
     rendered.numberOfChannels > 1 ? rendered.getChannelData(1) : L;
-  const outLen = fxGrowsBuffer(normalized.type)
+  const outFrames = fxGrowsBuffer(normalized.type)
     ? rendered.length
-    : pcm.length;
-  const out = new Float32Array(outLen);
-  for (let i = 0; i < outLen; i++) {
-    out[i] = ((L[i] ?? 0) + (R[i] ?? 0)) * 0.5;
+    : frames;
+  if (ch <= 1) {
+    const out = new Float32Array(outFrames);
+    for (let i = 0; i < outFrames; i++) {
+      out[i] = ((L[i] ?? 0) + (R[i] ?? 0)) * 0.5;
+    }
+    return out;
+  }
+  const out = new Float32Array(outFrames * 2);
+  for (let i = 0; i < outFrames; i++) {
+    out[i * 2] = L[i] ?? 0;
+    out[i * 2 + 1] = R[i] ?? 0;
   }
   return out;
 }

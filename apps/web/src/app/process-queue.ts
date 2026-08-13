@@ -187,7 +187,8 @@ export const processQueue = (() => {
 
     const existing = await sampleOpfs.loadPcm(msg.sampleId);
     const sr = existing?.sampleRate ?? 48_000;
-    await sampleOpfs.savePcm(msg.sampleId, msg.pcm, sr, 1);
+    const channelCount = existing?.channelCount ?? 1;
+    await sampleOpfs.savePcm(msg.sampleId, msg.pcm, sr, channelCount);
 
     const sample = await db.samples.get(msg.sampleId);
     if (sample) {
@@ -265,6 +266,7 @@ export const processQueue = (() => {
         sampleId: job.sampleId,
         kind: job.kind,
         sampleRate: audio.sampleRate,
+        channelCount: audio.channelCount,
         pcm: copy,
       },
       [copy.buffer],

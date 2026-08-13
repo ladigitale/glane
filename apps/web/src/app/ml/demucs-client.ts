@@ -123,6 +123,7 @@ export const demucsClient = (() => {
       pcm: Float32Array,
       sampleRate: number,
       opts?: {
+        channelCount?: number;
         onProgress?: (ratio: number) => void;
         onDownload?: (loaded: number, total: number) => void;
       },
@@ -144,6 +145,7 @@ export const demucsClient = (() => {
               jobId: id,
               pcm: copy,
               sampleRate,
+              channelCount: opts?.channelCount ?? 1,
             },
             [copy.buffer],
           );

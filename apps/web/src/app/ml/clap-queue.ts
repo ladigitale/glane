@@ -4,6 +4,7 @@ import {
   rankByVector,
 } from "@glane/audio-ml";
 import { nowIso } from "@glane/core-model";
+import { toMonoPcm } from "@glane/audio-dsp";
 import { sampleOpfs } from "@glane/audio-io";
 import { db, ensurePrefs } from "../db.js";
 import {
@@ -50,7 +51,7 @@ export async function enqueueClapEmbed(
       if (!audio || audio.pcm.length === 0) return;
 
       const feat = await embedAudioPcm(
-        audio.pcm,
+        toMonoPcm(audio.pcm, audio.channelCount ?? 1),
         audio.sampleRate,
         sampleId,
       );

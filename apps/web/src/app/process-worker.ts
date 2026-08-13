@@ -11,7 +11,12 @@ ctx.onmessage = (ev: MessageEvent<ProcessWorkerRequest>) => {
   const msg = ev.data;
   if (!msg || msg.type !== "process") return;
   try {
-    const result = runProcessJob(msg.kind, msg.pcm, msg.sampleRate);
+    const result = runProcessJob(
+      msg.kind,
+      msg.pcm,
+      msg.sampleRate,
+      msg.channelCount ?? 1,
+    );
     const response: ProcessWorkerResponse = {
       type: "done",
       jobId: msg.jobId,

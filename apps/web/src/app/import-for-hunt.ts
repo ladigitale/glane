@@ -12,7 +12,11 @@ import { sampleOpfs } from "@glane/audio-io";
 import {
   DSP_THRESHOLDS,
   EventHunter,
+  durationMsFromPcm,
+  frameCount,
+  sliceFrames,
   songSlice,
+  toMonoPcm,
   type Extraction,
 } from "@glane/audio-dsp";
 import {
@@ -22,7 +26,7 @@ import {
 } from "./db.js";
 import { processQueue } from "./process-queue.js";
 import {
-  decodeAudioFileToMono,
+  decodeAudioFileToPcm,
   isImportableAudio,
 } from "./sample-actions.js";
 
@@ -113,8 +117,13 @@ async function persistSample(opts: {
     opts.session.channelCount,
   );
 
-  const durationMs = Math.round(
-    (opts.pcm.length / opts.session.sampleRate) * 1000,
+  const durationMs = Math.max(
+    1,
+    durationMsFromPcm(
+      opts.pcm,
+      opts.session.sampleRate,
+      opts.session.channelCount,
+    ),
   );
   const tags = [...opts.tags];
   if (!tags.includes(FILE_TAG)) tags.push(FILE_TAG);
@@ -178,6 +187,7 @@ async function createFileSession(opts: {
   projectId: string;
   captureName: string;
   sampleRate: number;
+  channelCount: number;
   mode: FileProcessMode;
 }): Promise<Session> {
   const now = nowIso();
@@ -188,7 +198,7 @@ async function createFileSession(opts: {
     endedAt: null,
     durationMs: 0,
     sampleRate: opts.sampleRate,
-    channelCount: 1,
+    channelCount: opts.channelCount,
     title: opts.captureName,
     notes: sessionNotesForMode(opts.mode),
     status: "processing",
@@ -242,10 +252,11 @@ async function processHunt(
 
   const hunter = new EventHunter(sampleRate, {
     openFloorFactor: opts.openFloorFactor,
+    channelCount: session.channelCount,
   });
 
-  const hop = DSP_THRESHOLDS.live.envelopeHop;
-  const chunk = Math.max(hop * 4, Math.floor(sampleRate * 0.1));
+  const hop = DSP_THRESHOLDS.live.envelopeHop * session.channelCount;
+  const chunk = Math.max(hop * 4, Math.floor(sampleRate * 0.1 * session.channelCount));
   const samples: Sample[] = [];
   let skippedVoice = 0;
   let offset = 0;
@@ -275,7 +286,8 @@ async function processHunt(
     throwIfAborted(signal);
     const end = Math.min(pcm.length, offset + chunk);
     const delta = pcm.subarray(offset, end);
-    const nowMs = (offset / sampleRate) * 1000;
+    const nowMs =
+      (offset / (sampleRate * Math.max(1, session.channelCount))) * 1000;
     const { extraction } = hunter.analyse(delta, nowMs);
     offset = end;
     await handle(extraction);
@@ -296,7 +308,10 @@ async function processHunt(
   await handle(hunter.flush());
 
   await finishSession(session, {
-    durationMs: Math.round((pcm.length / sampleRate) * 1000),
+    durationMs: Math.max(
+      1,
+      durationMsFromPcm(pcm, sampleRate, session.channelCount),
+    ),
     status: "ready",
   });
 
@@ -332,7 +347,9 @@ async function processSong(
   onProgress?.({ phase: "hunt", ratio: 0, extracted: 0 });
   throwIfAborted(signal);
 
-  const sliced = songSlice.sliceSong(pcm, sampleRate, { targetPerMin });
+  const ch = session.channelCount;
+  const mono = toMonoPcm(pcm, ch);
+  const sliced = songSlice.sliceSong(mono, sampleRate, { targetPerMin });
   if (!sliced) throw new ImportTempoError();
 
   const samples: Sample[] = [];
@@ -342,10 +359,14 @@ async function processSong(
   for (let i = 0; i < sliced.slices.length; i++) {
     throwIfAborted(signal);
     const slice = sliced.slices[i]!;
-    const durationMs = Math.round((slice.pcm.length / sampleRate) * 1000);
+    const slicePcm = sliceFrames(pcm, ch, slice.start, slice.end);
+    const durationMs = Math.max(
+      1,
+      durationMsFromPcm(slicePcm, sampleRate, ch),
+    );
     const sourceOffsetMs = Math.round((slice.start / sampleRate) * 1000);
     const saved = await persistSample({
-      pcm: slice.pcm,
+      pcm: slicePcm,
       session,
       captureName,
       class: "rhythmic",
@@ -373,7 +394,7 @@ async function processSong(
   }
 
   await finishSession(session, {
-    durationMs: Math.round((pcm.length / sampleRate) * 1000),
+    durationMs: Math.max(1, durationMsFromPcm(pcm, sampleRate, ch)),
     status: "ready",
     dominantBpm: sliced.bpm,
   });
@@ -401,11 +422,13 @@ async function processWhole(
   onProgress?.({ phase: "hunt", ratio: 0.2, extracted: 0 });
   throwIfAborted(signal);
 
-  const tempo = songSlice.detectTempo(pcm, sampleRate);
+  const ch = session.channelCount;
+  const mono = toMonoPcm(pcm, ch);
+  const tempo = songSlice.detectTempo(mono, sampleRate);
   const tags = ["file-whole"];
   if (tempo) tags.push(`bpm:${Math.round(tempo.bpm)}`);
 
-  const durationMs = Math.round((pcm.length / sampleRate) * 1000);
+  const durationMs = Math.max(1, durationMsFromPcm(pcm, sampleRate, ch));
   const copy = new Float32Array(pcm.length);
   copy.set(pcm);
 
@@ -445,11 +468,11 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
 
   onProgress?.({ phase: "decode", ratio: 0, extracted: 0 });
   throwIfAborted(signal);
-  const { pcm, sampleRate } = await decodeAudioFileToMono(file);
+  const { pcm, sampleRate, channelCount } = await decodeAudioFileToPcm(file);
   throwIfAborted(signal);
 
   if (pcm.length === 0) throw new Error("empty_audio");
-  const durationSec = pcm.length / sampleRate;
+  const durationSec = frameCount(pcm, channelCount) / sampleRate;
   if (durationSec > MAX_DURATION_SEC) {
     throw new Error("too_long");
   }
@@ -468,6 +491,7 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
     projectId,
     captureName,
     sampleRate,
+    channelCount,
     mode,
   });
 

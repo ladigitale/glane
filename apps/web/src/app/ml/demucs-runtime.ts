@@ -6,12 +6,17 @@ import {
   DEMUCS_N_SAMPLES,
   DEMUCS_SAMPLE_RATE,
   DEMUCS_STEMS,
-  monoToStereo,
   resampleLinear,
   separateOverlapAdd,
   stereoToMono,
   type DemucsStemName,
 } from "@glane/audio-ml";
+import {
+  clampChannelCount,
+  deinterleave,
+  frameCount,
+  sliceFrames,
+} from "@glane/audio-dsp";
 import ortWasmMjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
 import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
 
@@ -207,26 +212,36 @@ export async function createDemucsSession(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-function centerTrim(pcm: Float32Array, maxSamples: number): Float32Array {
-  if (pcm.length <= maxSamples) return pcm;
-  const start = Math.floor((pcm.length - maxSamples) / 2);
-  return pcm.subarray(start, start + maxSamples);
+function centerTrimInterleaved(
+  pcm: Float32Array,
+  channelCount: number,
+  maxFrames: number,
+): Float32Array {
+  const ch = clampChannelCount(channelCount);
+  const frames = frameCount(pcm, ch);
+  if (frames <= maxFrames) return pcm;
+  const startFrame = Math.floor((frames - maxFrames) / 2);
+  return sliceFrames(pcm, ch, startFrame, startFrame + maxFrames);
 }
 
 export async function runDemucsSeparate(
   handle: DemucsSessionHandle,
   pcm: Float32Array,
   sampleRate: number,
+  channelCount = 1,
   onProgress?: (ratio: number) => void,
 ): Promise<DemucsSeparateResult> {
   const { ort, session, backend } = handle;
-  const maxIn = Math.round(MAX_SEPARATE_SEC * sampleRate);
-  const trimmed = centerTrim(pcm, maxIn);
-  const atModelRate =
+  const ch = clampChannelCount(channelCount);
+  const maxInFrames = Math.round(MAX_SEPARATE_SEC * sampleRate);
+  const trimmed = centerTrimInterleaved(pcm, ch, maxInFrames);
+  const planes = deinterleave(trimmed, ch);
+  const resamplePlane = (plane: Float32Array): Float32Array =>
     sampleRate === DEMUCS_SAMPLE_RATE
-      ? trimmed
-      : resampleLinear(trimmed, sampleRate, DEMUCS_SAMPLE_RATE);
-  const [left, right] = monoToStereo(atModelRate);
+      ? plane
+      : resampleLinear(plane, sampleRate, DEMUCS_SAMPLE_RATE);
+  const left = resamplePlane(planes[0]!);
+  const right = ch >= 2 && planes[1] ? resamplePlane(planes[1]) : left;
 
   const separated = await separateOverlapAdd(
     left,

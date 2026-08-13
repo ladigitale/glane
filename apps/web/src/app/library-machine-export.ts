@@ -5,6 +5,7 @@
  */
 import { audioExport } from "@glane/audio-io";
 import type { Sample, SampleClass } from "@glane/core-model";
+import { toMonoPcm } from "@glane/audio-dsp";
 import { loadSampleAudio } from "./load-sample-audio.js";
 
 export type MachineTarget = "octatrack" | "mpc2000xl";
@@ -118,7 +119,10 @@ async function buildZip(
       skipped += 1;
       continue;
     }
-    const data = await wavBytes(audio.pcm, audio.sampleRate);
+    const data = await wavBytes(
+      toMonoPcm(audio.pcm, audio.channelCount ?? 1),
+      audio.sampleRate,
+    );
     files.push({ path: pathFor(s, i, target, used), data });
   }
   if (files.length === 0) {

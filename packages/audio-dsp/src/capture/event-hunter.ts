@@ -56,10 +56,13 @@ export function liveKindFromEnvelope(opts: {
 export type EnvelopeHunterOpts = {
   /** Overrides DSP_THRESHOLDS.live.openFloorFactor (lower = more sensitive). */
   openFloorFactor?: number;
+  /** Interleaved channel count (1 = mono, 2 = stereo). Default 1. */
+  channelCount?: number;
 };
 
 export class EnvelopeHunter {
   readonly sampleRate: number;
+  readonly channelCount: number;
   readonly floor: AdaptiveNoiseFloor;
   #openFloorFactor: number;
   #lastState: CaptureLiveState = "idle";
@@ -71,6 +74,7 @@ export class EnvelopeHunter {
   #rmsFrames = 0;
   #prevRms = 0;
   #active: Float32Array[] | null = null;
+  /** Interleaved sample count in `#active`. */
   #activeLen = 0;
   /** Recent audio for pre-roll when an event opens mid-delta. */
   #history: Float32Array;
@@ -80,6 +84,7 @@ export class EnvelopeHunter {
 
   constructor(sampleRate: number, opts: EnvelopeHunterOpts = {}) {
     this.sampleRate = sampleRate;
+    this.channelCount = Math.min(2, Math.max(1, Math.floor(opts.channelCount ?? 1)));
     this.#openFloorFactor =
       opts.openFloorFactor ?? DSP_THRESHOLDS.live.openFloorFactor;
     this.floor = new AdaptiveNoiseFloor(
@@ -87,8 +92,13 @@ export class EnvelopeHunter {
       DSP_THRESHOLDS.live.envelopeHop,
     );
     const histN = Math.max(
-      64,
-      Math.floor((DSP_THRESHOLDS.live.preRollMs / 1000) * sampleRate * 2),
+      64 * this.channelCount,
+      Math.floor(
+        (DSP_THRESHOLDS.live.preRollMs / 1000) *
+          sampleRate *
+          2 *
+          this.channelCount,
+      ),
     );
     this.#history = new Float32Array(histN);
   }
@@ -147,13 +157,14 @@ export class EnvelopeHunter {
   }
 
   /**
-   * @param delta Contiguous **new** PCM since the previous call (cursor-fed).
+   * @param delta Contiguous **new** interleaved PCM since the previous call.
    */
   analyse(delta: Float32Array, nowMs: number): {
     state: CaptureLiveState;
     extraction: Extraction | null;
   } {
     const live = DSP_THRESHOLDS.live;
+    const ch = this.channelCount;
     if (nowMs < this.#cooldownUntil) {
       if (delta.length > 0) this.#pushHistory(delta);
       this.#lastState = this.#active ? "event:sustain" : "listening";
@@ -162,29 +173,34 @@ export class EnvelopeHunter {
 
     if (delta.length === 0) {
       this.#lastState = this.#active
-        ? this.#activeLen < this.sampleRate * live.minBufferSec
+        ? this.#activeLen < this.sampleRate * live.minBufferSec * ch
           ? "event:attack"
           : "event:sustain"
         : "listening";
       return { state: this.#lastState, extraction: null };
     }
 
-    const hop = live.envelopeHop;
+    const hopFrames = live.envelopeHop;
+    const hop = hopFrames * ch;
     const closeHoldFrames = Math.max(
       2,
       Math.round(
-        (this.#effectiveCloseHoldMs() / 1000) * (this.sampleRate / hop),
+        (this.#effectiveCloseHoldMs() / 1000) * (this.sampleRate / hopFrames),
       ),
     );
-    const maxSamples = Math.floor((live.maxDurationMs / 1000) * this.sampleRate);
-    const minSamples = Math.floor((live.minDurationMs / 1000) * this.sampleRate);
-    const postRoll = Math.floor((live.postRollMs / 1000) * this.sampleRate);
-    const preRollN = Math.floor((live.preRollMs / 1000) * this.sampleRate);
+    const maxSamples =
+      Math.floor((live.maxDurationMs / 1000) * this.sampleRate) * ch;
+    const minSamples =
+      Math.floor((live.minDurationMs / 1000) * this.sampleRate) * ch;
+    const postRoll =
+      Math.floor((live.postRollMs / 1000) * this.sampleRate) * ch;
+    const preRollN =
+      Math.floor((live.preRollMs / 1000) * this.sampleRate) * ch;
     const openFloor = this.#openFloorFactor;
 
     let frames = 0;
     let noiseFloor = 0;
-    /** Samples of `delta` already copied into `#active`. */
+    /** Interleaved samples of `delta` already copied into `#active`. */
     let committed = 0;
 
     const commitUntil = (end: number): void => {
@@ -197,9 +213,7 @@ export class EnvelopeHunter {
     };
 
     for (let i = 0; i + hop <= delta.length; i += hop) {
-      const frame = delta.subarray(i, i + hop);
-      const rms = frameRms(frame);
-      const peak = framePeak(frame);
+      const { rms, peak } = hopMidStats(delta, i, hopFrames, ch);
       noiseFloor = this.floor.pushRms(rms);
       frames++;
 
@@ -303,7 +317,8 @@ export class EnvelopeHunter {
 
   /** Flush open event on stop (optional). */
   flush(): Extraction | null {
-    if (!this.#active || this.#activeLen < this.sampleRate * 0.05) {
+    const minLen = this.sampleRate * 0.05 * this.channelCount;
+    if (!this.#active || this.#activeLen < minLen) {
       this.#active = null;
       this.#activeLen = 0;
       this.#rmsSum = 0;
@@ -378,6 +393,7 @@ export class EnvelopeHunter {
       this.#rmsFrames > 0 ? this.#rmsSum / this.#rmsFrames : 0;
     this.#rmsSum = 0;
     this.#rmsFrames = 0;
+    const ch = this.channelCount;
 
     const pcm = new Float32Array(len + Math.max(0, postRollSamples));
     let o = 0;
@@ -386,14 +402,18 @@ export class EnvelopeHunter {
       o += p.length;
     }
 
-    let start = 0;
-    let end = Math.min(pcm.length, o + postRollSamples);
-    start = snapToZeroCrossing(pcm, start, 32);
-    end = snapToZeroCrossing(pcm, Math.max(start + 32, end), 48);
+    const mono = toMonoForSnap(pcm.subarray(0, o + Math.max(0, postRollSamples)), ch);
+    let startFrame = 0;
+    let endFrame = mono.length;
+    startFrame = snapToZeroCrossing(mono, startFrame, 32);
+    endFrame = snapToZeroCrossing(mono, Math.max(startFrame + 32, endFrame), 48);
+    const start = startFrame * ch;
+    const end = endFrame * ch;
     const slice = new Float32Array(pcm.subarray(start, end));
-    if (slice.length < this.sampleRate * 0.04) return null;
+    const frames = Math.floor(slice.length / ch);
+    if (frames < this.sampleRate * 0.04) return null;
 
-    const durationMs = (slice.length / this.sampleRate) * 1000;
+    const durationMs = (frames / this.sampleRate) * 1000;
     const crest = attackPeak / (meanRms + 1e-9);
     const decision = liveKindFromEnvelope({
       durationMs,
@@ -426,17 +446,38 @@ export class EnvelopeHunter {
 /** @deprecated alias — capture uses EnvelopeHunter */
 export { EnvelopeHunter as EventHunter };
 
-function frameRms(frame: Float32Array): number {
-  let s = 0;
-  for (let i = 0; i < frame.length; i++) s += (frame[i] ?? 0) ** 2;
-  return Math.sqrt(s / Math.max(1, frame.length));
+/** Mid RMS/peak over `hopFrames` starting at interleaved index `start`. */
+function hopMidStats(
+  delta: Float32Array,
+  start: number,
+  hopFrames: number,
+  channelCount: number,
+): { rms: number; peak: number } {
+  let sumSq = 0;
+  let peak = 0;
+  const inv = 1 / channelCount;
+  for (let f = 0; f < hopFrames; f++) {
+    let mid = 0;
+    const base = start + f * channelCount;
+    for (let c = 0; c < channelCount; c++) mid += delta[base + c] ?? 0;
+    mid *= inv;
+    sumSq += mid * mid;
+    const a = mid < 0 ? -mid : mid;
+    if (a > peak) peak = a;
+  }
+  return { rms: Math.sqrt(sumSq / Math.max(1, hopFrames)), peak };
 }
 
-function framePeak(frame: Float32Array): number {
-  let p = 0;
-  for (let i = 0; i < frame.length; i++) {
-    const a = Math.abs(frame[i] ?? 0);
-    if (a > p) p = a;
+function toMonoForSnap(pcm: Float32Array, channelCount: number): Float32Array {
+  if (channelCount <= 1) return pcm;
+  const frames = Math.floor(pcm.length / channelCount);
+  const out = new Float32Array(frames);
+  const inv = 1 / channelCount;
+  for (let i = 0; i < frames; i++) {
+    let s = 0;
+    const base = i * channelCount;
+    for (let c = 0; c < channelCount; c++) s += pcm[base + c] ?? 0;
+    out[i] = s * inv;
   }
-  return p;
+  return out;
 }

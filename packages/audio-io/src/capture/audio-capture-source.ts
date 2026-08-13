@@ -21,9 +21,9 @@ export type MediaStreamCaptureSourceOpts = {
   deviceId?: string;
 };
 
-/** Prefer mono; never force sampleRate (avoids extra browser resample). */
+/** Prefer stereo when the device offers it; never force sampleRate. */
 const FIELD_BASE: MediaTrackConstraints = {
-  channelCount: 1,
+  channelCount: 2,
 };
 
 /** Soft prefs — used when `exact: false` throws OverconstrainedError. */

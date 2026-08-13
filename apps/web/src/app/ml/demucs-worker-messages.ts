@@ -7,6 +7,7 @@ export type DemucsWorkerRequest =
       jobId: string;
       pcm: Float32Array;
       sampleRate: number;
+      channelCount?: number;
     };
 
 export type DemucsWorkerResponse =

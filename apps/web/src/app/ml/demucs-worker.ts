@@ -60,6 +60,7 @@ async function handleSeparate(
   jobId: string,
   pcm: Float32Array,
   sampleRate: number,
+  channelCount = 1,
 ): Promise<void> {
   post({ type: "progress", jobId, phase: "loading", ratio: 0 });
   const bytes = await ensureModel(jobId);
@@ -70,6 +71,7 @@ async function handleSeparate(
       handle,
       pcm,
       sampleRate,
+      channelCount,
       (ratio) => {
         post({ type: "progress", jobId, phase: "running", ratio });
       },
@@ -107,7 +109,7 @@ ctx.onmessage = (ev: MessageEvent<DemucsWorkerRequest>) => {
       if (msg.type === "preload") {
         await handlePreload(msg.jobId);
       } else if (msg.type === "separate") {
-        await handleSeparate(msg.jobId, msg.pcm, msg.sampleRate);
+        await handleSeparate(msg.jobId, msg.pcm, msg.sampleRate, msg.channelCount ?? 1);
       }
     } catch (e) {
       post({

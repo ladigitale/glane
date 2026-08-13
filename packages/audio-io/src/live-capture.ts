@@ -66,6 +66,7 @@ export class LiveCapture {
   #startedAtMs = 0;
   #pcmScratch = new Float32Array(48_000);
   #windowSeconds: number;
+  #channelCount: number = DEFAULT_CHANNEL_COUNT;
 
   constructor(events: LiveCaptureEvents = {}, opts: LiveCaptureOpts = {}) {
     this.capture =
@@ -99,6 +100,10 @@ export class LiveCapture {
     return this.#ctx?.sampleRate ?? DEFAULT_SAMPLE_RATE;
   }
 
+  get channelCount(): number {
+    return this.#hunt?.channelCount ?? this.#channelCount;
+  }
+
   async start(title: string, projectId: string): Promise<Session> {
     await requestPersistentStorage();
     const storage = await estimateStorage();
@@ -108,7 +113,7 @@ export class LiveCapture {
       );
     }
 
-    const { stream, warnings } = await this.capture.start();
+    const { stream, settings, warnings } = await this.capture.start();
     for (const w of warnings) this.#events.onWarning?.(w);
 
     try {
@@ -119,7 +124,22 @@ export class LiveCapture {
       this.#ctx = ctx;
       if (ctx.state === "suspended") await ctx.resume();
 
-      const capacity = ringCapacityForSeconds(this.#windowSeconds, ctx.sampleRate);
+      const channelCount = Math.min(
+        2,
+        Math.max(1, Math.floor(settings.channelCount ?? DEFAULT_CHANNEL_COUNT)),
+      );
+      this.#channelCount = channelCount;
+      if (channelCount < 2) {
+        this.#events.onWarning?.(
+          "Micro mono — la capture reste en mono (pas de stéréo matériel).",
+        );
+      }
+
+      const capacity = ringCapacityForSeconds(
+        this.#windowSeconds,
+        ctx.sampleRate,
+        channelCount,
+      );
       const crossOriginIsolated =
         typeof globalThis !== "undefined" &&
         "crossOriginIsolated" in globalThis &&
@@ -127,6 +147,10 @@ export class LiveCapture {
           true;
       this.#ring = new RingBuffer(capacity, crossOriginIsolated);
       this.#window = new RollingPcmWindow(capacity);
+      // Scratch holds ~100 ms of interleaved samples (drain every 50 ms).
+      this.#pcmScratch = new Float32Array(
+        Math.max(4096, Math.ceil(ctx.sampleRate * 0.1 * channelCount)),
+      );
 
       if (!this.#ring.usesSharedMemory) {
         this.#events.onWarning?.(
@@ -141,10 +165,13 @@ export class LiveCapture {
       const node = new AudioWorkletNode(ctx, "glane-capture-processor", {
         numberOfInputs: 1,
         numberOfOutputs: 0,
+        channelCount,
+        channelCountMode: "explicit",
         processorOptions: {
           sab: this.#ring.sab,
           capacityFrames: capacity,
           shared: this.#ring.usesSharedMemory,
+          channelCount,
         },
       });
       node.port.onmessage = (ev: MessageEvent) => {
@@ -178,7 +205,7 @@ export class LiveCapture {
         endedAt: null,
         durationMs: 0,
         sampleRate: ctx.sampleRate,
-        channelCount: DEFAULT_CHANNEL_COUNT,
+        channelCount,
         title: title.trim() || "Capture",
         status: "recording",
         gapMarkers: [],
@@ -332,7 +359,10 @@ export class LiveCapture {
     // Only copy when a listener asks — capture UI uses snapshotRecent on its tick.
     onWindow(
       this.#window.snapshotRecent(
-        Math.min(this.#window.filled, Math.floor(this.sampleRate * 1.5)),
+        Math.min(
+          this.#window.filled,
+          Math.floor(this.sampleRate * 1.5 * this.channelCount),
+        ),
       ),
       this.sampleRate,
     );

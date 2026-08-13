@@ -13,6 +13,7 @@ import {
 import {
   EventHunter,
   DSP_THRESHOLDS,
+  durationMsFromPcm,
   songSlice,
   type CaptureLiveState,
 } from "@glane/audio-dsp";
@@ -1293,6 +1294,7 @@ export class GlCapturePage extends LitElement {
       if (!opts.scout) await db.sessions.put(this.#hunt);
       this.#hunter = new EventHunter(this.#live.sampleRate, {
         openFloorFactor: sensitivityToOpenFloor(this.attackSensitivity),
+        channelCount: this.#live.channelCount,
       });
       this.#pcmCursor = this.#live.rolling?.totalPushed ?? 0;
       this.micOpen = true;
@@ -1381,8 +1383,13 @@ export class GlCapturePage extends LitElement {
       );
       if (!opts.ignoreStop && this.#stopping) return;
 
-      const durationMs = Math.round(
-        (extraction.pcm.length / hunt.sampleRate) * 1000,
+      const durationMs = Math.max(
+        1,
+        durationMsFromPcm(
+          extraction.pcm,
+          hunt.sampleRate,
+          hunt.channelCount,
+        ),
       );
       const sample: Sample = {
         id,

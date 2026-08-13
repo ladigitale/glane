@@ -1775,28 +1775,29 @@ function pickPitchSemitones(opts: {
     maxUp,
     maxDown,
   } = opts;
-  const clampPitch = (semis: number) =>
-    clamp(semis, -Math.max(0, maxDown), Math.max(0, maxUp));
+  const up = Math.max(0, maxUp);
+  const down = Math.max(0, maxDown);
+  const clampPitch = (semis: number) => clamp(semis, -down, up);
   const source = sampleSourceMidi(sample);
 
-  if (maxUp <= 0 && maxDown <= 0) return 0;
+  if (up <= 0 && down <= 0) return 0;
 
   if (isDrumRole(role) || role === "fx") {
     if (rnd() > 0.2 + energy * 0.15) return 0;
-    const span = Math.min(
-      maxUp,
-      maxDown,
-      section.kind === "bridge" || section.kind === "chorus" ? 7 : 4,
-    );
-    if (span <= 0) return 0;
-    return clampPitch(pickInt(rnd, -span, span));
+    const lim =
+      section.kind === "bridge" || section.kind === "chorus" ? 7 : 4;
+    const hi = Math.min(up, lim);
+    const lo = Math.min(down, lim);
+    if (hi <= 0 && lo <= 0) return 0;
+    return clampPitch(pickInt(rnd, -lo, hi));
   }
 
   if (role === "texture" || role === "loop") {
     if (!isMelodicClass(sample.class, sample.harmonicity)) {
       if (rnd() >= 0.25 + energy * 0.2) return 0;
-      const span = Math.min(7, maxUp, maxDown);
-      return span > 0 ? clampPitch(pickInt(rnd, -span, span)) : 0;
+      const hi = Math.min(7, up);
+      const lo = Math.min(7, down);
+      return hi > 0 || lo > 0 ? clampPitch(pickInt(rnd, -lo, hi)) : 0;
     }
   }
 
@@ -1820,21 +1821,74 @@ function pickPitchSemitones(opts: {
     if (section.kind === "chorus" && rnd() < 0.35 * energy) octave += 1;
   } else if (role === "chord") octave = toneIndex && toneIndex > 1 ? 1 : 0;
 
+  // Prefer an octave that keeps the transpose inside the allowed window.
   const baseOctave =
     source != null
       ? Math.floor(Math.round(source) / 12) - 1
       : role === "bass"
         ? 2
         : 4;
-  const targetMidi = (baseOctave + octave + 1) * 12 + rootPc + degree;
   const fromMidi = source != null ? source : 60;
-  let semis = clampPitch(Math.round(targetMidi - fromMidi));
+  const candidates = [octave, 0, -1, 1, -2, 2].filter(
+    (o, i, a) => a.indexOf(o) === i,
+  );
+  let bestSemis = 0;
+  let bestDist = Infinity;
+  for (const oct of candidates) {
+    const targetMidi = (baseOctave + oct + 1) * 12 + rootPc + degree;
+    const raw = Math.round(targetMidi - fromMidi);
+    const semis = clampPitch(raw);
+    const dist = Math.abs(raw - semis) + Math.abs(oct - octave) * 0.01;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestSemis = semis;
+    }
+  }
+  let semis = bestSemis;
 
   if (semis === 0 && section.evolve > 0.3 && rnd() < section.evolve * energy) {
     const step = scale[pickInt(rnd, 1, scale.length - 1)] ?? 2;
     semis = clampPitch(rnd() < 0.5 ? step : -step);
   }
   return semis;
+}
+
+/**
+ * Pitch shift (semitones) from stretch mode `resample` when fitting the
+ * sample's natural duration into the clip.
+ * `fitFactor` = clipTicks / naturalTicks (same as playback frames/target inverse).
+ * Must NOT use the bpm-relative length factor (natural × bpmLengthFactor) —
+ * that cancels the tempo-sync pitch and lets resample exceed the window.
+ */
+function resampleStretchPitchSemis(fitFactor: number): number {
+  if (!(fitFactor > 0) || !Number.isFinite(fitFactor)) return 0;
+  return -12 * Math.log2(fitFactor);
+}
+
+/** Keep total perceived pitch (transpose + resample) inside maxUp / maxDown. */
+function constrainStretchToPitchBounds(
+  stretchMode: StretchMode,
+  pitchSemitones: number,
+  /** clip length / natural sample length (ticks), not bpm-adjusted. */
+  fitFactor: number,
+  maxUp: number,
+  maxDown: number,
+  opts: {
+    forbidPitchStretch: boolean;
+    loopish: boolean;
+  },
+): StretchMode {
+  if (stretchMode !== "resample") return stretchMode;
+  const fromStretch = resampleStretchPitchSemis(fitFactor);
+  if (Math.abs(fromStretch) < 0.35) return stretchMode;
+  const total = pitchSemitones + fromStretch;
+  const up = Math.max(0, maxUp);
+  const down = Math.max(0, maxDown);
+  if (total <= up + 0.05 && total >= -down - 0.05) return stretchMode;
+  // Resample would break the pitch window — fall back without rate-pitching.
+  if (!opts.forbidPitchStretch) return "preserve-pitch";
+  if (opts.loopish || fitFactor > 1.08) return "copy";
+  return "off";
 }
 
 function tempoAlignedForLoop(
@@ -2014,6 +2068,8 @@ function bpmSyncStretch(
   mode: GenTriState = "auto",
   lockPitch = false,
   lockTempoPow2 = false,
+  /** When both 0, never pick resample (it rate-pitches). */
+  allowResamplePitch = true,
 ): { stretchMode: StretchMode; lengthFactor: number } | null {
   if (mode === "off") return null;
   const src = sample.analysisBpm;
@@ -2025,7 +2081,9 @@ function bpmSyncStretch(
   if (Math.abs(ratio - 1) < 0.04) return null;
   const mild = Math.abs(ratio - 1) <= 0.12;
   const pickMode = (preferPreserve: boolean): StretchMode => {
-    if (lockPitch || preferPreserve || !mild) return "preserve-pitch";
+    if (lockPitch || preferPreserve || !mild || !allowResamplePitch) {
+      return "preserve-pitch";
+    }
     return "resample";
   };
   if (mode === "on") {
@@ -2050,7 +2108,7 @@ function bpmSyncStretch(
       lengthFactor: 1 / ratio,
     };
   }
-  if (lockPitch) {
+  if (lockPitch || !allowResamplePitch) {
     return rnd() < 0.4
       ? { stretchMode: "preserve-pitch", lengthFactor: 1 / ratio }
       : null;
@@ -2069,6 +2127,8 @@ function pickStretchMode(opts: {
   energy: number;
   stutter: boolean;
   lockPitch: boolean;
+  /** When false, never choose resample (pitch window forbids rate-pitch). */
+  allowResamplePitch: boolean;
   rnd: () => number;
 }): StretchMode {
   const {
@@ -2080,16 +2140,20 @@ function pickStretchMode(opts: {
     energy,
     stutter,
     lockPitch,
+    allowResamplePitch,
     rnd,
   } = opts;
   if (stutter) {
-    const mode = rnd() < 0.6 || lockPitch ? "copy" : "resample";
+    const mode =
+      rnd() < 0.6 || lockPitch || !allowResamplePitch ? "copy" : "resample";
     return lockPitch ? stretchWithoutPitchShift(mode) : mode;
   }
   if (bpmSync) {
-    return lockPitch
+    let mode = lockPitch
       ? stretchWithoutPitchShift(bpmSync.stretchMode)
       : bpmSync.stretchMode;
+    if (!allowResamplePitch && mode === "resample") mode = "preserve-pitch";
+    return mode;
   }
 
   const loopish = (sample.loopScore ?? 0) > 0.45;
@@ -2101,6 +2165,7 @@ function pickStretchMode(opts: {
   }
   if (isDrumRole(role)) {
     if (
+      allowResamplePitch &&
       !lockPitch &&
       rnd() < 0.08 + energy * 0.1 &&
       lengthFactor < 0.85
@@ -2116,10 +2181,12 @@ function pickStretchMode(opts: {
     if (role === "texture" || role === "loop") {
       return rnd() < 0.7 ? "preserve-pitch" : "copy";
     }
-    if (lockPitch) return "preserve-pitch";
+    if (lockPitch || !allowResamplePitch) return "preserve-pitch";
     return rnd() < 0.35 + energy * 0.15 ? "resample" : "preserve-pitch";
   }
-  if (!lockPitch && rnd() < 0.08 + energy * 0.06) return "resample";
+  if (allowResamplePitch && !lockPitch && rnd() < 0.08 + energy * 0.06) {
+    return "resample";
+  }
   return "off";
 }
 
@@ -3311,6 +3378,9 @@ export function planSequence(opts: {
             hit.accent &&
             rnd() < stutterBaseChance;
 
+          const allowResamplePitch =
+            pitchUpSemitones > 0 || pitchDownSemitones > 0;
+
           const bpmSync = bpmSyncStretch(
             sample,
             bpm,
@@ -3319,6 +3389,7 @@ export function planSequence(opts: {
             bpmSyncMode,
             lockPitch,
             lockTempoPow2,
+            allowResamplePitch,
           );
           const bpmLengthFactor = bpmSync?.lengthFactor ?? 1;
 
@@ -3391,11 +3462,26 @@ export function planSequence(opts: {
             energy,
             stutter,
             lockPitch,
+            allowResamplePitch,
             rnd,
           });
           if (forbidPitchStretch) {
             stretchMode = withoutPreservePitchStretch(stretchMode, lockPitch);
           }
+          // Pitch from resample follows clip/natural duration, not the
+          // bpm-relative `factor` (lengthTick / (natural × bpmLengthFactor)).
+          const fitFactor = lengthTick / Math.max(1, naturalTick);
+          stretchMode = constrainStretchToPitchBounds(
+            stretchMode,
+            pitchSemitones,
+            fitFactor,
+            pitchUpSemitones,
+            pitchDownSemitones,
+            {
+              forbidPitchStretch,
+              loopish: (sample.loopScore ?? 0) > 0.45,
+            },
+          );
 
           // Pow2 tempo lock: avoid non-grid resample/stretch; tile or leave native.
           if (

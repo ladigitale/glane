@@ -7,6 +7,7 @@ import {
   PPQ,
   type Clip,
   type Track,
+  type TrackFx,
 } from "@glane/core-model";
 import type { ScheduledClip, TrackInsertConfig } from "@glane/audio-engine";
 import { clipOverlapTicks } from "@glane/gestures";
@@ -155,6 +156,7 @@ export function clipToScheduled(
   buffer: AudioBuffer,
   bpm: number,
   sampleRate: number,
+  trackFx?: TrackFx,
 ): ScheduledClip {
   const startSample = ticksToSamples(asTick(clip.startTick), bpm, sampleRate);
   const durationSamples = ticksToSamples(
@@ -163,6 +165,14 @@ export function clipToScheduled(
     sampleRate,
   );
   const offsetSamples = msToSamples(clip.contentOffsetMs, sampleRate);
+  let fadeInMs = clip.fadeInMs;
+  let fadeOutMs = clip.fadeOutMs;
+  // Track A/R raises one-shot fades; loops keep clip fades only (no re-trigger).
+  if (trackFx && !clip.loopEnabled) {
+    const fx = normalizeTrackFx(trackFx);
+    fadeInMs = Math.max(fadeInMs, fx.attackMs);
+    fadeOutMs = Math.max(fadeOutMs, fx.releaseMs);
+  }
   const scheduled: ScheduledClip = {
     id: clip.id,
     trackId: clip.trackId,
@@ -171,8 +181,8 @@ export function clipToScheduled(
     durationSamples,
     offsetSamples,
     gain: dbToGain(clip.gainDb),
-    fadeInMs: clip.fadeInMs,
-    fadeOutMs: clip.fadeOutMs,
+    fadeInMs,
+    fadeOutMs,
     playbackRate: Math.pow(2, (clip.pitchSemitones ?? 0) / 12),
     loop: clip.loopEnabled,
   };

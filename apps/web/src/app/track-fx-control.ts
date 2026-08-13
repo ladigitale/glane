@@ -1,6 +1,17 @@
 import {
   DEFAULT_TRACK_FX,
+  TRACK_ATTACK_MS_MAX,
+  TRACK_HP_HZ_MAX,
+  TRACK_HP_HZ_MIN,
+  TRACK_HP_HZ_OPEN,
+  TRACK_LP_HZ_MAX,
+  TRACK_LP_HZ_MIN,
+  TRACK_LP_HZ_OPEN,
+  TRACK_RELEASE_MS_MAX,
   normalizeTrackFx,
+  trackFxHasEnvelope,
+  trackFxHasTone,
+  trackFxIsActive,
   type TrackFx,
   type TrackFxType,
 } from "@glane/core-model";
@@ -54,7 +65,12 @@ function nearestEchoDelay(beats: number): number {
   return best;
 }
 
-function fxHint(fx: TrackFx): string {
+function hzLabel(hz: number): string {
+  if (hz >= 1000) return `${(hz / 1000).toFixed(hz >= 10_000 ? 0 : 1)} k`;
+  return `${Math.round(hz)} Hz`;
+}
+
+function wetHint(fx: TrackFx): string {
   if (fx.type === "eq") {
     return `${fx.low.toFixed(1)}/${fx.mid.toFixed(1)}/${fx.high.toFixed(1)}`;
   }
@@ -73,8 +89,21 @@ function fxHint(fx: TrackFx): string {
   return "";
 }
 
+function fxHint(fx: TrackFx): string {
+  const parts: string[] = [];
+  const wet = wetHint(fx);
+  if (wet) parts.push(wet);
+  if (fx.hpHz > TRACK_HP_HZ_OPEN + 0.5) parts.push(`HP ${hzLabel(fx.hpHz)}`);
+  if (fx.lpHz < TRACK_LP_HZ_OPEN - 0.5) parts.push(`LP ${hzLabel(fx.lpHz)}`);
+  if (fx.attackMs > 0 || fx.releaseMs > 0) {
+    parts.push(`A${Math.round(fx.attackMs)}/R${Math.round(fx.releaseMs)}`);
+  }
+  return parts.join(" · ");
+}
+
 /**
  * Track FX — sonic-pop type picker + optional params modal. ADR-0016.
+ * Always-on tone (HP/LP) + A/R envelope live beside the wet insert.
  * Fires `gl-fx` with `{ fx, commit }`, optional `gl-fx-apply` when showApply.
  */
 @customElement("gl-track-fx-control")
@@ -95,7 +124,7 @@ export class GlTrackFxControl extends LitElement {
   ];
 
   @property({ attribute: false }) fx: TrackFx = { ...DEFAULT_TRACK_FX };
-  /** Show « Paramètres » when type ≠ none. */
+  /** Show « Paramètres » (wet + ton / enveloppe). */
   @property({ type: Boolean }) showSettings = true;
   /** Show « Appliquer » action (editor bake). */
   @property({ type: Boolean }) showApply = false;
@@ -107,18 +136,26 @@ export class GlTrackFxControl extends LitElement {
 
   override render() {
     const fx = normalizeTrackFx(this.fx);
-    const hasParams = fx.type !== "none";
+    const hasWet = fx.type !== "none";
+    const active = trackFxIsActive(fx);
     const hint = fxHint(fx);
-    const trigger = fx.type === "none" ? "FX" : FX_LABEL[fx.type];
+    const trigger = hasWet ? FX_LABEL[fx.type] : active ? "Ton" : "FX";
+    const showActions =
+      this.showSettings || (this.showApply && (hasWet || active));
     return html`
-      <sonic-pop placement="bottom-start" shadow="md">
+      <sonic-pop
+        placement="bottom-start"
+        shadow="md"
+        @show=${this.#onPopShow}
+        @hide=${this.#onPopHide}
+      >
         <sonic-button
           size=${this.size}
-          variant=${hasParams ? "default" : "outline"}
-          type=${hasParams ? "primary" : "neutral"}
+          variant=${active ? "default" : "outline"}
+          type=${active ? "primary" : "neutral"}
           data-aria-label="Effet piste"
           title=${hint ? `${trigger} · ${hint}` : "Effet piste"}
-          ?active=${hasParams}
+          ?active=${active}
         >
           ${trigger}${hint ? ` · ${hint}` : ""}
           ${glIcon("chevron-down", { size: "xs", slot: "suffix" })}
@@ -140,7 +177,7 @@ export class GlTrackFxControl extends LitElement {
               `,
             )}
           </sonic-menu>
-          ${hasParams && (this.showSettings || this.showApply)
+          ${showActions
             ? html`
                 <sonic-divider></sonic-divider>
                 <sonic-menu direction="column" align="left" size="sm">
@@ -178,10 +215,12 @@ export class GlTrackFxControl extends LitElement {
         @hide=${this.#onHideSettings}
       >
         <sonic-modal-title
-          >${FX_LABEL[fx.type]} — paramètres</sonic-modal-title
+          >${hasWet
+            ? `${FX_LABEL[fx.type]} — paramètres`
+            : "Ton & enveloppe"}</sonic-modal-title
         >
         <sonic-modal-content>
-          ${hasParams ? this.#params(fx) : nothing}
+          ${this.#params(fx)}
         </sonic-modal-content>
         <sonic-modal-actions>
           <sonic-button hideModal variant="outline" type="neutral">
@@ -190,6 +229,24 @@ export class GlTrackFxControl extends LitElement {
         </sonic-modal-actions>
       </sonic-modal>
     `;
+  }
+
+  #onPopShow = (): void => {
+    this.#emitPop(true);
+  };
+
+  #onPopHide = (): void => {
+    this.#emitPop(false);
+  };
+
+  #emitPop(open: boolean) {
+    this.dispatchEvent(
+      new CustomEvent("gl-fx-pop", {
+        detail: { open },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   #hidePop() {
@@ -219,9 +276,18 @@ export class GlTrackFxControl extends LitElement {
   };
 
   #params(fx: TrackFx) {
+    return html`
+      <div class="flex flex-col gap-3 text-content">
+        ${this.#wetParams(fx)}
+        ${this.#toneParams(fx)}
+      </div>
+    `;
+  }
+
+  #wetParams(fx: TrackFx) {
     if (fx.type === "eq") {
       return html`
-        <div class="flex flex-col gap-2 text-content">
+        <div class="flex flex-col gap-2">
           ${this.#slider("Graves", fx.low, 0, 2, 0.01, (v) =>
             this.#patch({ low: v }, false),
           )}
@@ -237,7 +303,7 @@ export class GlTrackFxControl extends LitElement {
     if (fx.type === "echo") {
       const delayBeats = nearestEchoDelay(fx.delayBeats);
       return html`
-        <div class="flex flex-col gap-2 text-content">
+        <div class="flex flex-col gap-2">
           ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
             this.#patch({ mix: v }, false),
           )}
@@ -274,7 +340,7 @@ export class GlTrackFxControl extends LitElement {
     }
     if (fx.type === "reverb") {
       return html`
-        <div class="flex flex-col gap-2 text-content">
+        <div class="flex flex-col gap-2">
           ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
             this.#patch({ mix: v }, false),
           )}
@@ -289,7 +355,7 @@ export class GlTrackFxControl extends LitElement {
     }
     if (fx.type === "chorus") {
       return html`
-        <div class="flex flex-col gap-2 text-content">
+        <div class="flex flex-col gap-2">
           ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
             this.#patch({ mix: v }, false),
           )}
@@ -304,7 +370,7 @@ export class GlTrackFxControl extends LitElement {
     }
     if (fx.type === "tremolo" || fx.type === "vibrato") {
       return html`
-        <div class="flex flex-col gap-2 text-content">
+        <div class="flex flex-col gap-2">
           ${this.#slider("Vitesse (Hz)", fx.rateHz, 0.1, 12, 0.05, (v) =>
             this.#patch({ rateHz: v }, false),
           )}
@@ -317,6 +383,57 @@ export class GlTrackFxControl extends LitElement {
     return nothing;
   }
 
+  #toneParams(fx: TrackFx) {
+    const toneOn = trackFxHasTone(fx) || trackFxHasEnvelope(fx);
+    return html`
+      <div class="flex flex-col gap-2">
+        ${fx.type !== "none"
+          ? html`
+              <p
+                class="m-0 border-t border-neutral-200 pt-2 text-xs font-medium text-neutral-500"
+              >
+                Ton & enveloppe${toneOn ? "" : " (ouvert)"}
+              </p>
+            `
+          : nothing}
+        ${this.#slider(
+          "Passe-haut",
+          fx.hpHz,
+          TRACK_HP_HZ_MIN,
+          TRACK_HP_HZ_MAX,
+          1,
+          (v) => this.#patch({ hpHz: v }, false),
+          hzLabel(fx.hpHz),
+        )}
+        ${this.#slider(
+          "Passe-bas",
+          fx.lpHz,
+          TRACK_LP_HZ_MIN,
+          TRACK_LP_HZ_MAX,
+          10,
+          (v) => this.#patch({ lpHz: v }, false),
+          hzLabel(fx.lpHz),
+        )}
+        ${this.#slider(
+          "Attaque (ms)",
+          fx.attackMs,
+          0,
+          TRACK_ATTACK_MS_MAX,
+          1,
+          (v) => this.#patch({ attackMs: v }, false),
+        )}
+        ${this.#slider(
+          "Release (ms)",
+          fx.releaseMs,
+          0,
+          TRACK_RELEASE_MS_MAX,
+          1,
+          (v) => this.#patch({ releaseMs: v }, false),
+        )}
+      </div>
+    `;
+  }
+
   #slider(
     label: string,
     value: number,
@@ -324,9 +441,11 @@ export class GlTrackFxControl extends LitElement {
     max: number,
     step: number,
     onInput: (v: number) => void,
+    display?: string,
   ) {
     const disp =
-      step >= 1 ? String(Math.round(value)) : value.toFixed(2);
+      display ??
+      (step >= 1 ? String(Math.round(value)) : value.toFixed(2));
     return html`
       <label
         class="grid grid-cols-[1fr_auto] items-center gap-x-2 gap-y-1 text-sm text-neutral-500"

@@ -74,6 +74,7 @@ export async function separateSampleIntoStems(
       audio.pcm,
       audio.sampleRate,
       {
+        channelCount: audio.channelCount,
         onProgress: (ratio) =>
           opts?.onProgress?.({ phase: "running", ratio }),
       },

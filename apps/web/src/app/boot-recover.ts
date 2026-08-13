@@ -1,4 +1,5 @@
 import { sessionOpfs } from "@glane/audio-io";
+import { durationMsFromPcm } from "@glane/audio-dsp";
 import { db } from "./db.js";
 import { nowIso } from "@glane/core-model";
 
@@ -16,8 +17,9 @@ export async function bootRecoverSessions(): Promise<string[]> {
     const s = await db.sessions.get(id);
     if (!s) continue;
     const pcm = await sessionOpfs.loadPcm(id);
+    const ch = pcm?.channelCount ?? s.channelCount ?? 1;
     const durationMs = pcm
-      ? Math.round((pcm.pcm.length / pcm.sampleRate) * 1000)
+      ? durationMsFromPcm(pcm.pcm, pcm.sampleRate, ch)
       : s.durationMs;
     await db.sessions.put({
       ...s,

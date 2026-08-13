@@ -3,6 +3,13 @@ import { processTextureClip } from "./loop/seamless.js";
 import { DSP_THRESHOLDS } from "./config/thresholds.js";
 import { computeInterestScore } from "./interest-score.js";
 import { autoCropPcm } from "./auto-crop.js";
+import {
+  clampChannelCount,
+  durationMsFromPcm,
+  mapInterleavedChannels,
+  sliceFrames,
+  toMonoPcm,
+} from "./pcm-layout.js";
 
 export type ProcessJobKind = "oneshot" | "texture";
 
@@ -12,7 +19,8 @@ export type ProcessWorkerRequest = {
   sampleId: string;
   kind: ProcessJobKind;
   sampleRate: number;
-  /** Transferable Float32 PCM. */
+  channelCount?: number;
+  /** Transferable interleaved Float32 PCM. */
   pcm: Float32Array;
 };
 
@@ -43,31 +51,41 @@ export function runProcessJob(
   kind: ProcessJobKind,
   pcm: Float32Array,
   sampleRate: number,
+  channelCount = 1,
 ): Omit<Extract<ProcessWorkerResponse, { type: "done" }>, "type" | "jobId" | "sampleId"> {
+  const ch = clampChannelCount(channelCount);
   const target = DSP_THRESHOLDS.percussive.peakNormDbtp;
 
   if (kind === "texture") {
-    const polished = processTextureClip(pcm, sampleRate);
-    if (polished) {
-      // Trim + soften extremities; peak-norm only (no envelope crush).
-      const out = normalizePeak(polished.pcm, target);
-      const durationMs = Math.round((out.length / sampleRate) * 1000);
-      const loopScore = polished.loopScore;
+    const monoIn = toMonoPcm(pcm, ch);
+    const textureMeta = processTextureClip(monoIn, sampleRate);
+    const polished = mapInterleavedChannels(pcm, ch, (plane) => {
+      const result = processTextureClip(plane, sampleRate);
+      return result?.pcm ?? plane;
+    });
+    if (textureMeta || polished.length > 0) {
+      const out = normalizePeak(polished, target);
+      const durationMs = durationMsFromPcm(out, sampleRate, ch);
+      const loopScore = textureMeta?.loopScore ?? 0.5;
+      const xfadeMs = textureMeta?.xfadeMs ?? 40;
+      const tags = [
+        ...(textureMeta?.tags ?? ["loop-proposed", "seamless", "field-raw"]).filter(
+          (t) => t !== "polish-deferred",
+        ),
+        "peak-norm",
+        "processing:done",
+      ];
       return {
         pcm: out,
-        tags: [
-          ...polished.tags.filter((t) => t !== "polish-deferred"),
-          "peak-norm",
-          "processing:done",
-        ],
+        tags,
         durationMs,
         loopProposed: true,
         loopStartMs: 0,
         loopEndMs: durationMs,
-        loopXfadeMs: polished.xfadeMs,
+        loopXfadeMs: xfadeMs,
         loopScore,
         interestScore: computeInterestScore({
-          pcm: out,
+          pcm: toMonoPcm(out, ch),
           sampleRate,
           kind: "texture",
           loopScore,
@@ -76,14 +94,21 @@ export function runProcessJob(
     }
   }
 
-  const cropped = kind === "oneshot" ? autoCropPcm(pcm, sampleRate) : null;
-  const source = cropped?.cropped ? cropped.pcm : pcm;
-  const out = normalizePeak(source, target);
-  const durationMs = Math.round((out.length / sampleRate) * 1000);
-  const loopScore = kind === "texture" ? 0.35 : undefined;
+  let source = pcm;
   const tags = ["peak-norm", "processing:done"];
-  if (cropped?.attackCropped) tags.unshift("auto-crop-attack");
-  if (cropped?.tailCropped) tags.unshift("auto-crop-tail");
+  if (kind === "oneshot") {
+    const mono = toMonoPcm(pcm, ch);
+    const cropped = autoCropPcm(mono, sampleRate);
+    if (cropped.cropped) {
+      source = sliceFrames(pcm, ch, cropped.startSample, cropped.endSample);
+      if (cropped.attackCropped) tags.unshift("auto-crop-attack");
+      if (cropped.tailCropped) tags.unshift("auto-crop-tail");
+    }
+  }
+
+  const out = normalizePeak(source, target);
+  const durationMs = durationMsFromPcm(out, sampleRate, ch);
+  const loopScore = kind === "texture" ? 0.35 : undefined;
   return {
     pcm: out,
     tags,
@@ -94,7 +119,7 @@ export function runProcessJob(
     loopXfadeMs: kind === "texture" ? 40 : undefined,
     loopScore,
     interestScore: computeInterestScore({
-      pcm: out,
+      pcm: toMonoPcm(out, ch),
       sampleRate,
       kind,
       loopScore,

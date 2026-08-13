@@ -5,11 +5,24 @@ import {
   asSampleIndex,
   createEntityId,
   nowIso,
+  trackFxIsActive,
+  trackFxNeedsBus,
   type ExprRole,
   type Sample,
   type TrackFx,
 } from "@glane/core-model";
-import { noiseGate, softCompress, autoCropPcm, rotatePcm } from "@glane/audio-dsp";
+import {
+  autoCropPcm,
+  durationMsFromPcm,
+  frameCount,
+  interleavedToAudioBuffer,
+  mapInterleavedChannels,
+  noiseGate,
+  rotatePcm,
+  sliceFrames,
+  softCompress,
+  toMonoPcm,
+} from "@glane/audio-dsp";
 import { TransportEngine, bakeTrackFx } from "@glane/audio-engine";
 import { sampleOpfs } from "@glane/audio-io";
 import { LitElement, css, html, nothing } from "lit";
@@ -53,6 +66,7 @@ import "../transport-bar.js";
 type EditCheckpoint = {
   master: Float32Array;
   masterDirty: boolean;
+  channelCount: number;
   ops: EditorOp[];
   hasNormalize: boolean;
   dirty: boolean;
@@ -62,6 +76,18 @@ type EditCheckpoint = {
   stretchModeUi: "preserve-pitch" | "resample";
   previewFx: TrackFx;
 };
+
+function concatInterleaved(parts: Float32Array[]): Float32Array {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Float32Array(n);
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
 
 function toast(
   text: string,
@@ -142,6 +168,7 @@ export class GlEditorPage extends LitElement {
   /** True when working PCM diverges from OPFS (cut/paste/silence/FX bake). */
   #masterDirty = false;
   #viewBuffer: AudioBuffer | null = null;
+  #channelCount = 1;
   #sampleRate = 48_000;
   #raf = 0;
   /** Manual seek-bar / playhead scrub — owns position over transport RAF. */
@@ -253,7 +280,7 @@ export class GlEditorPage extends LitElement {
           applyLabel=${hasSel
             ? t("editor.fxApplySel")
             : t("editor.fxApplyAll")}
-          ?applyDisabled=${this.previewFx.type === "none" || this.applyingFx}
+          ?applyDisabled=${!trackFxIsActive(this.previewFx) || this.applyingFx}
           @gl-fx=${this.#onPreviewFxEvent}
           @gl-fx-apply=${this.#onFxApply}
         ></gl-track-fx-control>
@@ -271,7 +298,9 @@ export class GlEditorPage extends LitElement {
         >
       </div>
       <gl-edit-timeline
-        .pcm=${this.master}
+        .pcm=${this.master
+          ? toMonoPcm(this.master, this.#channelCount)
+          : null}
         .sampleRate=${this.#sampleRate}
         .label=${this.sample?.userName ?? this.sample?.name ?? "Sample"}
         .color=${waveColor}
@@ -385,10 +414,12 @@ export class GlEditorPage extends LitElement {
       const data = await loadSampleAudio(this.sample);
       if (data) {
         this.#sampleRate = data.sampleRate;
+        this.#channelCount = data.channelCount ?? 1;
         master = data.pcm;
       }
     }
     if (!master || master.length === 0) {
+      this.#channelCount = 1;
       const n = Math.floor(this.#sampleRate * 0.5);
       master = new Float32Array(n);
       for (let i = 0; i < n; i++) {
@@ -412,7 +443,8 @@ export class GlEditorPage extends LitElement {
       .filter((o) => o.entityType === "sample_edit")
       .map((o) => o.payload as unknown as EditorOp);
     this.hasNormalize = this.ops.some((o) => o.op === "normalize_peak");
-    this.state = applyOps(master.length, this.ops);
+    const masterFrames = frameCount(master, this.#channelCount);
+    this.state = applyOps(masterFrames, this.ops);
     if (this.sample?.loopStartMs != null && this.sample.loopEndMs != null && this.ops.length === 0) {
       const ls = Math.floor((this.sample.loopStartMs / 1000) * this.#sampleRate);
       const le = Math.floor((this.sample.loopEndMs / 1000) * this.#sampleRate);
@@ -424,7 +456,7 @@ export class GlEditorPage extends LitElement {
           xfadeMs: this.sample.loopXfadeMs ?? 40,
         },
       ];
-      this.state = applyOps(master.length, this.ops);
+      this.state = applyOps(masterFrames, this.ops);
     }
     if (this.state.loopStartSample != null && this.state.loopEndSample != null) {
       this.selStart = this.state.loopStartSample;
@@ -443,10 +475,15 @@ export class GlEditorPage extends LitElement {
       this.state,
       this.#sampleRate,
       this.hasNormalize,
+      -0.3,
+      this.#channelCount,
     );
-    const buf = this.#engine.ctx.createBuffer(1, pcm.length, this.#sampleRate);
-    buf.copyToChannel(new Float32Array(pcm), 0);
-    this.#viewBuffer = buf;
+    this.#viewBuffer = interleavedToAudioBuffer(
+      this.#engine.ctx,
+      pcm,
+      this.#sampleRate,
+      this.#channelCount,
+    );
   }
 
   #onTimelineTrim = (
@@ -508,10 +545,13 @@ export class GlEditorPage extends LitElement {
       return;
     }
     const before = this.master;
+    const ch = this.#channelCount;
     await this.#mutateView((view, sel) => {
-      const n = view.length;
+      const n = frameCount(view, ch);
       if (n === 0) return null;
-      const pcm = rotatePcm(view, offset);
+      const pcm = mapInterleavedChannels(view, ch, (plane) =>
+        rotatePcm(plane, offset),
+      );
       const wrap = (i: number): number => {
         let x = (i - offset) % n;
         if (x < 0) x += n;
@@ -650,7 +690,7 @@ export class GlEditorPage extends LitElement {
     const { loopA, loopB } = this.#loopRel();
     const offset = Math.max(loopA, Math.min(loopB - 1, Math.floor(from)));
     // Full-loop clip so seek() can re-arm anywhere in the loop.
-    const previewLive = this.previewFx.type !== "none";
+    const previewLive = trackFxNeedsBus(this.previewFx);
     if (previewLive) {
       this.#engine.setTrackInsert({
         id: "edit",
@@ -660,6 +700,7 @@ export class GlEditorPage extends LitElement {
         bpm: 120,
       });
     }
+    const attackMs = Math.max(0, this.previewFx.attackMs ?? 0);
     this.#engine.setClips([
       {
         id: "edit",
@@ -669,7 +710,7 @@ export class GlEditorPage extends LitElement {
         durationSamples: asSampleIndex(Math.max(1, loopB - loopA)),
         offsetSamples: asSampleIndex(loopA),
         gain: 1,
-        fadeInMs: Math.min(5, this.state.fadeInMs),
+        fadeInMs: Math.max(Math.min(5, this.state.fadeInMs), attackMs),
         fadeOutMs: 0,
         loop: true,
         loopSustain: true,
@@ -1090,28 +1131,31 @@ export class GlEditorPage extends LitElement {
     const makeupDb = this.dynamicsMakeupDb;
     const sr = this.#sampleRate;
     await this.#mutateView((view, sel) => {
+      const ch = this.#channelCount;
+      const frames = frameCount(view, ch);
       const a = sel?.a ?? 0;
-      const b = sel?.b ?? view.length;
+      const b = sel?.b ?? frames;
       if (b <= a) return null;
-      const slice = view.subarray(a, b);
-      const processed =
+      const slice = sliceFrames(view, ch, a, b);
+      const processed = mapInterleavedChannels(slice, ch, (plane) =>
         mode === "gate"
-          ? noiseGate(slice, sr, {
+          ? noiseGate(plane, sr, {
               thresholdDb,
               attackMs,
               releaseMs,
               floor: 0,
             })
-          : softCompress(slice, sr, {
+          : softCompress(plane, sr, {
               thresholdDb,
               ratio,
               attackMs,
               releaseMs,
               kneeDb: 6,
               makeupDb,
-            });
+            }),
+      );
       const next = view.slice();
-      next.set(processed, a);
+      next.set(processed, a * ch);
       return {
         pcm: next,
         status:
@@ -1249,6 +1293,8 @@ export class GlEditorPage extends LitElement {
       this.state,
       this.#sampleRate,
       this.hasNormalize,
+      -0.3,
+      this.#channelCount,
     );
     return view.length > 0 ? view : null;
   }
@@ -1262,17 +1308,20 @@ export class GlEditorPage extends LitElement {
     const view = this.#currentView();
     const sel = this.#selRel();
     if (!view || !sel) return;
-    this.#setClipboard(view.subarray(sel.a, sel.b).slice());
-    toast(`Copié · ${this.#clipboard!.length} samples`, "success");
+    const ch = this.#channelCount;
+    this.#setClipboard(sliceFrames(view, ch, sel.a, sel.b));
+    toast(`Copié · ${sel.b - sel.a} frames`, "success");
   };
 
   #cutSelection = (): void => {
     void this.#mutateView((view, sel) => {
       if (!sel) return null;
-      this.#setClipboard(view.subarray(sel.a, sel.b).slice());
-      const next = new Float32Array(view.length - (sel.b - sel.a));
-      next.set(view.subarray(0, sel.a), 0);
-      next.set(view.subarray(sel.b), sel.a);
+      const ch = this.#channelCount;
+      this.#setClipboard(sliceFrames(view, ch, sel.a, sel.b));
+      const next = concatInterleaved([
+        sliceFrames(view, ch, 0, sel.a),
+        sliceFrames(view, ch, sel.b, frameCount(view, ch)),
+      ]);
       return { pcm: next, status: "Coupé", selStart: sel.a, selEnd: sel.a };
     });
   };
@@ -1280,20 +1329,23 @@ export class GlEditorPage extends LitElement {
   #pasteClipboard = (): void => {
     if (!this.#clipboard || this.#clipboard.length === 0) return;
     void this.#mutateView((view, sel) => {
-      const at = sel?.a ?? Math.max(
-        0,
-        Math.min(view.length, this.playheadSample),
-      );
+      const ch = this.#channelCount;
+      const frames = frameCount(view, ch);
+      const at =
+        sel?.a ??
+        Math.max(0, Math.min(frames, this.playheadSample));
       const clip = this.#clipboard!;
-      const next = new Float32Array(view.length + clip.length);
-      next.set(view.subarray(0, at), 0);
-      next.set(clip, at);
-      next.set(view.subarray(at), at + clip.length);
+      const clipFrames = frameCount(clip, ch);
+      const next = concatInterleaved([
+        sliceFrames(view, ch, 0, at),
+        clip,
+        sliceFrames(view, ch, at, frames),
+      ]);
       return {
         pcm: next,
         status: "Collé",
         selStart: at,
-        selEnd: at + clip.length,
+        selEnd: at + clipFrames,
       };
     });
   };
@@ -1301,8 +1353,12 @@ export class GlEditorPage extends LitElement {
   #silenceSelection = (): void => {
     void this.#mutateView((view, sel) => {
       if (!sel) return null;
+      const ch = this.#channelCount;
       const next = view.slice();
-      next.fill(0, sel.a, sel.b);
+      for (let f = sel.a; f < sel.b; f++) {
+        const base = f * ch;
+        for (let c = 0; c < ch; c++) next[base + c] = 0;
+      }
       return {
         pcm: next,
         status: "Silence",
@@ -1323,12 +1379,14 @@ export class GlEditorPage extends LitElement {
   #fadeSelection(kind: "in" | "out"): void {
     void this.#mutateView((view, sel) => {
       if (!sel) return null;
+      const ch = this.#channelCount;
       const next = view.slice();
       const n = sel.b - sel.a;
       for (let i = 0; i < n; i++) {
         const t = n <= 1 ? 1 : i / (n - 1);
         const g = kind === "in" ? t : 1 - t;
-        next[sel.a + i]! *= g;
+        const base = (sel.a + i) * ch;
+        for (let c = 0; c < ch; c++) next[base + c]! *= g;
       }
       return {
         pcm: next,
@@ -1390,10 +1448,11 @@ export class GlEditorPage extends LitElement {
     this.#masterDirty = true;
     this.ops = [];
     this.hasNormalize = false;
-    this.state = emptyEditorState(next.length);
-    const end = selEndRel ?? next.length;
-    this.selStart = Math.max(0, Math.min(next.length, selStartRel));
-    this.selEnd = Math.max(this.selStart, Math.min(next.length, end));
+    const frames = frameCount(next, this.#channelCount);
+    this.state = emptyEditorState(frames);
+    const end = selEndRel ?? frames;
+    this.selStart = Math.max(0, Math.min(frames, selStartRel));
+    this.selEnd = Math.max(this.selStart, Math.min(frames, end));
     this.playheadSample = this.selStart;
     this.dirty = true;
     this.#rebuildView();
@@ -1404,7 +1463,7 @@ export class GlEditorPage extends LitElement {
   async #onPreviewFx(fx: TrackFx): Promise<void> {
     this.previewFx = fx;
     if (this.playing && this.#engine) {
-      if (fx.type === "none") {
+      if (!trackFxNeedsBus(fx)) {
         await this.#restartPlay();
         return;
       }
@@ -1427,7 +1486,7 @@ export class GlEditorPage extends LitElement {
     if (
       !this.master ||
       !this.sampleId ||
-      this.previewFx.type === "none" ||
+      !trackFxIsActive(this.previewFx) ||
       this.applyingFx
     ) {
       return;
@@ -1442,21 +1501,30 @@ export class GlEditorPage extends LitElement {
 
       const sel = this.#selRel();
       const useSel = scope === "selection" && sel != null;
+      const ch = this.#channelCount;
+      const frames = frameCount(view, ch);
       let next: Float32Array;
       if (useSel && sel) {
         const baked = await bakeTrackFx(
-          view.subarray(sel.a, sel.b),
+          sliceFrames(view, ch, sel.a, sel.b),
           this.#sampleRate,
           this.previewFx,
+          120,
+          ch,
         );
-        next = new Float32Array(
-          sel.a + baked.length + (view.length - sel.b),
-        );
-        next.set(view.subarray(0, sel.a), 0);
-        next.set(baked, sel.a);
-        next.set(view.subarray(sel.b), sel.a + baked.length);
+        next = concatInterleaved([
+          sliceFrames(view, ch, 0, sel.a),
+          baked,
+          sliceFrames(view, ch, sel.b, frames),
+        ]);
       } else {
-        next = await bakeTrackFx(view, this.#sampleRate, this.previewFx);
+        next = await bakeTrackFx(
+          view,
+          this.#sampleRate,
+          this.previewFx,
+          120,
+          ch,
+        );
       }
 
       this.#checkpoint();
@@ -1465,7 +1533,7 @@ export class GlEditorPage extends LitElement {
         next,
         useSel ? "FX appliqué à la sélection" : "FX appliqué à tout le son",
         0,
-        next.length,
+        frameCount(next, ch),
       );
     } catch (err) {
       toast(
@@ -1500,26 +1568,32 @@ export class GlEditorPage extends LitElement {
 
   #autoCrop = (): void => {
     void this.#mutateView((view, sel) => {
+      const ch = this.#channelCount;
+      const frames = frameCount(view, ch);
       const a = sel?.a ?? 0;
-      const b = sel?.b ?? view.length;
+      const b = sel?.b ?? frames;
       if (b <= a + 1) return null;
-      const slice = view.subarray(a, b);
-      const result = autoCropPcm(slice, this.#sampleRate);
-      if (!result.cropped) {
+      const slice = sliceFrames(view, ch, a, b);
+      let cropped = false;
+      const resultPcm = mapInterleavedChannels(slice, ch, (plane) => {
+        const result = autoCropPcm(plane, this.#sampleRate);
+        if (result.cropped) cropped = true;
+        return result.pcm;
+      });
+      if (!cropped) {
         toast(t("editor.autoCropNone"), "warning");
         return null;
       }
-      const next = new Float32Array(
-        a + result.pcm.length + (view.length - b),
-      );
-      if (a > 0) next.set(view.subarray(0, a), 0);
-      next.set(result.pcm, a);
-      if (b < view.length) next.set(view.subarray(b), a + result.pcm.length);
+      const next = concatInterleaved([
+        sliceFrames(view, ch, 0, a),
+        resultPcm,
+        sliceFrames(view, ch, b, frames),
+      ]);
       return {
         pcm: next,
         status: t("editor.autoCropDone"),
         selStart: a,
-        selEnd: a + result.pcm.length,
+        selEnd: a + frameCount(resultPcm, ch),
       };
     });
   };
@@ -1563,6 +1637,7 @@ export class GlEditorPage extends LitElement {
     this.#history.push({
       master: this.master.slice(),
       masterDirty: this.#masterDirty,
+      channelCount: this.#channelCount,
       ops: this.ops.map((o) => structuredClone(o)),
       hasNormalize: this.hasNormalize,
       dirty: this.dirty,
@@ -1580,7 +1655,10 @@ export class GlEditorPage extends LitElement {
     if (!this.sampleId) return;
     this.#checkpoint();
     this.ops = [...this.ops, op];
-    this.state = applyOps(this.master?.length ?? 0, this.ops);
+    this.state = applyOps(
+      frameCount(this.master ?? new Float32Array(0), this.#channelCount),
+      this.ops,
+    );
     this.hasNormalize = this.ops.some((o) => o.op === "normalize_peak");
     this.dirty = true;
     if (op.op === "trim") {
@@ -1603,10 +1681,11 @@ export class GlEditorPage extends LitElement {
     this.#haltPlay();
     this.master = snap.master;
     this.#masterDirty = snap.masterDirty;
+    this.#channelCount = snap.channelCount ?? this.#channelCount;
     this.ops = snap.ops;
     this.hasNormalize = snap.hasNormalize;
     this.dirty = snap.dirty;
-    this.state = applyOps(this.master.length, this.ops);
+    this.state = applyOps(frameCount(this.master, this.#channelCount), this.ops);
     this.selStart = snap.selStart;
     this.selEnd = snap.selEnd;
     this.playheadSample = snap.playheadSample;
@@ -1636,10 +1715,12 @@ export class GlEditorPage extends LitElement {
         this.sampleId,
         this.master,
         this.#sampleRate,
-        1,
+        this.#channelCount,
       );
-      const durationMs = Math.round(
-        (this.master.length / this.#sampleRate) * 1000,
+      const durationMs = durationMsFromPcm(
+        this.master,
+        this.#sampleRate,
+        this.#channelCount,
       );
       await db.samples.update(this.sampleId, {
         durationMs,

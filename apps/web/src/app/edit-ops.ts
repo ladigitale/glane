@@ -1,6 +1,15 @@
-/** Non-destructive edit ops for the mono editor (applied over immutable master PCM). */
+/** Non-destructive edit ops for the sample editor (applied over immutable master PCM).
+ * Indices are **frames**; master may be interleaved multi-channel.
+ */
 
-import { stretchBuffer } from "@glane/audio-dsp";
+import {
+  clampChannelCount,
+  frameCount,
+  mapInterleavedChannels,
+  reverseInterleaved,
+  sliceFrames,
+  stretchBuffer,
+} from "@glane/audio-dsp";
 
 export type EditorOp =
   | { op: "trim"; startSample: number; endSample: number }
@@ -16,7 +25,7 @@ export type EditorOp =
     };
 
 export type EditorState = {
-  /** Inclusive start / exclusive end into master. */
+  /** Inclusive start / exclusive end into master (frames). */
   startSample: number;
   endSample: number;
   fadeInMs: number;
@@ -81,12 +90,12 @@ function applyOne(s: EditorState, op: EditorOp, masterLen: number): EditorState 
         loopXfadeMs: Math.max(0, op.xfadeMs),
       };
     }
-    case "clear_loop":
-      return { ...s, loopStartSample: null, loopEndSample: null };
     case "normalize_peak":
       return { ...s, normalizeGain: 1 }; // gain computed when rendering
     case "reverse":
       return { ...s, reverse: !s.reverse };
+    case "clear_loop":
+      return { ...s, loopStartSample: null, loopEndSample: null };
     case "stretch": {
       const ratio = Math.min(4, Math.max(0.25, op.ratio));
       return {
@@ -98,43 +107,46 @@ function applyOne(s: EditorState, op: EditorOp, masterLen: number): EditorState 
   }
 }
 
-/** Render a playable Float32Array from master + state (allocates). */
+/** Render a playable interleaved Float32Array from master + state (allocates). */
 export function renderView(
   master: Float32Array,
   state: EditorState,
   sampleRate: number,
+  channelCount = 1,
 ): Float32Array {
-  const slice = master.subarray(state.startSample, state.endSample);
-  let out = new Float32Array(slice.length);
-  out.set(slice);
+  const ch = clampChannelCount(channelCount);
+  let out = sliceFrames(master, ch, state.startSample, state.endSample);
   if (state.reverse) {
-    for (let i = 0, j = out.length - 1; i < j; i++, j--) {
-      const t = out[i]!;
-      out[i] = out[j]!;
-      out[j] = t;
-    }
+    out = reverseInterleaved(out, ch);
   }
 
   if (Math.abs(state.stretchRatio - 1) > 1e-3) {
-    out = new Float32Array(
-      stretchBuffer(out, state.stretchRatio, state.stretchMode),
+    out = mapInterleavedChannels(out, ch, (plane) =>
+      new Float32Array(
+        stretchBuffer(plane, state.stretchRatio, state.stretchMode),
+      ),
     );
   }
 
+  const frames = frameCount(out, ch);
   const fadeInN = Math.min(
-    out.length / 2,
+    frames / 2,
     Math.floor((state.fadeInMs / 1000) * sampleRate),
   );
   const fadeOutN = Math.min(
-    out.length / 2,
+    frames / 2,
     Math.floor((state.fadeOutMs / 1000) * sampleRate),
   );
   for (let i = 0; i < fadeInN; i++) {
-    out[i] = (out[i] ?? 0) * (i / fadeInN);
+    const g = i / fadeInN;
+    const base = i * ch;
+    for (let c = 0; c < ch; c++) out[base + c] = (out[base + c] ?? 0) * g;
   }
   for (let i = 0; i < fadeOutN; i++) {
-    const idx = out.length - 1 - i;
-    out[idx] = (out[idx] ?? 0) * (i / fadeOutN);
+    const g = i / fadeOutN;
+    const frame = frames - 1 - i;
+    const base = frame * ch;
+    for (let c = 0; c < ch; c++) out[base + c] = (out[base + c] ?? 0) * g;
   }
   return out;
 }
@@ -145,8 +157,9 @@ export function renderNormalized(
   sampleRate: number,
   doNormalize: boolean,
   peakTargetDbtp = -0.3,
+  channelCount = 1,
 ): Float32Array {
-  const out = renderView(master, state, sampleRate);
+  const out = renderView(master, state, sampleRate, channelCount);
   if (!doNormalize) return out;
   let peak = 0;
   for (let i = 0; i < out.length; i++) {

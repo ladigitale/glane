@@ -20,7 +20,7 @@ ADR-0014 covers sequencer drag/snap. AudioRoom also defines the reference UX for
 |---------|-----------|
 | Mute | Dedicated control (not volume=0); horizontal switch / tap OK |
 | Volume | Compact **rotary** (not a long fader); range ≈ **0…2×** linear gain with magnetic snaps at **0 / 1 / 2**; finer curve below unity |
-| FX | One light insert per track (None / EQ / Echo / Reverb initially); selector + optional param popup — live in the mix |
+| FX | One light **wet** insert per track (None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato); selector + optional param popup — live in the mix. **Always-on** beside it: HP/LP tone + A/R envelope (raises one-shot clip fades; not a second wet rack) |
 
 Rail stays a **column of track controls**, not a floating inspector. Hit targets ≥ 44 px. Solo stays model-backed; UI can stay minimal until needed.
 

@@ -1,4 +1,5 @@
 import { sampleOpfs } from "@glane/audio-io";
+import { toMonoPcm } from "@glane/audio-dsp";
 import {
   enrichWithClassifier,
   ML_TAG,
@@ -44,7 +45,7 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
       const classifier = await getYamnetClassifier();
       const result = await enrichWithClassifier(
         sample.tags ?? [],
-        audio.pcm,
+        toMonoPcm(audio.pcm, audio.channelCount ?? 1),
         audio.sampleRate,
         classifier,
       );

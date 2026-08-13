@@ -315,7 +315,7 @@ const fr = {
   "seq.genPitchUp": "Pitch max ↑ (st)",
   "seq.genPitchDown": "Pitch max ↓ (st)",
   "seq.genPitchRangeHint":
-    "Limite la transposition en demi-tons au-dessus / en dessous du son d’origine. Auto = ±12.",
+    "Limite la transposition (et le pitch induit par le stretch resample) en demi-tons. Auto = ±12.",
   "seq.genReverse": "Reverse",
   "seq.genStutter": "Stutter",
   "seq.genCallResponse": "Appel / réponse",
@@ -738,7 +738,7 @@ const en: Record<keyof typeof fr, string> = {
   "seq.genPitchUp": "Pitch max ↑ (st)",
   "seq.genPitchDown": "Pitch max ↓ (st)",
   "seq.genPitchRangeHint":
-    "Cap transpose in semitones above / below the source sound. Auto = ±12.",
+    "Cap transpose (and pitch from resample stretch) in semitones. Auto = ±12.",
   "seq.genReverse": "Reverse",
   "seq.genStutter": "Stutter",
   "seq.genCallResponse": "Call & response",

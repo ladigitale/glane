@@ -12,7 +12,7 @@ export async function saveSamplePcm(
   sampleId: string,
   pcm: Float32Array,
   sampleRate: number,
-  channelCount = 1,
+  channelCount = 2,
 ): Promise<void> {
   const dir = await getSampleDir(sampleId);
   const fileHandle = await dir.getFileHandle("clip.f32", { create: true });
@@ -26,7 +26,11 @@ export async function saveSamplePcm(
   const meta = await dir.getFileHandle("meta.json", { create: true });
   const mw = await meta.createWritable();
   await mw.write(
-    JSON.stringify({ sampleRate, channelCount, frames: pcm.length }),
+    JSON.stringify({
+      sampleRate,
+      channelCount,
+      frames: Math.floor(pcm.length / Math.max(1, channelCount)),
+    }),
   );
   await mw.close();
 }

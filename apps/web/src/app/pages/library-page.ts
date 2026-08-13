@@ -4,6 +4,7 @@ import {
   type SampleClass,
   type Session,
 } from "@glane/core-model";
+import { interleavedToAudioBuffer } from "@glane/audio-dsp";
 import { TransportEngine } from "@glane/audio-engine";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { customElement, state } from "lit/decorators.js";
@@ -928,12 +929,12 @@ export class GlLibraryPage extends LitElement {
       navigate({ name: "sample", id: s.id });
       return;
     }
-    const buf = this.#engine.ctx.createBuffer(
-      1,
-      data.pcm.length,
+    const buf = interleavedToAudioBuffer(
+      this.#engine.ctx,
+      data.pcm,
       data.sampleRate,
+      data.channelCount,
     );
-    buf.copyToChannel(new Float32Array(data.pcm), 0);
     this.playingId = s.id;
     this.#engine.audition(buf, 5);
   }
