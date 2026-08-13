@@ -14,6 +14,9 @@ const FX_LABEL: Record<TrackFxType, string> = {
   eq: "EQ",
   echo: "Écho",
   reverb: "Réverb",
+  chorus: "Chorus",
+  tremolo: "Tremolo",
+  vibrato: "Vibrato",
 };
 
 const FX_TYPES = Object.keys(FX_LABEL) as TrackFxType[];
@@ -56,10 +59,16 @@ function fxHint(fx: TrackFx): string {
     return `${fx.low.toFixed(1)}/${fx.mid.toFixed(1)}/${fx.high.toFixed(1)}`;
   }
   if (fx.type === "echo") {
-    return `${echoDelayLabel(fx.delayBeats)} · mix ${fx.mix.toFixed(2)}`;
+    return `${echoDelayLabel(fx.delayBeats)} · damp ${fx.damping.toFixed(2)}`;
   }
   if (fx.type === "reverb") {
-    return `decay ${fx.decay.toFixed(2)} · mix ${fx.mix.toFixed(2)}`;
+    return `decay ${fx.decay.toFixed(2)} · damp ${fx.damping.toFixed(2)}`;
+  }
+  if (fx.type === "chorus") {
+    return `${fx.rateHz.toFixed(1)} Hz · mix ${fx.mix.toFixed(2)}`;
+  }
+  if (fx.type === "tremolo" || fx.type === "vibrato") {
+    return `${fx.rateHz.toFixed(1)} Hz · depth ${fx.depth.toFixed(2)}`;
   }
   return "";
 }
@@ -257,19 +266,55 @@ export class GlTrackFxControl extends LitElement {
           ${this.#slider("Feedback", fx.feedback, 0, 0.9, 0.01, (v) =>
             this.#patch({ feedback: v }, false),
           )}
+          ${this.#slider("Damping", fx.damping, 0, 1, 0.01, (v) =>
+            this.#patch({ damping: v }, false),
+          )}
         </div>
       `;
     }
-    return html`
-      <div class="flex flex-col gap-2 text-content">
-        ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
-          this.#patch({ mix: v }, false),
-        )}
-        ${this.#slider("Decay", fx.decay, 0, 1, 0.01, (v) =>
-          this.#patch({ decay: v }, false),
-        )}
-      </div>
-    `;
+    if (fx.type === "reverb") {
+      return html`
+        <div class="flex flex-col gap-2 text-content">
+          ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
+            this.#patch({ mix: v }, false),
+          )}
+          ${this.#slider("Decay", fx.decay, 0, 1, 0.01, (v) =>
+            this.#patch({ decay: v }, false),
+          )}
+          ${this.#slider("Damping", fx.damping, 0, 1, 0.01, (v) =>
+            this.#patch({ damping: v }, false),
+          )}
+        </div>
+      `;
+    }
+    if (fx.type === "chorus") {
+      return html`
+        <div class="flex flex-col gap-2 text-content">
+          ${this.#slider("Mix", fx.mix, 0, 1, 0.01, (v) =>
+            this.#patch({ mix: v }, false),
+          )}
+          ${this.#slider("Vitesse (Hz)", fx.rateHz, 0.1, 8, 0.05, (v) =>
+            this.#patch({ rateHz: v }, false),
+          )}
+          ${this.#slider("Profondeur", fx.depth, 0, 1, 0.01, (v) =>
+            this.#patch({ depth: v }, false),
+          )}
+        </div>
+      `;
+    }
+    if (fx.type === "tremolo" || fx.type === "vibrato") {
+      return html`
+        <div class="flex flex-col gap-2 text-content">
+          ${this.#slider("Vitesse (Hz)", fx.rateHz, 0.1, 12, 0.05, (v) =>
+            this.#patch({ rateHz: v }, false),
+          )}
+          ${this.#slider("Profondeur", fx.depth, 0, 1, 0.01, (v) =>
+            this.#patch({ depth: v }, false),
+          )}
+        </div>
+      `;
+    }
+    return nothing;
   }
 
   #slider(

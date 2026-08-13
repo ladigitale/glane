@@ -9,7 +9,7 @@ import { ensurePrefs } from "./db.js";
 import { bootRecoverSessions } from "./boot-recover.js";
 import { startSyncScheduler } from "./sync.js";
 import { processQueue, type ProcessQueueSnapshot } from "./process-queue.js";
-import { t, setLocale } from "./i18n/messages.js";
+import { t, tf, setLocale } from "./i18n/messages.js";
 import { getWordingsServiceUrl } from "./i18n/wordings-fetch.js";
 import { parsePath, navigate, type Route, pathFor } from "./router.js";
 import {
@@ -424,6 +424,23 @@ export class GlApp extends LitElement {
                   ${this.proc.running > 0 ? "●" : "○"}
                   ${this.proc.remaining}
                 </sonic-badge>`
+              : nothing}
+            ${this.proc.error > 0
+              ? html`<sonic-button
+                  size="sm"
+                  variant="outline"
+                  type="warning"
+                  title=${tf("process.retryAll", {
+                    n: String(this.proc.error),
+                  })}
+                  data-aria-label=${tf("process.retryAll", {
+                    n: String(this.proc.error),
+                  })}
+                  @click=${() => void processQueue.retryUnfinished()}
+                >
+                  ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+                  ${this.proc.error}
+                </sonic-button>`
               : nothing}
             <nav class="hidden md:block" aria-label="Principal">
               <sonic-menu direction="row" align="left" size="sm">

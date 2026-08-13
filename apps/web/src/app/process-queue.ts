@@ -10,6 +10,13 @@ export type { ProcessJob, ProcessJobStatus } from "./db.js";
 
 export const SAMPLE_PROCESSED_EVENT = "glane:sample-processed";
 
+const PROCESSING_TAGS = [
+  "processing:pending",
+  "processing:running",
+  "processing:done",
+  "processing:error",
+] as const;
+
 export type ProcessQueueSnapshot = {
   pending: number;
   running: number;
@@ -22,6 +29,34 @@ export type ProcessQueueSnapshot = {
 };
 
 type Listener = (snap: ProcessQueueSnapshot) => void;
+
+export function isProcessingBusy(tags: readonly string[] | undefined): boolean {
+  const t = tags ?? [];
+  return (
+    t.includes("processing:pending") || t.includes("processing:running")
+  );
+}
+
+export function isProcessingError(tags: readonly string[] | undefined): boolean {
+  return (tags ?? []).includes("processing:error");
+}
+
+function stripProcessingTags(tags: readonly string[]): string[] {
+  return tags.filter(
+    (t) => !(PROCESSING_TAGS as readonly string[]).includes(t),
+  );
+}
+
+function inferKind(sample: {
+  class?: string;
+  tags?: string[];
+  name?: string;
+}): ProcessJob["kind"] {
+  if (sample.class === "texture" || sample.class === "noise") return "texture";
+  if ((sample.tags ?? []).includes("texture")) return "texture";
+  if (sample.name?.includes(" · texture · ")) return "texture";
+  return "oneshot";
+}
 
 /**
  * Persistent polish queue (Dexie). Survives F5 / navigation.
@@ -72,6 +107,18 @@ export const processQueue = (() => {
     };
   }
 
+  async function setSampleProcessingTag(
+    sampleId: string,
+    status: "pending" | "running" | "done" | "error",
+  ): Promise<void> {
+    const sample = await db.samples.get(sampleId);
+    if (!sample) return;
+    await db.samples.update(sampleId, {
+      tags: [...stripProcessingTags(sample.tags ?? []), `processing:${status}`],
+      updatedAt: nowIso(),
+    });
+  }
+
   function ensureWorker(): Worker {
     if (worker) return worker;
     worker = new Worker(new URL("./process-worker.ts", import.meta.url), {
@@ -81,12 +128,47 @@ export const processQueue = (() => {
       void onWorkerMessage(ev.data);
     };
     worker.onerror = () => {
-      pumping = false;
-      currentSampleId = null;
-      emit();
-      void pump();
+      const sid = currentSampleId;
+      void (async () => {
+        if (sid) {
+          const job = await db.processJobs
+            .where("sampleId")
+            .equals(sid)
+            .filter((j) => j.status === "running")
+            .first();
+          if (job) {
+            const { error: _drop, ...rest } = job;
+            await db.processJobs.put({
+              ...rest,
+              status: "error",
+              error: "worker crash",
+              updatedAt: nowIso(),
+            });
+            await setSampleProcessingTag(sid, "error");
+          }
+        }
+        pumping = false;
+        currentSampleId = null;
+        emit();
+        void pump();
+      })();
     };
     return worker;
+  }
+
+  async function failJob(job: ProcessJob, message: string): Promise<void> {
+    const { error: _drop, ...rest } = job;
+    await db.processJobs.put({
+      ...rest,
+      status: "error",
+      error: message,
+      updatedAt: nowIso(),
+    });
+    await setSampleProcessingTag(job.sampleId, "error");
+    pumping = false;
+    currentSampleId = null;
+    emit();
+    void pump();
   }
 
   async function onWorkerMessage(msg: ProcessWorkerResponse): Promise<void> {
@@ -99,16 +181,7 @@ export const processQueue = (() => {
     }
 
     if (msg.type === "error") {
-      await db.processJobs.put({
-        ...job,
-        status: "error",
-        error: msg.message,
-        updatedAt: nowIso(),
-      });
-      pumping = false;
-      currentSampleId = null;
-      emit();
-      void pump();
+      await failJob(job, msg.message);
       return;
     }
 
@@ -118,12 +191,7 @@ export const processQueue = (() => {
 
     const sample = await db.samples.get(msg.sampleId);
     if (sample) {
-      const prevTags = (sample.tags ?? []).filter(
-        (t) =>
-          t !== "processing:pending" &&
-          t !== "processing:running" &&
-          t !== "processing:done",
-      );
+      const prevTags = stripProcessingTags(sample.tags ?? []);
       const tags = [
         ...prevTags,
         ...msg.tags.filter((t) => !prevTags.includes(t)),
@@ -182,35 +250,11 @@ export const processQueue = (() => {
 
     const audio = await sampleOpfs.loadPcm(job.sampleId);
     if (!audio || audio.pcm.length === 0) {
-      await db.processJobs.put({
-        ...job,
-        status: "error",
-        error: "PCM manquant",
-        updatedAt: nowIso(),
-      });
-      pumping = false;
-      currentSampleId = null;
-      emit();
-      void pump();
+      await failJob(job, "PCM manquant");
       return;
     }
 
-    const sample = await db.samples.get(job.sampleId);
-    if (sample) {
-      const tags = [
-        ...(sample.tags ?? []).filter(
-          (t) =>
-            t !== "processing:pending" &&
-            t !== "processing:done" &&
-            t !== "processing:running",
-        ),
-        "processing:running",
-      ];
-      await db.samples.update(job.sampleId, {
-        tags,
-        updatedAt: nowIso(),
-      });
-    }
+    await setSampleProcessingTag(job.sampleId, "running");
 
     const w = ensureWorker();
     const copy = new Float32Array(audio.pcm);
@@ -263,6 +307,71 @@ export const processQueue = (() => {
     }
   }
 
+  /** Align sample tags with jobs stuck in error (e.g. after older builds). */
+  async function syncErrorTags(): Promise<void> {
+    const errors = await db.processJobs.where("status").equals("error").toArray();
+    for (const j of errors) {
+      const sample = await db.samples.get(j.sampleId);
+      if (!sample || sample.deletedAt) continue;
+      const tags = sample.tags ?? [];
+      if (tags.includes("processing:done") || tags.includes("processing:error")) {
+        continue;
+      }
+      if (
+        tags.includes("processing:pending") ||
+        tags.includes("processing:running") ||
+        !tags.some((t) => t.startsWith("processing:"))
+      ) {
+        await setSampleProcessingTag(j.sampleId, "error");
+      }
+    }
+  }
+
+  async function requeueSample(sampleId: string): Promise<boolean> {
+    const sample = await db.samples.get(sampleId);
+    if (!sample || sample.deletedAt) return false;
+
+    const jobs = await db.processJobs
+      .where("sampleId")
+      .equals(sampleId)
+      .toArray();
+    const open = jobs.find(
+      (j) => j.status === "pending" || j.status === "running",
+    );
+    if (open) {
+      await setSampleProcessingTag(sampleId, open.status === "running" ? "running" : "pending");
+      emit();
+      if (started) void pump();
+      return true;
+    }
+
+    const errorJobs = jobs
+      .filter((j) => j.status === "error")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const newest = errorJobs[0];
+    const kind = newest?.kind ?? inferKind(sample);
+
+    if (errorJobs.length > 1) {
+      await db.processJobs.bulkDelete(errorJobs.slice(1).map((j) => j.id));
+    }
+
+    if (newest) {
+      const { error: _drop, ...rest } = newest;
+      await db.processJobs.put({
+        ...rest,
+        status: "pending",
+        updatedAt: nowIso(),
+      });
+    } else {
+      await putPendingJob(sampleId, kind);
+    }
+
+    await setSampleProcessingTag(sampleId, "pending");
+    emit();
+    if (started) void pump();
+    return true;
+  }
+
   return {
     subscribe(fn: Listener): () => void {
       listeners.add(fn);
@@ -284,6 +393,7 @@ export const processQueue = (() => {
       for (const j of stuck) {
         await db.processJobs.put({ ...j, status: "pending", updatedAt: now });
       }
+      await syncErrorTags();
       await repairMissingPeakNorm();
       emit();
       void pump();
@@ -297,6 +407,52 @@ export const processQueue = (() => {
       emit();
       if (started) void pump();
       return job;
+    },
+
+    /** Re-queue one sample after a polish error or stuck unfinished state. */
+    async retrySample(sampleId: string): Promise<boolean> {
+      return requeueSample(sampleId);
+    },
+
+    /**
+     * Re-queue all polish jobs in error, plus samples tagged unfinished
+     * without an open job (pending/running/error).
+     */
+    async retryUnfinished(): Promise<number> {
+      const seen = new Set<string>();
+      let n = 0;
+
+      const errors = await db.processJobs
+        .where("status")
+        .equals("error")
+        .toArray();
+      for (const j of errors) {
+        if (seen.has(j.sampleId)) continue;
+        seen.add(j.sampleId);
+        if (await requeueSample(j.sampleId)) n++;
+      }
+
+      const samples = await db.samples.toArray();
+      for (const s of samples) {
+        if (s.deletedAt || seen.has(s.id)) continue;
+        const tags = s.tags ?? [];
+        if (tags.includes("processing:done")) continue;
+        const unfinished =
+          tags.includes("processing:error") ||
+          tags.includes("processing:pending") ||
+          tags.includes("processing:running");
+        if (!unfinished) continue;
+        const open = await db.processJobs
+          .where("sampleId")
+          .equals(s.id)
+          .filter((j) => j.status === "pending" || j.status === "running")
+          .first();
+        if (open) continue;
+        seen.add(s.id);
+        if (await requeueSample(s.id)) n++;
+      }
+
+      return n;
     },
 
     snapshot,

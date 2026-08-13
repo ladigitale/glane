@@ -25,9 +25,24 @@ import {
   withClapCohesion,
   type SampleMlCues,
 } from "./generative-cues";
+import {
+  MUSIC_STYLE_PROFILES,
+  buildStyleMotif,
+  pickMusicStyle,
+  resolveStyleBiasedSlider,
+  type GenMusicStyleChoice,
+  type GrooveKind,
+  type MusicStyleId,
+} from "./generative-styles";
 
 export type { ExprRole };
 export type { SampleMlCues };
+export type {
+  GenMusicStyleChoice,
+  GrooveKind,
+  MusicStyleId,
+} from "./generative-styles";
+export { MUSIC_STYLE_IDS, MUSIC_STYLE_PROFILES } from "./generative-styles";
 export {
   parseStemFromTags,
   parseYamnetSlugs,
@@ -79,8 +94,6 @@ export function probabilisticPlacement(opts: {
   return out;
 }
 
-export type GrooveKind = "straight" | "shuffle" | "half-time";
-
 /** Explicit lock vs seed-driven pick. */
 export type GenAuto = "auto";
 export type GenTriState = GenAuto | "on" | "off";
@@ -98,12 +111,20 @@ export type SequenceSampleIn = {
   /** Detected seamless loop region on the sample (ms). */
   loopStartMs?: number;
   loopEndMs?: number;
+  /** Crossfade length for seamless loop playback (ms). */
+  loopXfadeMs?: number;
   pitchHz?: number;
   noteName?: string;
   harmonicity?: number;
   centroidHz?: number;
   transientDensity?: number;
   analysisBpm?: number;
+  /** Integrated loudness (LUFS) from analysis. */
+  lufs?: number;
+  /** True-peak (dBTP) from analysis. */
+  peakDbtp?: number;
+  /** Soft classifier votes (sample.classScores). */
+  classScores?: Record<string, number>;
   forceRole?: ExprRole | null;
   tags?: string[];
   /** T2 ML / library enrichment (YAMNet, Demucs, CLAP, interest). */
@@ -166,6 +187,92 @@ type SongSection = {
   fillLastBar: boolean;
   altSample: boolean;
 };
+
+/**
+ * Widen quiet↔loud contrast: energy still lifts overall, but sparse sections
+ * stay sparse and choruses stay denser than a flat multiplier would allow.
+ */
+function sectionDensityBoost(base: number, energy: number): number {
+  const e = clamp(energy, 0, 1);
+  if (base < 0.55) {
+    // Quiet sections: mild lift only
+    return clamp(base * (0.85 + e * 0.25), 0.12, 0.7);
+  }
+  if (base > 1) {
+    // Peaks: push further with energy
+    return clamp(base * (0.9 + e * 0.35), 0.9, 1.55);
+  }
+  return clamp(base * (0.8 + e * 0.4), 0.4, 1.25);
+}
+
+/**
+ * Soft gate: should this role place hits on this bar of the section?
+ * Creates audible silence / strip-downs (intro entrance, bridge drop, outro fade).
+ */
+function sectionAllowsRole(
+  role: ExprRole,
+  section: SongSection,
+  barInSection: number,
+  energy: number,
+  rnd: () => number,
+): boolean {
+  const { kind, bars } = section;
+  const progress =
+    bars <= 1 ? 0.5 : clamp(barInSection / Math.max(1, bars - 1), 0, 1);
+  const e = clamp(energy, 0, 1);
+
+  switch (kind) {
+    case "intro": {
+      // Progressive entrance — space first, kit & lead later
+      if (role === "fx") return rnd() < 0.2 + e * 0.15;
+      if (role === "snare") return progress > 0.55 && rnd() < 0.25 + e * 0.2;
+      if (role === "hat") return progress > 0.35 && rnd() < 0.3 + e * 0.25;
+      if (role === "kick" || role === "perc")
+        return progress > 0.15 || rnd() < 0.35 + e * 0.2;
+      if (role === "lead") return progress > 0.6 && rnd() < 0.28 + e * 0.22;
+      if (role === "chord") return rnd() < 0.4 + e * 0.15;
+      if (role === "bass") return progress > 0.1 || rnd() < 0.55;
+      // texture / loop: often present but thinned by density + stride
+      return rnd() < 0.7 + e * 0.15;
+    }
+    case "verse": {
+      if (role === "lead") return rnd() < 0.45 + e * 0.3;
+      if (role === "fx") return rnd() < 0.3 + e * 0.2;
+      if (role === "hat") return rnd() < 0.75 + e * 0.15;
+      return true;
+    }
+    case "prechorus": {
+      // Build: almost full, lead still restrained
+      if (role === "lead") return rnd() < 0.55 + e * 0.3;
+      if (role === "fx") return rnd() < 0.4 + e * 0.25;
+      return true;
+    }
+    case "chorus":
+      return true;
+    case "bridge": {
+      // Breakdown / drop: strip kit & bass, keep beds + colour
+      if (role === "kick" || role === "snare")
+        return rnd() < 0.12 + e * 0.12;
+      if (role === "hat") return rnd() < 0.18 + e * 0.15;
+      if (role === "perc") return rnd() < 0.3 + e * 0.2;
+      if (role === "bass") return rnd() < 0.35 + e * 0.2;
+      if (role === "chord") return rnd() < 0.55 + e * 0.2;
+      return true;
+    }
+    case "outro": {
+      // Progressive exit — more silence toward the end
+      const keep = 1 - progress * 0.9;
+      if (isDrumRole(role)) return rnd() < keep * (0.35 + e * 0.2);
+      if (role === "lead") return rnd() < keep * 0.35;
+      if (role === "bass" || role === "chord")
+        return rnd() < keep * 0.55 + 0.1;
+      if (role === "fx") return rnd() < keep * 0.4;
+      return rnd() < keep + 0.2;
+    }
+    default:
+      return true;
+  }
+}
 
 type MotifHit = { tickInBar: number; gainDb: number; accent: boolean };
 
@@ -282,7 +389,11 @@ function resolveSlider(
   return clamp(value, lo, hi);
 }
 
-function pickGroove(rnd: () => number): GrooveKind {
+function pickGroove(rnd: () => number, styleGroove?: GrooveKind): GrooveKind {
+  if (styleGroove) {
+    // Keep style lean most of the time; rare seed variation.
+    if (rnd() < 0.82) return styleGroove;
+  }
   const r = rnd();
   if (r < 0.55) return "straight";
   if (r < 0.8) return "shuffle";
@@ -316,6 +427,26 @@ function isMelodicRole(role: ExprRole): boolean {
   return role === "bass" || role === "chord" || role === "lead";
 }
 
+function dominantSampleClass(s: SequenceSampleIn): string {
+  const scores = s.classScores;
+  if (!scores) return s.class;
+  let best = s.class;
+  let bestW = -1;
+  for (const [k, v] of Object.entries(scores)) {
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
+    if (v > bestW) {
+      bestW = v;
+      best = k;
+    }
+  }
+  // Only override stored class when the soft vote is clearly ahead.
+  if (bestW >= 0.45 && best !== s.class) {
+    const stored = scores[s.class] ?? 0;
+    if (bestW >= stored + 0.12) return best;
+  }
+  return s.class;
+}
+
 /**
  * Map library sample → kit / instrument role from class + analysis cues.
  * Conservative on field captures: prefer texture/loop/fx unless cues are strong.
@@ -326,7 +457,7 @@ export function inferExprRole(s: SequenceSampleIn): ExprRole {
   const harm = s.harmonicity ?? 0;
   const td = s.transientDensity ?? 0;
   const midi = sampleSourceMidi(s);
-  const cls = s.class;
+  const cls = dominantSampleClass(s);
   const short = dur > 0 && dur < 220;
   const midShort = dur > 0 && dur < 420;
   const long = dur >= 900;
@@ -474,8 +605,10 @@ function paletteFromMix(
   drumsVsTexture: number,
   rnd: () => number,
   forced?: GenPaletteChoice,
+  stylePalette?: HarmonicPalette,
 ): HarmonicPalette {
   if (forced && forced !== "auto") return forced;
+  if (stylePalette && rnd() < 0.78) return stylePalette;
   if (drumsVsTexture < 0.35) return rnd() < 0.7 ? "ambient" : "modal";
   if (drumsVsTexture > 0.7) return rnd() < 0.55 ? "pop" : "mixed";
   if (rnd() < 0.25) return "jazz";
@@ -494,6 +627,7 @@ export function planSongForm(
     drumsVsTexture?: number;
     energy?: number;
     formStyle?: GenFormStyle;
+    formLean?: "song" | "ambient";
   },
 ): SongSection[] {
   if (bars < 1) return [];
@@ -505,7 +639,11 @@ export function planSongForm(
       ? true
       : form === "song"
         ? false
-        : dvt < 0.4;
+        : opts?.formLean === "ambient"
+          ? true
+          : opts?.formLean === "song"
+            ? false
+            : dvt < 0.4;
 
   type Unit = {
     kind: SectionKind;
@@ -517,8 +655,7 @@ export function planSongForm(
     altSample: boolean;
   };
 
-  const eBoost = (base: number) =>
-    clamp(base * (0.75 + energy * 0.5), 0.25, 1.4);
+  const eBoost = (base: number) => sectionDensityBoost(base, energy);
 
   let units: Unit[];
   if (ambient) {
@@ -528,26 +665,26 @@ export function planSongForm(
             {
               kind: "intro",
               weight: 2,
-              densityMul: eBoost(0.35),
-              gainBiasDb: -3,
-              evolve: 0.2,
+              densityMul: eBoost(0.22),
+              gainBiasDb: -5.5,
+              evolve: 0.12,
               fillLastBar: false,
               altSample: false,
             },
             {
               kind: "verse",
               weight: 4,
-              densityMul: eBoost(0.55),
-              gainBiasDb: -1,
-              evolve: 0.35,
+              densityMul: eBoost(0.5),
+              gainBiasDb: -1.5,
+              evolve: 0.3,
               fillLastBar: false,
               altSample: true,
             },
             {
               kind: "chorus",
               weight: 3,
-              densityMul: eBoost(0.7),
-              gainBiasDb: 0.5,
+              densityMul: eBoost(0.85),
+              gainBiasDb: 1.5,
               evolve: 0.4,
               fillLastBar: false,
               altSample: false,
@@ -555,9 +692,9 @@ export function planSongForm(
             {
               kind: "outro",
               weight: 2,
-              densityMul: eBoost(0.3),
-              gainBiasDb: -2.5,
-              evolve: 0.5,
+              densityMul: eBoost(0.2),
+              gainBiasDb: -5,
+              evolve: 0.45,
               fillLastBar: false,
               altSample: true,
             },
@@ -566,35 +703,35 @@ export function planSongForm(
             {
               kind: "intro",
               weight: 3,
-              densityMul: eBoost(0.3),
-              gainBiasDb: -4,
-              evolve: 0.15,
+              densityMul: eBoost(0.18),
+              gainBiasDb: -6.5,
+              evolve: 0.1,
               fillLastBar: false,
               altSample: false,
             },
             {
               kind: "verse",
               weight: 5,
-              densityMul: eBoost(0.5),
-              gainBiasDb: -1.5,
-              evolve: 0.3,
+              densityMul: eBoost(0.45),
+              gainBiasDb: -2,
+              evolve: 0.28,
               fillLastBar: false,
               altSample: true,
             },
             {
               kind: "bridge",
               weight: 4,
-              densityMul: eBoost(0.45),
-              gainBiasDb: 0,
-              evolve: 0.65,
+              densityMul: eBoost(0.28),
+              gainBiasDb: -3.5,
+              evolve: 0.55,
               fillLastBar: false,
               altSample: true,
             },
             {
               kind: "chorus",
               weight: 4,
-              densityMul: eBoost(0.75),
-              gainBiasDb: 1,
+              densityMul: eBoost(0.9),
+              gainBiasDb: 2,
               evolve: 0.45,
               fillLastBar: true,
               altSample: false,
@@ -602,9 +739,9 @@ export function planSongForm(
             {
               kind: "outro",
               weight: 3,
-              densityMul: eBoost(0.28),
-              gainBiasDb: -3,
-              evolve: 0.55,
+              densityMul: eBoost(0.18),
+              gainBiasDb: -5.5,
+              evolve: 0.5,
               fillLastBar: false,
               altSample: true,
             },
@@ -614,18 +751,18 @@ export function planSongForm(
       {
         kind: "verse",
         weight: 2,
-        densityMul: eBoost(0.75),
-        gainBiasDb: -1,
-        evolve: 0.15,
+        densityMul: eBoost(0.65),
+        gainBiasDb: -2,
+        evolve: 0.12,
         fillLastBar: false,
         altSample: false,
       },
       {
         kind: "chorus",
         weight: 2,
-        densityMul: eBoost(1.05),
-        gainBiasDb: 1.2,
-        evolve: 0.25,
+        densityMul: eBoost(1.15),
+        gainBiasDb: 2.2,
+        evolve: 0.28,
         fillLastBar: true,
         altSample: false,
       },
@@ -635,44 +772,44 @@ export function planSongForm(
       {
         kind: "intro",
         weight: 1,
-        densityMul: eBoost(0.45),
-        gainBiasDb: -3,
-        evolve: 0.1,
+        densityMul: eBoost(0.28),
+        gainBiasDb: -5.5,
+        evolve: 0.08,
         fillLastBar: false,
         altSample: false,
       },
       {
         kind: "verse",
         weight: 2,
-        densityMul: eBoost(0.8),
-        gainBiasDb: -0.5,
-        evolve: 0.2,
+        densityMul: eBoost(0.7),
+        gainBiasDb: -1.2,
+        evolve: 0.18,
         fillLastBar: true,
         altSample: false,
       },
       {
         kind: "chorus",
         weight: 2,
-        densityMul: eBoost(1.1),
-        gainBiasDb: 1.5,
-        evolve: 0.3,
+        densityMul: eBoost(1.2),
+        gainBiasDb: 2.4,
+        evolve: 0.32,
         fillLastBar: true,
         altSample: false,
       },
       {
         kind: "verse",
         weight: 1,
-        densityMul: eBoost(0.85),
-        gainBiasDb: 0,
-        evolve: 0.35,
+        densityMul: eBoost(0.75),
+        gainBiasDb: -0.5,
+        evolve: 0.3,
         fillLastBar: false,
         altSample: false,
       },
       {
         kind: "chorus",
         weight: 2,
-        densityMul: eBoost(1.15),
-        gainBiasDb: 1.8,
+        densityMul: eBoost(1.28),
+        gainBiasDb: 2.8,
         evolve: 0.4,
         fillLastBar: true,
         altSample: false,
@@ -683,18 +820,18 @@ export function planSongForm(
       {
         kind: "intro",
         weight: 2,
-        densityMul: eBoost(0.4),
-        gainBiasDb: -3.5,
-        evolve: 0.1,
+        densityMul: eBoost(0.25),
+        gainBiasDb: -6,
+        evolve: 0.08,
         fillLastBar: false,
         altSample: false,
       },
       {
         kind: "verse",
         weight: 4,
-        densityMul: eBoost(0.78),
-        gainBiasDb: -0.8,
-        evolve: 0.18,
+        densityMul: eBoost(0.68),
+        gainBiasDb: -1.5,
+        evolve: 0.16,
         fillLastBar: true,
         altSample: false,
       },
@@ -702,7 +839,25 @@ export function planSongForm(
         kind: "prechorus",
         weight: 2,
         densityMul: eBoost(0.95),
-        gainBiasDb: 0.4,
+        gainBiasDb: 0.6,
+        evolve: 0.38,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "chorus",
+        weight: 4,
+        densityMul: eBoost(1.22),
+        gainBiasDb: 2.6,
+        evolve: 0.3,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "verse",
+        weight: 2,
+        densityMul: eBoost(0.72),
+        gainBiasDb: -0.8,
         evolve: 0.35,
         fillLastBar: true,
         altSample: false,
@@ -710,26 +865,8 @@ export function planSongForm(
       {
         kind: "chorus",
         weight: 4,
-        densityMul: eBoost(1.15),
-        gainBiasDb: 1.6,
-        evolve: 0.28,
-        fillLastBar: true,
-        altSample: false,
-      },
-      {
-        kind: "verse",
-        weight: 2,
-        densityMul: eBoost(0.82),
-        gainBiasDb: -0.3,
-        evolve: 0.4,
-        fillLastBar: true,
-        altSample: false,
-      },
-      {
-        kind: "chorus",
-        weight: 4,
-        densityMul: eBoost(1.2),
-        gainBiasDb: 2,
+        densityMul: eBoost(1.3),
+        gainBiasDb: 3,
         evolve: 0.45,
         fillLastBar: true,
         altSample: false,
@@ -737,9 +874,9 @@ export function planSongForm(
       {
         kind: "outro",
         weight: 2,
-        densityMul: eBoost(0.55),
-        gainBiasDb: -2,
-        evolve: 0.5,
+        densityMul: eBoost(0.32),
+        gainBiasDb: -4.5,
+        evolve: 0.45,
         fillLastBar: false,
         altSample: true,
       },
@@ -749,18 +886,18 @@ export function planSongForm(
       {
         kind: "intro",
         weight: 2,
-        densityMul: eBoost(0.35),
-        gainBiasDb: -4,
-        evolve: 0.08,
+        densityMul: eBoost(0.22),
+        gainBiasDb: -6.5,
+        evolve: 0.06,
         fillLastBar: false,
         altSample: false,
       },
       {
         kind: "verse",
         weight: 4,
-        densityMul: eBoost(0.75),
-        gainBiasDb: -1,
-        evolve: 0.15,
+        densityMul: eBoost(0.65),
+        gainBiasDb: -1.8,
+        evolve: 0.14,
         fillLastBar: true,
         altSample: false,
       },
@@ -768,34 +905,34 @@ export function planSongForm(
         kind: "prechorus",
         weight: 2,
         densityMul: eBoost(0.95),
-        gainBiasDb: 0.5,
-        evolve: 0.32,
+        gainBiasDb: 0.8,
+        evolve: 0.35,
         fillLastBar: true,
         altSample: false,
       },
       {
         kind: "chorus",
         weight: 4,
-        densityMul: eBoost(1.12),
-        gainBiasDb: 1.5,
-        evolve: 0.25,
+        densityMul: eBoost(1.2),
+        gainBiasDb: 2.5,
+        evolve: 0.28,
         fillLastBar: true,
         altSample: false,
       },
       {
         kind: "verse",
         weight: 4,
-        densityMul: eBoost(0.8),
-        gainBiasDb: -0.5,
-        evolve: 0.38,
+        densityMul: eBoost(0.7),
+        gainBiasDb: -1,
+        evolve: 0.35,
         fillLastBar: true,
         altSample: false,
       },
       {
         kind: "chorus",
         weight: 4,
-        densityMul: eBoost(1.18),
-        gainBiasDb: 1.8,
+        densityMul: eBoost(1.28),
+        gainBiasDb: 2.8,
         evolve: 0.4,
         fillLastBar: true,
         altSample: false,
@@ -803,17 +940,17 @@ export function planSongForm(
       {
         kind: "bridge",
         weight: 4,
-        densityMul: eBoost(0.7),
-        gainBiasDb: 0.2,
-        evolve: 0.7,
-        fillLastBar: true,
+        densityMul: eBoost(0.32),
+        gainBiasDb: -3.5,
+        evolve: 0.55,
+        fillLastBar: false,
         altSample: true,
       },
       {
         kind: "chorus",
         weight: 4,
-        densityMul: eBoost(1.25),
-        gainBiasDb: 2.2,
+        densityMul: eBoost(1.35),
+        gainBiasDb: 3.2,
         evolve: 0.5,
         fillLastBar: true,
         altSample: false,
@@ -821,9 +958,9 @@ export function planSongForm(
       {
         kind: "outro",
         weight: 2,
-        densityMul: eBoost(0.45),
-        gainBiasDb: -2.5,
-        evolve: 0.55,
+        densityMul: eBoost(0.28),
+        gainBiasDb: -5,
+        evolve: 0.5,
         fillLastBar: false,
         altSample: true,
       },
@@ -917,88 +1054,9 @@ function buildMotif(
   ppq: number,
   rnd: () => number,
   groove: GrooveKind,
+  musicStyle: MusicStyleId,
 ): MotifHit[] {
-  const tpb = beatsPerBar * ppq;
-  const hits: MotifHit[] = [];
-  const push = (tickInBar: number, gainDb: number, accent: boolean) => {
-    const t = applyGroove(tickInBar, groove, beatsPerBar, ppq);
-    hits.push({ tickInBar: t, gainDb, accent });
-  };
-
-  if (role === "kick") {
-    const style = rnd();
-    if (groove === "half-time") {
-      push(0, 1, true);
-      if (beatsPerBar >= 4 && rnd() < 0.5) push(2 * ppq, 0.2, false);
-    } else if (style < 0.35) {
-      push(0, 0.8, true);
-      if (beatsPerBar >= 3) push(2 * ppq, 0.4, true);
-    } else if (style < 0.65) {
-      for (let b = 0; b < beatsPerBar; b++)
-        push(b * ppq, b === 0 ? 1 : 0.2, b % 2 === 0);
-    } else {
-      push(0, 1, true);
-      push(Math.floor(1.5 * ppq), -0.5, false);
-      if (beatsPerBar >= 4) {
-        push(2 * ppq, 0.3, true);
-        push(Math.floor(3.5 * ppq), -0.8, false);
-      }
-    }
-  } else if (role === "snare") {
-    if (groove === "half-time" && beatsPerBar >= 4) {
-      push(2 * ppq, 0.7, true);
-      if (rnd() < 0.3) push(Math.floor(3.5 * ppq), -2, false);
-    } else if (beatsPerBar >= 4) {
-      push(ppq, 0.6, true);
-      push(3 * ppq, 0.8, true);
-      if (rnd() < 0.4) push(Math.floor(2.5 * ppq), -2.5, false);
-    } else {
-      push(Math.floor(beatsPerBar / 2) * ppq, 0.5, true);
-    }
-  } else if (role === "hat") {
-    const step =
-      groove === "half-time"
-        ? ppq
-        : rnd() < 0.55
-          ? Math.floor(ppq / 2)
-          : Math.floor(ppq / 4);
-    for (let t = 0; t < tpb; t += Math.max(1, step)) {
-      const onBeat = t % ppq === 0;
-      push(t, onBeat ? -1.5 : -3.5, onBeat);
-    }
-  } else if (role === "perc") {
-    const offs = [0, Math.floor(1.5 * ppq), 2 * ppq, Math.floor(3.25 * ppq)];
-    for (const o of offs) {
-      if (o < tpb && rnd() < 0.7) push(o, (rnd() * 2 - 1) * 2, o === 0);
-    }
-  } else if (role === "bass") {
-    push(0, 0.5, true);
-    if (beatsPerBar >= 3 && rnd() < 0.7) push(2 * ppq, -0.5, false);
-    if (rnd() < 0.35) push(Math.floor(1.5 * ppq), -1.5, false);
-  } else if (role === "chord") {
-    push(0, 0, true);
-    if (rnd() < 0.3) push(2 * ppq, -1, false);
-  } else if (role === "lead") {
-    // Motif skeleton; melodic cell may replace in planSequence
-    const steps =
-      rnd() < 0.5
-        ? [0, ppq, 2 * ppq, 3 * ppq]
-        : [0, Math.floor(1.5 * ppq), 2 * ppq, Math.floor(3.5 * ppq)];
-    for (const o of steps) {
-      if (o < tpb && rnd() < 0.75) push(o, (rnd() * 2 - 1) * 1.5, o === 0);
-    }
-  } else if (role === "loop") {
-    push(0, 0, true);
-  } else if (role === "texture") {
-    push(0, -1, true);
-  } else {
-    if (rnd() < 0.6) push(0, -2, false);
-    if (rnd() < 0.4) push(Math.floor(tpb / 2), -3, false);
-  }
-
-  if (hits.length === 0) push(0, 0, true);
-  hits.sort((a, b) => a.tickInBar - b.tickInBar);
-  return hits;
+  return buildStyleMotif(musicStyle, role, beatsPerBar, ppq, rnd, groove);
 }
 
 /** Call–response: shift hits by half-bar relative to partner motif. */
@@ -1051,6 +1109,8 @@ function evolveMotifHits(
     density: number;
     energy: number;
     rnd: () => number;
+    /** When true, empty kit motifs stay empty (classical / ambient). */
+    allowEmptyKit?: boolean;
   },
 ): MotifHit[] {
   const {
@@ -1062,86 +1122,148 @@ function evolveMotifHits(
     density,
     energy,
     rnd,
+    allowEmptyKit,
   } = opts;
   const tpb = beatsPerBar * ppq;
   const last = barInSection === section.bars - 1;
   let hits = motif.map((h) => ({ ...h }));
   const dens = section.densityMul * density;
 
+  if (allowEmptyKit && motif.length === 0 && isDrumRole(role)) {
+    return [];
+  }
+
   hits = hits.filter((h) => {
-    if (h.accent && dens >= 0.55) return true;
+    // Accents stay reliable only in denser sections — quiet sections can drop them
+    if (h.accent) {
+      if (dens >= 0.7) return true;
+      if (dens >= 0.45) return rnd() < dens + 0.35;
+      return rnd() < dens + 0.15;
+    }
     return rnd() < dens;
   });
 
   if (section.kind === "intro") {
     if (role === "hat")
-      hits = hits.filter((h) => h.tickInBar % ppq === 0 || rnd() < 0.25);
-    if (role === "snare" && barInSection === 0) hits = [];
+      hits = hits.filter((h) => h.tickInBar % ppq === 0 || rnd() < 0.18);
+    if (role === "snare") hits = hits.filter((h) => h.accent && rnd() < 0.4);
+    if (role === "kick")
+      hits = hits.filter((h) => h.accent || rnd() < 0.25 + energy * 0.15);
     if (role === "lead" || role === "chord") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.35);
+      hits = hits.filter((h) => h.accent || rnd() < 0.22);
+    }
+    if (role === "perc" || role === "fx") {
+      hits = hits.filter(() => rnd() < 0.35);
+    }
+  }
+
+  if (section.kind === "verse") {
+    if (role === "hat" && dens < 0.85) {
+      hits = hits.filter((h) => h.accent || h.tickInBar % ppq === 0 || rnd() < 0.45);
+    }
+    if (role === "lead") {
+      hits = hits.filter((h) => h.accent || rnd() < 0.4 + energy * 0.2);
     }
   }
 
   if (section.kind === "prechorus") {
     hits = hits.map((h) => ({
       ...h,
-      gainDb: h.gainDb + 0.4 * (barInSection + 1) * energy,
+      gainDb: h.gainDb + 0.55 * (barInSection + 1) * energy,
     }));
-  }
-
-  if (section.kind === "chorus") {
-    if (role === "hat" && rnd() < 0.4 + energy * 0.4) {
-      const step = Math.floor(ppq / 4);
-      for (let t = 0; t < tpb; t += step) {
+    // Rising hats / perc toward chorus
+    if ((role === "hat" || role === "perc") && rnd() < 0.35 + energy * 0.3) {
+      const step = Math.floor(ppq / 2);
+      for (let t = 0; t < tpb; t += Math.max(1, step)) {
         if (!hits.some((h) => Math.abs(h.tickInBar - t) < 2)) {
-          hits.push({ tickInBar: t, gainDb: -4, accent: false });
+          hits.push({ tickInBar: t, gainDb: -3.5, accent: false });
         }
       }
     }
-    if (role === "kick" && section.evolve > 0.35 && rnd() < 0.35 + energy * 0.2) {
+  }
+
+  if (section.kind === "chorus") {
+    if (role === "hat" && rnd() < 0.5 + energy * 0.35) {
+      const step = Math.floor(ppq / 4);
+      for (let t = 0; t < tpb; t += step) {
+        if (!hits.some((h) => Math.abs(h.tickInBar - t) < 2)) {
+          hits.push({ tickInBar: t, gainDb: -3.5, accent: false });
+        }
+      }
+    }
+    if (role === "kick" && section.evolve > 0.3 && rnd() < 0.4 + energy * 0.25) {
       hits.push({
         tickInBar: Math.floor(3.5 * ppq) % tpb,
         gainDb: -1,
         accent: false,
       });
     }
+    if (role === "perc" && rnd() < 0.3 + energy * 0.2) {
+      hits.push({
+        tickInBar: Math.floor(1.75 * ppq) % tpb,
+        gainDb: -2,
+        accent: false,
+      });
+    }
   }
 
   if (section.kind === "bridge") {
-    if (role === "kick" || role === "snare") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.35);
+    // Hard strip kit — leave accents rarely
+    if (role === "kick" || role === "snare" || role === "hat") {
+      hits = hits.filter((h) => h.accent && rnd() < 0.25 + energy * 0.15);
+    }
+    if (role === "bass") {
+      hits = hits.filter((h) => h.accent || rnd() < 0.3);
     }
     if (role === "lead" || role === "chord") {
-      if (rnd() < 0.5) {
+      hits = hits.filter((h) => h.accent || rnd() < 0.45);
+      if (rnd() < 0.35) {
         hits.push({
           tickInBar: Math.floor(1.5 * ppq) % tpb,
-          gainDb: -1,
+          gainDb: -1.5,
           accent: false,
         });
       }
     }
+    if (role === "texture" || role === "loop") {
+      hits = hits.filter((h) => h.accent || rnd() < 0.55);
+    }
   }
 
   if (section.kind === "outro") {
-    const keep = 1 - (barInSection / Math.max(1, section.bars)) * 0.7;
-    hits = hits.filter((h) => h.accent || rnd() < keep);
+    const keep = 1 - (barInSection / Math.max(1, section.bars)) * 0.85;
+    hits = hits.filter((h) => h.accent || rnd() < keep * 0.7);
+    if (isDrumRole(role)) {
+      hits = hits.filter((h) => h.accent && rnd() < keep);
+    }
   }
 
   if (last && section.fillLastBar && isDrumRole(role) && energy > 0.35) {
-    const fillStep = role === "hat" ? Math.floor(ppq / 4) : Math.floor(ppq / 2);
-    const from = Math.floor(tpb * 0.5);
-    for (let t = from; t < tpb; t += Math.max(1, fillStep)) {
-      if (rnd() < 0.45 + section.evolve * 0.3 + energy * 0.15) {
-        hits.push({ tickInBar: t, gainDb: -1.5 + rnd(), accent: false });
+    // Fills only into active sections — not into quiet outros/bridges
+    if (
+      section.kind === "chorus" ||
+      section.kind === "prechorus" ||
+      section.kind === "verse"
+    ) {
+      const fillStep =
+        role === "hat" ? Math.floor(ppq / 4) : Math.floor(ppq / 2);
+      const from = Math.floor(tpb * 0.5);
+      for (let t = from; t < tpb; t += Math.max(1, fillStep)) {
+        if (rnd() < 0.45 + section.evolve * 0.3 + energy * 0.15) {
+          hits.push({ tickInBar: t, gainDb: -1.5 + rnd(), accent: false });
+        }
       }
     }
   }
 
   if (section.evolve > 0.2 && rnd() < section.evolve * density) {
-    if (rnd() < 0.5 && hits.length > 1) {
+    if (rnd() < 0.55 && hits.length > 1) {
       const i = pickInt(rnd, 0, hits.length - 1);
       if (!hits[i]!.accent) hits.splice(i, 1);
-    } else if (isDrumRole(role)) {
+    } else if (
+      isDrumRole(role) &&
+      (section.kind === "chorus" || section.kind === "prechorus")
+    ) {
       hits.push({
         tickInBar: Math.floor(rnd() * tpb),
         gainDb: -3,
@@ -1150,11 +1272,19 @@ function evolveMotifHits(
     }
   }
 
+  // Foundation roles: only force a hit in active sections — silence is intentional elsewhere
   if (
     hits.length === 0 &&
     (role === "kick" || role === "bass" || role === "loop" || role === "texture")
   ) {
-    hits.push({ tickInBar: 0, gainDb: section.gainBiasDb, accent: true });
+    const forceFoundation =
+      (section.kind === "verse" ||
+        section.kind === "chorus" ||
+        section.kind === "prechorus") &&
+      dens >= 0.4;
+    if (forceFoundation) {
+      hits.push({ tickInBar: 0, gainDb: section.gainBiasDb, accent: true });
+    }
   }
 
   hits.sort((a, b) => a.tickInBar - b.tickInBar);
@@ -1185,9 +1315,36 @@ function scoreSampleForRole(s: SequenceSampleIn, role: ExprRole): number {
   if (role === "texture" || role === "loop") {
     if ((s.loopScore ?? 0) > 0.4) score -= 1.5;
     if (s.durationMs > 800) score -= 0.5;
+    if (s.loopStartMs != null && s.loopEndMs != null) score -= 0.6;
   }
   if (role === "bass" && (sampleSourceMidi(s) ?? 60) < 52) score -= 1;
   if (role === "chord" && (s.harmonicity ?? 0) > 0.35) score -= 1;
+  if (role === "lead" && (s.harmonicity ?? 0) > 0.4) score -= 0.6;
+  // Loudness / peak: prefer controlled levels for sustained roles
+  if (s.lufs != null && Number.isFinite(s.lufs)) {
+    if (role === "texture" || role === "loop" || role === "chord") {
+      if (s.lufs > -12) score += 0.4;
+      else if (s.lufs < -35) score += 0.25;
+      else score -= 0.35;
+    }
+  }
+  if (s.peakDbtp != null && Number.isFinite(s.peakDbtp)) {
+    if (isDrumRole(role) && s.peakDbtp > -1) score -= 0.35;
+    if ((role === "texture" || role === "fx") && s.peakDbtp > -0.5) score += 0.4;
+  }
+  // Soft class vote agreement
+  const scores = s.classScores;
+  if (scores) {
+    const want =
+      isDrumRole(role)
+        ? scores.percussive
+        : role === "texture" || role === "loop"
+          ? Math.max(scores.texture ?? 0, scores.rhythmic ?? 0)
+          : role === "lead" || role === "bass" || role === "chord"
+            ? Math.max(scores.tonal ?? 0, scores.voice ?? 0)
+            : undefined;
+    if (want != null && want > 0.4) score -= want;
+  }
   score += mlScoreAdjust(s, role, inferred);
   return score;
 }
@@ -1306,6 +1463,10 @@ function pickPitchSemitones(opts: {
   section: SongSection;
   energy: number;
   rnd: () => number;
+  /** Max transpose upward (semitones). */
+  maxUp: number;
+  /** Max transpose downward (semitones, positive). */
+  maxDown: number;
 }): number {
   const {
     sample,
@@ -1319,19 +1480,31 @@ function pickPitchSemitones(opts: {
     section,
     energy,
     rnd,
+    maxUp,
+    maxDown,
   } = opts;
+  const clampPitch = (semis: number) =>
+    clamp(semis, -Math.max(0, maxDown), Math.max(0, maxUp));
   const source = sampleSourceMidi(sample);
+
+  if (maxUp <= 0 && maxDown <= 0) return 0;
 
   if (isDrumRole(role) || role === "fx") {
     if (rnd() > 0.2 + energy * 0.15) return 0;
-    const span =
-      section.kind === "bridge" || section.kind === "chorus" ? 7 : 4;
-    return pickInt(rnd, -span, span);
+    const span = Math.min(
+      maxUp,
+      maxDown,
+      section.kind === "bridge" || section.kind === "chorus" ? 7 : 4,
+    );
+    if (span <= 0) return 0;
+    return clampPitch(pickInt(rnd, -span, span));
   }
 
   if (role === "texture" || role === "loop") {
     if (!isMelodicClass(sample.class, sample.harmonicity)) {
-      return rnd() < 0.25 + energy * 0.2 ? pickInt(rnd, -7, 7) : 0;
+      if (rnd() >= 0.25 + energy * 0.2) return 0;
+      const span = Math.min(7, maxUp, maxDown);
+      return span > 0 ? clampPitch(pickInt(rnd, -span, span)) : 0;
     }
   }
 
@@ -1363,11 +1536,11 @@ function pickPitchSemitones(opts: {
         : 4;
   const targetMidi = (baseOctave + octave + 1) * 12 + rootPc + degree;
   const fromMidi = source != null ? source : 60;
-  let semis = clamp(Math.round(targetMidi - fromMidi), -12, 12);
+  let semis = clampPitch(Math.round(targetMidi - fromMidi));
 
   if (semis === 0 && section.evolve > 0.3 && rnd() < section.evolve * energy) {
     const step = scale[pickInt(rnd, 1, scale.length - 1)] ?? 2;
-    semis = clamp(rnd() < 0.5 ? step : -step, -12, 12);
+    semis = clampPitch(rnd() < 0.5 ? step : -step);
   }
   return semis;
 }
@@ -1851,12 +2024,419 @@ function bpmSyncedReverbDecay(
   return clamp((targetSec - 0.6) / 2.4, 0.05, 1);
 }
 
+/** Style-driven FX envelope — damping, wetness, modulation lean. */
+type StyleFxBias = {
+  /** Center for echo/reverb HF damping (0 bright … 1 dark). */
+  dampCenter: number;
+  dampSpread: number;
+  /** How often wet inserts win over dry/EQ. */
+  wetness: number;
+  /** Prefer echo over reverb when choosing space. */
+  echoBias: number;
+  /** Prefer chorus / tremolo / vibrato. */
+  modBias: number;
+  /** Longer delay/feedback (dub, ambient beds). */
+  longEcho: boolean;
+  /** Longer reverb beat fractions. */
+  longReverb: boolean;
+};
+
+function styleFxBias(style: MusicStyleId): StyleFxBias {
+  switch (style) {
+    case "dub":
+      return {
+        dampCenter: 0.55,
+        dampSpread: 0.25,
+        wetness: 0.9,
+        echoBias: 0.85,
+        modBias: 0.15,
+        longEcho: true,
+        longReverb: true,
+      };
+    case "reggae":
+      return {
+        dampCenter: 0.45,
+        dampSpread: 0.25,
+        wetness: 0.7,
+        echoBias: 0.65,
+        modBias: 0.2,
+        longEcho: true,
+        longReverb: false,
+      };
+    case "ambient":
+    case "triphop":
+      return {
+        dampCenter: 0.6,
+        dampSpread: 0.25,
+        wetness: 0.85,
+        echoBias: 0.35,
+        modBias: 0.45,
+        longEcho: true,
+        longReverb: true,
+      };
+    case "classical":
+    case "folk":
+    case "jazz":
+    case "blues":
+      return {
+        dampCenter: 0.4,
+        dampSpread: 0.2,
+        wetness: 0.55,
+        echoBias: 0.2,
+        modBias: 0.45,
+        longEcho: false,
+        longReverb: true,
+      };
+    case "disco":
+    case "funk":
+    case "house":
+    case "pop":
+      return {
+        dampCenter: 0.3,
+        dampSpread: 0.2,
+        wetness: 0.55,
+        echoBias: 0.35,
+        modBias: 0.55,
+        longEcho: false,
+        longReverb: false,
+      };
+    case "techno":
+    case "dnb":
+    case "breakbeat":
+    case "garage":
+      return {
+        dampCenter: 0.35,
+        dampSpread: 0.25,
+        wetness: 0.5,
+        echoBias: 0.55,
+        modBias: 0.4,
+        longEcho: false,
+        longReverb: false,
+      };
+    case "metal":
+    case "punk":
+    case "rock":
+      return {
+        dampCenter: 0.25,
+        dampSpread: 0.2,
+        wetness: 0.3,
+        echoBias: 0.25,
+        modBias: 0.2,
+        longEcho: false,
+        longReverb: false,
+      };
+    case "hiphop":
+    case "latin":
+    case "afrobeat":
+      return {
+        dampCenter: 0.4,
+        dampSpread: 0.25,
+        wetness: 0.5,
+        echoBias: 0.45,
+        modBias: 0.3,
+        longEcho: false,
+        longReverb: false,
+      };
+    default:
+      return {
+        dampCenter: 0.35,
+        dampSpread: 0.25,
+        wetness: 0.5,
+        echoBias: 0.4,
+        modBias: 0.35,
+        longEcho: false,
+        longReverb: false,
+      };
+  }
+}
+
+function styleDamping(bias: StyleFxBias, rnd: () => number): number {
+  return clamp(
+    bias.dampCenter + (rnd() - 0.5) * 2 * bias.dampSpread,
+    0.05,
+    0.95,
+  );
+}
+
+function fxEq(
+  low: number,
+  mid: number,
+  high: number,
+): TrackFx {
+  return normalizeTrackFx({ type: "eq", low, mid, high });
+}
+
+function fxReverb(
+  bpm: number,
+  rnd: () => number,
+  bias: StyleFxBias,
+  mixLo: number,
+  mixHi: number,
+  beatFracs: readonly number[],
+): TrackFx {
+  const fracs = bias.longReverb
+    ? beatFracs.map((f) => f * 1.35)
+    : beatFracs;
+  return normalizeTrackFx({
+    type: "reverb",
+    mix: mixLo + rnd() * (mixHi - mixLo),
+    decay: bpmSyncedReverbDecay(bpm, rnd, fracs),
+    damping: styleDamping(bias, rnd),
+  });
+}
+
+function fxEcho(
+  bpm: number,
+  rnd: () => number,
+  bias: StyleFxBias,
+  mixLo: number,
+  mixHi: number,
+  delayChoices: readonly number[],
+  feedbackLo: number,
+  feedbackHi: number,
+): TrackFx {
+  const delays = bias.longEcho
+    ? [...delayChoices, 1.5, 2, 3].filter((d, i, a) => a.indexOf(d) === i)
+    : delayChoices;
+  const fbBoost = bias.longEcho ? 0.12 : 0;
+  return normalizeTrackFx({
+    type: "echo",
+    mix: mixLo + rnd() * (mixHi - mixLo),
+    delayBeats: pickBeatFrac(rnd, delays),
+    feedback: clamp(
+      feedbackLo + rnd() * (feedbackHi - feedbackLo) + fbBoost,
+      0,
+      0.9,
+    ),
+    damping: styleDamping(bias, rnd),
+  });
+}
+
+function fxChorus(rnd: () => number, bias: StyleFxBias, wet: boolean): TrackFx {
+  const slow = bias.longReverb || bias.dampCenter >= 0.5;
+  return normalizeTrackFx({
+    type: "chorus",
+    mix: (wet ? 0.28 : 0.2) + rnd() * 0.3,
+    rateHz: slow ? 0.25 + rnd() * 1.1 : 0.5 + rnd() * 2.2,
+    depth: 0.3 + rnd() * 0.45,
+  });
+}
+
+function fxTremolo(rnd: () => number, energetic: boolean): TrackFx {
+  return normalizeTrackFx({
+    type: "tremolo",
+    rateHz: energetic ? 4 + rnd() * 6 : 1.5 + rnd() * 4,
+    depth: 0.25 + rnd() * 0.45,
+  });
+}
+
+function fxVibrato(rnd: () => number, lyrical: boolean): TrackFx {
+  return normalizeTrackFx({
+    type: "vibrato",
+    rateHz: lyrical ? 4.5 + rnd() * 3.5 : 3 + rnd() * 5,
+    depth: lyrical ? 0.35 + rnd() * 0.4 : 0.2 + rnd() * 0.35,
+  });
+}
+
+function pickSpaceFx(
+  bpm: number,
+  rnd: () => number,
+  bias: StyleFxBias,
+  mixLo: number,
+  mixHi: number,
+  reverbBeats: readonly number[],
+  echoDelays: readonly number[],
+  echoFb: readonly [number, number],
+): TrackFx {
+  if (rnd() < bias.echoBias) {
+    return fxEcho(
+      bpm,
+      rnd,
+      bias,
+      mixLo,
+      mixHi,
+      echoDelays,
+      echoFb[0],
+      echoFb[1],
+    );
+  }
+  return fxReverb(bpm, rnd, bias, mixLo, mixHi, reverbBeats);
+}
+
+function pickRoleFx(
+  role: ExprRole,
+  bpm: number,
+  energy: number,
+  style: MusicStyleId,
+  rnd: () => number,
+): TrackFx {
+  const bias = styleFxBias(style);
+  const wetP = clamp(bias.wetness * (0.75 + energy * 0.35), 0.08, 0.95);
+  const modP = clamp(bias.modBias * (0.7 + energy * 0.4), 0.05, 0.85);
+  const lyrical =
+    style === "jazz" ||
+    style === "blues" ||
+    style === "folk" ||
+    style === "classical" ||
+    style === "ambient";
+
+  switch (role) {
+    case "kick":
+      return fxEq(
+        1.15 + rnd() * 0.25,
+        0.9 + rnd() * 0.1,
+        0.75 + rnd() * 0.15,
+      );
+    case "hat":
+      return fxEq(
+        0.55 + rnd() * 0.2,
+        0.95,
+        1.2 + rnd() * 0.3,
+      );
+    case "bass":
+      // Rare chorus on disco/funk bass; else EQ
+      if (modP > 0.45 && rnd() < 0.22) {
+        return fxChorus(rnd, bias, false);
+      }
+      return fxEq(
+        1.2 + rnd() * 0.3,
+        0.95,
+        0.7 + rnd() * 0.2,
+      );
+    case "snare":
+      if (rnd() < wetP * 0.85) {
+        return pickSpaceFx(
+          bpm,
+          rnd,
+          bias,
+          0.14,
+          0.32,
+          [0.75, 1, 1.5],
+          [0.5, 0.75, 1],
+          [0.15, 0.35],
+        );
+      }
+      return fxEq(0.85, 1.1, 1.2);
+    case "chord": {
+      const r = rnd();
+      if (r < modP * 0.7) return fxChorus(rnd, bias, true);
+      if (r < wetP) {
+        return fxReverb(bpm, rnd, bias, 0.22, 0.45, [1.5, 2, 3]);
+      }
+      return fxEq(0.95, 1, 1.05);
+    }
+    case "lead": {
+      const r = rnd();
+      if (r < wetP * bias.echoBias) {
+        return fxEcho(
+          bpm,
+          rnd,
+          bias,
+          0.18,
+          0.4,
+          [0.5, 0.75, 1, 1.5],
+          0.2,
+          0.45,
+        );
+      }
+      if (r < wetP * bias.echoBias + modP * 0.45) {
+        return lyrical || rnd() < 0.55
+          ? fxVibrato(rnd, lyrical)
+          : fxTremolo(rnd, energy > 0.6);
+      }
+      if (r < wetP * bias.echoBias + modP) {
+        return fxChorus(rnd, bias, true);
+      }
+      if (r < wetP + modP * 0.3) {
+        return fxReverb(bpm, rnd, bias, 0.16, 0.38, [1, 1.5, 2]);
+      }
+      return fxEq(0.9, 1.05, 1.1);
+    }
+    case "texture": {
+      const r = rnd();
+      if (r < modP * 0.55) return fxChorus(rnd, bias, true);
+      if (r < modP * 0.55 + wetP * 0.25) {
+        return fxEcho(
+          bpm,
+          rnd,
+          bias,
+          0.22,
+          0.45,
+          [1, 1.5, 2, 3],
+          0.25,
+          0.5,
+        );
+      }
+      return fxReverb(bpm, rnd, bias, 0.35, 0.65, [3, 4, 6]);
+    }
+    case "loop": {
+      const r = rnd();
+      if (r < modP * 0.5) return fxTremolo(rnd, energy > 0.55);
+      if (r < modP * 0.5 + wetP * 0.45) {
+        return pickSpaceFx(
+          bpm,
+          rnd,
+          bias,
+          0.15,
+          0.35,
+          [1, 1.5, 2.5],
+          [0.5, 1, 1.5],
+          [0.15, 0.35],
+        );
+      }
+      if (r < modP * 0.5 + wetP * 0.45 + modP * 0.25) {
+        return fxChorus(rnd, bias, false);
+      }
+      return { ...DEFAULT_TRACK_FX };
+    }
+    case "perc":
+      if (rnd() < wetP * 0.55) {
+        return fxEcho(
+          bpm,
+          rnd,
+          bias,
+          0.12,
+          0.3,
+          [0.25, 0.5, 0.75],
+          0.15,
+          0.35,
+        );
+      }
+      if (rnd() < modP * 0.25) return fxTremolo(rnd, true);
+      return { ...DEFAULT_TRACK_FX };
+    case "fx":
+    default: {
+      const r = rnd();
+      if (r < wetP * bias.echoBias) {
+        return fxEcho(
+          bpm,
+          rnd,
+          bias,
+          0.25,
+          0.55,
+          [1, 1.5, 2, 3],
+          0.28,
+          0.55,
+        );
+      }
+      if (r < wetP * bias.echoBias + modP * 0.6) {
+        const m = rnd();
+        if (m < 0.45) return fxChorus(rnd, bias, true);
+        if (m < 0.75) return fxTremolo(rnd, energy > 0.5);
+        return fxVibrato(rnd, lyrical);
+      }
+      return fxReverb(bpm, rnd, bias, 0.3, 0.6, [2, 3, 5]);
+    }
+  }
+}
+
 function pickTrackMix(
   role: ExprRole,
   trackIndex: number,
   trackCount: number,
   energy: number,
   bpm: number,
+  style: MusicStyleId,
   rnd: () => number,
 ): Omit<SequenceTrackPlan, "trackId"> {
   const spread =
@@ -1864,151 +2444,78 @@ function pickTrackMix(
   const panJitter = (rnd() - 0.5) * 0.15;
   const pan = clamp(spread + panJitter, -1, 1);
   const eGain = (energy - 0.5) * 2;
+  const fx = pickRoleFx(role, bpm, energy, style, rnd);
 
   switch (role) {
     case "kick":
       return {
         gainDb: 0.5 + rnd() * 1.5 + eGain,
         pan: clamp(pan * 0.15, -0.2, 0.2),
-        fx: normalizeTrackFx({
-          type: "eq",
-          low: 1.15 + rnd() * 0.25,
-          mid: 0.9 + rnd() * 0.1,
-          high: 0.75 + rnd() * 0.15,
-        }),
+        fx,
       };
     case "snare":
       return {
         gainDb: -1 + rnd() * 1.5 + eGain * 0.5,
         pan: clamp(pan * 0.4, -0.35, 0.35),
-        fx:
-          rnd() < 0.55
-            ? normalizeTrackFx({
-                type: "reverb",
-                mix: 0.18 + rnd() * 0.15,
-                decay: bpmSyncedReverbDecay(bpm, rnd, [0.75, 1, 1.5]),
-              })
-            : normalizeTrackFx({
-                type: "eq",
-                low: 0.85,
-                mid: 1.1,
-                high: 1.2,
-              }),
+        fx,
       };
     case "hat":
       return {
         gainDb: -4 + rnd() * 2,
         pan: clamp(pan, -0.7, 0.7),
-        fx: normalizeTrackFx({
-          type: "eq",
-          low: 0.55 + rnd() * 0.2,
-          mid: 0.95,
-          high: 1.2 + rnd() * 0.3,
-        }),
+        fx,
       };
     case "bass":
       return {
         gainDb: rnd() * 1.5 + eGain * 0.5,
         pan: clamp(pan * 0.2, -0.25, 0.25),
-        fx: normalizeTrackFx({
-          type: "eq",
-          low: 1.2 + rnd() * 0.3,
-          mid: 0.95,
-          high: 0.7 + rnd() * 0.2,
-        }),
+        fx,
       };
     case "chord":
       return {
         gainDb: -2 + rnd() * 1.5,
         pan: clamp(pan, -0.55, 0.55),
-        fx: normalizeTrackFx({
-          type: "reverb",
-          mix: 0.28 + rnd() * 0.2,
-          decay: bpmSyncedReverbDecay(bpm, rnd, [1.5, 2, 3]),
-        }),
+        fx,
       };
     case "lead":
       return {
         gainDb: -1 + rnd() * 2 + eGain * 0.4,
         pan: clamp(pan, -0.6, 0.6),
-        fx:
-          rnd() < 0.6
-            ? normalizeTrackFx({
-                type: "echo",
-                mix: 0.22 + rnd() * 0.18,
-                delayBeats: pickBeatFrac(rnd, [0.5, 0.75, 1, 1.5]),
-                feedback: 0.25 + rnd() * 0.25,
-              })
-            : normalizeTrackFx({
-                type: "reverb",
-                mix: 0.2 + rnd() * 0.2,
-                decay: bpmSyncedReverbDecay(bpm, rnd, [1, 1.5, 2]),
-              }),
+        fx,
       };
     case "texture":
       return {
         gainDb: -5 + rnd() * 2.5 - (1 - energy),
         pan: clamp(pan, -0.8, 0.8),
-        fx: normalizeTrackFx({
-          type: "reverb",
-          mix: 0.4 + rnd() * 0.25,
-          decay: bpmSyncedReverbDecay(bpm, rnd, [3, 4, 6]),
-        }),
+        fx,
       };
     case "loop":
       return {
         gainDb: -2.5 + rnd() * 2,
         pan: clamp(pan * 0.7, -0.5, 0.5),
-        fx:
-          rnd() < 0.45
-            ? normalizeTrackFx({
-                type: "reverb",
-                mix: 0.2 + rnd() * 0.15,
-                decay: bpmSyncedReverbDecay(bpm, rnd, [1, 1.5, 2.5]),
-              })
-            : { ...DEFAULT_TRACK_FX },
+        fx,
       };
     case "perc":
       return {
         gainDb: -2 + rnd() * 2 + eGain * 0.3,
         pan: clamp(pan, -0.75, 0.75),
-        fx:
-          rnd() < 0.35
-            ? normalizeTrackFx({
-                type: "echo",
-                mix: 0.15 + rnd() * 0.15,
-                delayBeats: pickBeatFrac(rnd, [0.25, 0.5, 0.75]),
-                feedback: 0.2 + rnd() * 0.2,
-              })
-            : { ...DEFAULT_TRACK_FX },
+        fx,
       };
     case "fx":
     default:
       return {
         gainDb: -3 + rnd() * 2.5,
         pan: clamp(pan, -0.85, 0.85),
-        fx:
-          rnd() < 0.5
-            ? normalizeTrackFx({
-                type: "echo",
-                mix: 0.3 + rnd() * 0.25,
-                delayBeats: pickBeatFrac(rnd, [1, 1.5, 2]),
-                feedback: 0.3 + rnd() * 0.35,
-              })
-            : normalizeTrackFx({
-                type: "reverb",
-                mix: 0.35 + rnd() * 0.3,
-                decay: bpmSyncedReverbDecay(bpm, rnd, [2, 3, 5]),
-              }),
+        fx,
       };
   }
 }
 
 /**
  * Plan a full multi-track sequence over `bars`, drawing from the library.
- * Controls: seed + density/energy/mix/groove; advanced locks (key, palette,
- * form, humanize, variation, bpm-sync, reverse, stutter, call–response,
- * lock-pitch).
+ * Controls: seed + music style/patterns + density/energy/mix/groove; advanced
+ * locks (key, palette, form, humanize, variation, bpm-sync, reverse, stutter,
+ * call–response, lock-pitch). Uses sample analysis + ML tags when present.
  * Pass `"auto"` to let the seed pick; omit for engine defaults.
  */
 export function planSequence(opts: {
@@ -2019,6 +2526,8 @@ export function planSequence(opts: {
   seed: number;
   tracks: Array<{ id: string; index: number }>;
   samples: SequenceSampleIn[];
+  /** Genre / pattern bank, or `"auto"` (infer from YAMNet / seed). */
+  musicStyle?: GenMusicStyleChoice;
   /** Pitch-class 0–11, or `"auto"` / omit → infer from library. */
   keyRootPc?: number | GenAuto;
   /** Hit keep multiplier (0.35–1.5), or `"auto"`. Default 1. */
@@ -2045,6 +2554,16 @@ export function planSequence(opts: {
    */
   lockPitch?: GenTriState;
   /**
+   * Max upward transpose in semitones (0–24), or `"auto"` → 12.
+   * Ignored when lockPitch is on.
+   */
+  pitchUpSemitones?: number | GenAuto;
+  /**
+   * Max downward transpose in semitones (0–24), or `"auto"` → 12.
+   * Ignored when lockPitch is on.
+   */
+  pitchDownSemitones?: number | GenAuto;
+  /**
    * Constrain tempo adapts to ×¼, ×½, ×1, ×2, ×4, ×8 only (snap BPM sync /
    * rate changes). `"auto"` / `"off"` = free ratio.
    */
@@ -2056,28 +2575,60 @@ export function planSequence(opts: {
   }
 
   const rnd = mulberry32(seed);
-  const density = resolveSlider(opts.density, rnd, 0.35, 1.5, 1);
-  const energy = resolveSlider(opts.energy, rnd, 0, 1, 0.55);
-  const drumsVsTexture = resolveSlider(
+  const enriched = withClapCohesion(samples);
+  const yamnetPool = enriched.flatMap((s) => s.yamnet ?? []);
+  const musicStyle = pickMusicStyle(opts.musicStyle, rnd, yamnetPool);
+  const styleProfile = MUSIC_STYLE_PROFILES[musicStyle];
+
+  const density = resolveStyleBiasedSlider(
+    opts.density,
+    rnd,
+    0.35,
+    1.5,
+    1,
+    styleProfile.densityCenter,
+  );
+  const energy = resolveStyleBiasedSlider(
+    opts.energy,
+    rnd,
+    0,
+    1,
+    0.55,
+    styleProfile.energyCenter,
+  );
+  const drumsVsTexture = resolveStyleBiasedSlider(
     opts.drumsVsTexture,
     rnd,
     0,
     1,
     0.55,
+    styleProfile.drumsCenter,
   );
   const groove: GrooveKind =
     opts.groove === "auto"
-      ? pickGroove(rnd)
-      : (opts.groove ?? "straight");
+      ? pickGroove(rnd, styleProfile.groove)
+      : (opts.groove ?? styleProfile.groove);
   const humanize =
     opts.humanize === undefined
-      ? 1
-      : resolveSlider(opts.humanize, rnd, 0, 1, 1);
+      ? (styleProfile.humanizeCenter ?? 1)
+      : resolveStyleBiasedSlider(
+          opts.humanize,
+          rnd,
+          0,
+          1,
+          styleProfile.humanizeCenter ?? 1,
+          styleProfile.humanizeCenter,
+        );
   const variation =
     opts.variation === undefined
       ? 0.55
       : resolveSlider(opts.variation, rnd, 0, 1, 0.55);
-  const scaleMode: GenScaleMode = opts.scaleMode ?? "auto";
+  const scaleMode: GenScaleMode =
+    opts.scaleMode && opts.scaleMode !== "auto"
+      ? opts.scaleMode
+      : styleProfile.scaleBias && rnd() < 0.75
+        ? styleProfile.scaleBias
+        : (opts.scaleMode ?? "auto");
   const formStyle: GenFormStyle = opts.formStyle ?? "auto";
   const bpmSyncMode: GenTriState = opts.bpmSync ?? "auto";
   const reverseMode: GenTriState = opts.reverse ?? "auto";
@@ -2085,10 +2636,19 @@ export function planSequence(opts: {
   const callResponseMode: GenTriState = opts.callResponse ?? "auto";
   const lockPitch = opts.lockPitch === "on";
   const lockTempoPow2 = opts.lockTempoPow2 === "on";
+  const resolvePitchBound = (v: number | GenAuto | undefined): number => {
+    if (v === "auto" || v == null || !Number.isFinite(v)) return 12;
+    return Math.round(clamp(v, 0, 24));
+  };
+  const pitchUpSemitones = lockPitch ? 0 : resolvePitchBound(opts.pitchUpSemitones);
+  const pitchDownSemitones = lockPitch
+    ? 0
+    : resolvePitchBound(opts.pitchDownSemitones);
+  const allowEmptyKit =
+    musicStyle === "classical" || musicStyle === "ambient";
 
   const ticksPerBar = beatsPerBar * ppq;
   const seqEnd = bars * ticksPerBar;
-  const enriched = withClapCohesion(samples);
   const pool = [...enriched].sort((a, b) => {
     if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
     const ai = a.interestScore ?? -1;
@@ -2100,6 +2660,20 @@ export function planSequence(opts: {
     const ac = a.clapCohesion ?? -1;
     const bc = b.clapCohesion ?? -1;
     if (ac !== bc) return bc - ac;
+    // Prefer analysed / tagged samples when ranking the pool
+    const aMeta =
+      (a.analysisBpm != null ? 1 : 0) +
+      (a.pitchHz != null || a.noteName ? 1 : 0) +
+      ((a.yamnet?.length ?? 0) > 0 ? 1 : 0) +
+      (a.clapVector?.length ? 1 : 0) +
+      (a.stem ? 1 : 0);
+    const bMeta =
+      (b.analysisBpm != null ? 1 : 0) +
+      (b.pitchHz != null || b.noteName ? 1 : 0) +
+      ((b.yamnet?.length ?? 0) > 0 ? 1 : 0) +
+      (b.clapVector?.length ? 1 : 0) +
+      (b.stem ? 1 : 0);
+    if (aMeta !== bMeta) return bMeta - aMeta;
     return a.id.localeCompare(b.id);
   });
 
@@ -2115,7 +2689,12 @@ export function planSequence(opts: {
     ? []
     : expandChordTimeline(
         pickProgressionBank(
-          paletteFromMix(drumsVsTexture, rnd, opts.palette),
+          paletteFromMix(
+            drumsVsTexture,
+            rnd,
+            opts.palette,
+            styleProfile.palette,
+          ),
           scale === MINOR_SCALE,
           rnd,
         ),
@@ -2125,6 +2704,7 @@ export function planSequence(opts: {
     drumsVsTexture,
     energy,
     formStyle,
+    formLean: styleProfile.formLean,
   });
 
   const sortedTracks = [...tracks].sort((a, b) => a.index - b.index);
@@ -2136,7 +2716,15 @@ export function planSequence(opts: {
   );
   const trackPlans: SequenceTrackPlan[] = sortedTracks.map((track, ti) => {
     const role = roles[ti] ?? "perc";
-    const mix = pickTrackMix(role, ti, sortedTracks.length, energy, bpm, rnd);
+    const mix = pickTrackMix(
+      role,
+      ti,
+      sortedTracks.length,
+      energy,
+      bpm,
+      musicStyle,
+      rnd,
+    );
     return { trackId: track.id, ...mix };
   });
 
@@ -2190,8 +2778,10 @@ export function planSequence(opts: {
     );
     if (samplePool.length === 0) continue;
 
-    const motif = buildMotif(role, beatsPerBar, ppq, rnd, groove);
-    const motifAlt = buildMotif(role, beatsPerBar, ppq, rnd, groove);
+    const motif = buildMotif(role, beatsPerBar, ppq, rnd, groove, musicStyle);
+    const motifAlt = buildMotif(role, beatsPerBar, ppq, rnd, groove, musicStyle);
+    // Skip empty kit tracks for classical / ambient pattern banks
+    if (allowEmptyKit && isDrumRole(role) && motif.length === 0) continue;
     const leadCell =
       !lockPitch && role === "lead"
         ? pickMelodyCell(rnd, drumsVsTexture < 0.4)
@@ -2218,16 +2808,34 @@ export function planSequence(opts: {
       const baseMotif =
         section.kind === "bridge" || section.kind === "outro" ? motifAlt : motif;
 
+      const sparseSection =
+        section.kind === "intro" ||
+        section.kind === "outro" ||
+        section.kind === "bridge";
+
       const barStride =
         role === "texture"
-          ? Math.max(1, Math.min(section.bars, 2 + pickInt(rnd, 0, 1)))
+          ? Math.max(
+              1,
+              Math.min(
+                section.bars,
+                (sparseSection ? 3 : 2) + pickInt(rnd, 0, sparseSection ? 2 : 1),
+              ),
+            )
           : role === "loop"
-            ? Math.max(1, Math.min(2, section.bars))
+            ? Math.max(
+                1,
+                Math.min(section.bars, sparseSection ? 3 : 2),
+              )
             : role === "chord"
               ? section.kind === "chorus"
                 ? 2
-                : 1
-              : 1;
+                : sparseSection
+                  ? 2
+                  : 1
+              : role === "bass" && sparseSection
+                ? Math.max(1, Math.min(2, section.bars))
+                : 1;
 
       for (let b = 0; b < section.bars; b += barStride) {
         const absBar = section.startBar + b;
@@ -2256,9 +2864,7 @@ export function planSequence(opts: {
         const sample = samplePool[sampleCursor]!;
 
         if (
-          section.kind === "intro" &&
-          (role === "snare" || role === "lead") &&
-          b === 0
+          !sectionAllowsRole(role, section, b, energy, rnd)
         ) {
           continue;
         }
@@ -2270,6 +2876,13 @@ export function planSequence(opts: {
               ? (leadCellAlt ?? leadCell!)
               : leadCell!;
           hits = melodyCellToHits(cell, ppq, beatsPerBar, groove);
+          if (section.kind === "intro" || section.kind === "outro") {
+            hits = hits.filter((h) => h.accent || rnd() < 0.28);
+          } else if (section.kind === "bridge") {
+            hits = hits.filter((h) => h.accent || rnd() < 0.5);
+          } else if (section.kind === "verse") {
+            hits = hits.filter((h) => h.accent || rnd() < 0.55 + energy * 0.2);
+          }
         } else {
           hits = evolveMotifHits(baseMotif, {
             role,
@@ -2283,6 +2896,7 @@ export function planSequence(opts: {
             density,
             energy,
             rnd,
+            allowEmptyKit,
           });
         }
         hits = callResponseShift(
@@ -2382,6 +2996,8 @@ export function planSequence(opts: {
                 section,
                 energy,
                 rnd,
+                maxUp: pitchUpSemitones,
+                maxDown: pitchDownSemitones,
               });
 
           let stretchMode = pickStretchMode({
@@ -2472,11 +3088,27 @@ export function planSequence(opts: {
             rnd() < reverseBaseChance;
 
           let gainDb = hit.gainDb + section.gainBiasDb + (energy - 0.5) * 1.5;
+          // Level from analysis: lift quiet beds, ease hot peaks
+          if (sample.lufs != null && Number.isFinite(sample.lufs)) {
+            gainDb += clamp((-18 - sample.lufs) * 0.12, -2.5, 3);
+          }
+          if (sample.peakDbtp != null && Number.isFinite(sample.peakDbtp) && sample.peakDbtp > -1) {
+            gainDb -= Math.min(2, (sample.peakDbtp + 1) * 1.2);
+          }
           if (section.kind === "chorus") {
-            gainDb += Math.min(1.2, b * 0.08) * energy;
+            gainDb += (1.2 + Math.min(1.5, b * 0.1)) * (0.55 + energy * 0.45);
+          }
+          if (section.kind === "prechorus") {
+            gainDb += (b / Math.max(1, section.bars)) * 1.5 * energy;
+          }
+          if (section.kind === "intro") {
+            gainDb -= (1 - b / Math.max(1, section.bars)) * 1.5;
+          }
+          if (section.kind === "bridge") {
+            gainDb -= isDrumRole(role) ? 2.5 : 0.8;
           }
           if (section.kind === "outro") {
-            gainDb -= (b / Math.max(1, section.bars)) * 3;
+            gainDb -= (b / Math.max(1, section.bars)) * 5;
           }
           if (stutter) gainDb += 0.5;
 

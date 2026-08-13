@@ -38,7 +38,11 @@ import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { deleteSample } from "../sample-actions.js";
 import { importForHunt, ImportTempoError } from "../import-for-hunt.js";
-import { processQueue } from "../process-queue.js";
+import {
+  isProcessingBusy,
+  isProcessingError,
+  processQueue,
+} from "../process-queue.js";
 import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
 import {
   PROJECT_CHANGE_EVENT,
@@ -709,7 +713,7 @@ export class GlCapturePage extends LitElement {
             : this.extracted.map(
                 (row) => html`
                   <div
-                    class="grid grid-cols-[8px_1fr_auto_auto] items-center gap-2 rounded-md border-0 bg-neutral-100 py-1.5 px-2.5 text-left font-inherit text-inherit"
+                    class="grid grid-cols-[8px_1fr_auto] items-center gap-2 rounded-md border-0 bg-neutral-100 py-1.5 px-2.5 text-left font-inherit text-inherit"
                   >
                     <span
                       class="h-7 w-2 rounded-sm"
@@ -721,12 +725,13 @@ export class GlCapturePage extends LitElement {
                       @click=${() => navigate({ name: "sample", id: row.id })}
                     >
                       <div>${row.class}${row.loopProposed ? " · boucle" : ""}${
-                        row.tags.includes("processing:pending") ||
-                        row.tags.includes("processing:running")
-                          ? " · processing…"
-                          : row.tags.includes("processing:done")
-                            ? " · ok"
-                            : ""
+                        isProcessingBusy(row.tags)
+                          ? ` · ${t("library.processing")}`
+                          : isProcessingError(row.tags)
+                            ? ` · ${t("library.processingError")}`
+                            : row.tags.includes("processing:done")
+                              ? " · ok"
+                              : ""
                       }${
                         row.interestScore != null
                           ? ` · ★${Math.round(row.interestScore * 100)}`
@@ -736,14 +741,27 @@ export class GlCapturePage extends LitElement {
                         ${row.tags.join(" · ")}
                       </div>
                     </button>
-                    <button
-                      class="min-h-touch min-w-touch cursor-pointer rounded-md border-0 bg-transparent font-inherit text-neutral-500 hover:text-danger"
-                      type="button"
-                      title="Supprimer"
-                      @click=${() => void this.#removeExtracted(row.id)}
-                    >
-                      ${glIcon("x", { size: "sm" })}
-                    </button>
+                    <div class="flex items-center">
+                      ${isProcessingError(row.tags)
+                        ? html`<button
+                            class="min-h-touch min-w-touch cursor-pointer rounded-md border-0 bg-transparent font-inherit text-warning hover:text-primary"
+                            type="button"
+                            title=${t("library.retryProcess")}
+                            @click=${() =>
+                              void processQueue.retrySample(row.id)}
+                          >
+                            ${glIcon("refresh-cw", { size: "sm" })}
+                          </button>`
+                        : nothing}
+                      <button
+                        class="min-h-touch min-w-touch cursor-pointer rounded-md border-0 bg-transparent font-inherit text-neutral-500 hover:text-danger"
+                        type="button"
+                        title="Supprimer"
+                        @click=${() => void this.#removeExtracted(row.id)}
+                      >
+                        ${glIcon("x", { size: "sm" })}
+                      </button>
+                    </div>
                   </div>
                 `,
               )}

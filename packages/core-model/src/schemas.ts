@@ -173,8 +173,19 @@ export const ProjectSchema = z.object({
 });
 export type Project = z.infer<typeof ProjectSchema>;
 
-/** One light insert per track (ADR-0016): None / EQ / Echo / Reverb. */
-export const TrackFxTypeSchema = z.enum(["none", "eq", "echo", "reverb"]);
+/**
+ * One light insert per track (ADR-0016):
+ * None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato.
+ */
+export const TrackFxTypeSchema = z.enum([
+  "none",
+  "eq",
+  "echo",
+  "reverb",
+  "chorus",
+  "tremolo",
+  "vibrato",
+]);
 export type TrackFxType = z.infer<typeof TrackFxTypeSchema>;
 
 /** Echo delay as beat fractions (¼ note = 1). Clamped at apply time by BPM. */
@@ -185,7 +196,7 @@ export const ECHO_DELAY_MAX_SEC = 4;
 
 export const TrackFxSchema = z.object({
   type: TrackFxTypeSchema.default("none"),
-  /** Wet mix for echo / reverb (0–1). */
+  /** Wet mix for echo / reverb / chorus (0–1). */
   mix: z.number().min(0).max(1).default(0.35),
   /** Echo delay in beats (1 = quarter note). */
   delayBeats: z
@@ -197,6 +208,12 @@ export const TrackFxSchema = z.object({
   feedback: z.number().min(0).max(0.9).default(0.35),
   /** Reverb decay / room size (0–1). */
   decay: z.number().min(0).max(1).default(0.45),
+  /** HF damping for echo / reverb (0 = bright, 1 = dark). */
+  damping: z.number().min(0).max(1).default(0.35),
+  /** LFO rate for chorus / tremolo / vibrato (Hz). */
+  rateHz: z.number().min(0.1).max(12).default(4),
+  /** Modulation depth for chorus / tremolo / vibrato (0–1). */
+  depth: z.number().min(0).max(1).default(0.5),
   /** 3-band EQ linear gains (0–2). */
   low: z.number().min(0).max(2).default(1),
   mid: z.number().min(0).max(2).default(1),
@@ -210,6 +227,9 @@ export const DEFAULT_TRACK_FX: TrackFx = {
   delayBeats: 0.5,
   feedback: 0.35,
   decay: 0.45,
+  damping: 0.35,
+  rateHz: 4,
+  depth: 0.5,
   low: 1,
   mid: 1,
   high: 1,

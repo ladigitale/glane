@@ -61,7 +61,10 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
         confidence?: number;
       } = {
         tags: result.tags.filter(
-          (t) => t !== "processing:pending" && t !== "processing:running",
+          (t) =>
+            t !== "processing:pending" &&
+            t !== "processing:running" &&
+            t !== "processing:error",
         ),
         updatedAt: nowIso(),
         revision: (fresh.revision ?? 0) + 1,

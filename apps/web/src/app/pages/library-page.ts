@@ -14,7 +14,11 @@ import { db, ensurePrefs } from "../db.js";
 import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
-import { processQueue } from "../process-queue.js";
+import {
+  isProcessingBusy,
+  isProcessingError,
+  processQueue,
+} from "../process-queue.js";
 import {
   SAMPLE_ML_EVENT,
 } from "../ml/enrich-queue.js";
@@ -140,6 +144,7 @@ export class GlLibraryPage extends LitElement {
   #unsubProc: (() => void) | null = null;
   #unsubDemucs: (() => void) | null = null;
   #lastProcRemaining = -1;
+  #lastProcError = -1;
   #demucsWaveActive = false;
 
   override connectedCallback(): void {
@@ -158,8 +163,12 @@ export class GlLibraryPage extends LitElement {
     window.addEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
     void this.#reload();
     this.#unsubProc = processQueue.subscribe((s) => {
-      if (s.remaining !== this.#lastProcRemaining) {
+      if (
+        s.remaining !== this.#lastProcRemaining ||
+        s.error !== this.#lastProcError
+      ) {
         this.#lastProcRemaining = s.remaining;
+        this.#lastProcError = s.error;
         void this.#reload();
       }
     });
@@ -627,10 +636,11 @@ export class GlLibraryPage extends LitElement {
                           ${s.captureName ? `${s.captureName} · ` : ""}${s.class}
                           · ${s.durationMs}ms
                           ${s.loopProposed ? " · boucle" : ""}${
-                            (s.tags ?? []).includes("processing:pending") ||
-                            (s.tags ?? []).includes("processing:running")
-                              ? " · processing…"
-                              : ""
+                            isProcessingBusy(s.tags)
+                              ? ` · ${t("library.processing")}`
+                              : isProcessingError(s.tags)
+                                ? ` · ${t("library.processingError")}`
+                                : ""
                           }
                           ${(s.tags ?? []).length
                             ? ` · ${(s.tags ?? []).slice(0, 3).join(", ")}`
@@ -673,6 +683,16 @@ export class GlLibraryPage extends LitElement {
                               icon: "layers",
                               onClick: () => void this.#separate(s),
                             },
+                            ...(isProcessingError(s.tags)
+                              ? [
+                                  {
+                                    label: t("library.retryProcess"),
+                                    icon: "refresh-cw",
+                                    onClick: () =>
+                                      void processQueue.retrySample(s.id),
+                                  },
+                                ]
+                              : []),
                             {
                               label: t("library.copyToProject"),
                               icon: "folder-plus",

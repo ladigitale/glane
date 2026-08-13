@@ -21,7 +21,7 @@ import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
 import { t, tf } from "../i18n/messages.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
-import { SAMPLE_PROCESSED_EVENT } from "../process-queue.js";
+import { SAMPLE_PROCESSED_EVENT, processQueue, isProcessingBusy, isProcessingError } from "../process-queue.js";
 import { navigate } from "../router.js";
 import {
   deleteSample,
@@ -40,7 +40,7 @@ import {
 import { editorFormKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
-import { renderMoreMenu, type MoreMenuEntry } from "../more-menu.js";
+import { renderMoreMenu, type MoreMenuEntry, type MoreMenuItem } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { formatClock } from "../timeline/timeline.js";
 import type { TransportAction } from "../transport-bar.js";
@@ -152,6 +152,7 @@ export class GlEditorPage extends LitElement {
   #clipboard: Float32Array | null = null;
   /** Skip leave prompt after delete (sample already gone). */
   #skipLeaveGuard = false;
+  #unsubProc: (() => void) | null = null;
   #history: EditCheckpoint[] = [];
 
   get isDirty(): boolean {
@@ -170,6 +171,20 @@ export class GlEditorPage extends LitElement {
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
     window.addEventListener("beforeunload", this.#onBeforeUnload);
+    this.#unsubProc = processQueue.subscribe((s) => {
+      if (
+        !this.sampleId ||
+        this.dirty ||
+        (s.currentSampleId !== this.sampleId &&
+          !isProcessingBusy(this.sample?.tags) &&
+          !isProcessingError(this.sample?.tags))
+      ) {
+        return;
+      }
+      void db.samples.get(this.sampleId).then((fresh) => {
+        if (fresh) this.sample = fresh;
+      });
+    });
     void this.#load();
   }
 
@@ -318,13 +333,36 @@ export class GlEditorPage extends LitElement {
       ></sonic-alert>`;
     }
     const tags = this.sample?.tags ?? [];
-    if (
-      tags.includes("processing:pending") ||
-      tags.includes("processing:running")
-    ) {
-      return html`<p class="font-mono text-xs text-neutral-500">processing…</p>`;
+    if (isProcessingBusy(tags)) {
+      return html`<p class="font-mono text-xs text-neutral-500">
+        ${t("library.processing")}
+      </p>`;
+    }
+    if (isProcessingError(tags)) {
+      return html`<div class="mb-1 flex flex-wrap items-center gap-2">
+        <sonic-alert
+          class="min-w-0 flex-1"
+          status="error"
+          label=${t("library.processingError")}
+        ></sonic-alert>
+        <sonic-button
+          size="sm"
+          variant="outline"
+          type="warning"
+          @click=${() => void this.#retryProcess()}
+        >
+          ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+          ${t("library.retryProcess")}
+        </sonic-button>
+      </div>`;
     }
     return nothing;
+  }
+
+  async #retryProcess(): Promise<void> {
+    if (!this.sampleId) return;
+    await processQueue.retrySample(this.sampleId);
+    this.sample = (await db.samples.get(this.sampleId)) ?? this.sample;
   }
 
   async #load(): Promise<void> {
@@ -781,6 +819,15 @@ export class GlEditorPage extends LitElement {
         disabled: busy || isStem || !this.sampleId,
         onClick: () => void this.#separate(),
       },
+      ...(isProcessingError(this.sample?.tags)
+        ? [
+            {
+              label: t("library.retryProcess"),
+              icon: "refresh-cw",
+              onClick: () => void this.#retryProcess(),
+            } satisfies MoreMenuItem,
+          ]
+        : []),
       {
         label: t("editor.delete"),
         icon: "trash-2",
@@ -1747,6 +1794,7 @@ export class GlEditorPage extends LitElement {
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
     window.removeEventListener("beforeunload", this.#onBeforeUnload);
+    this.#unsubProc?.();
     this.#haltPlay();
     super.disconnectedCallback();
   }

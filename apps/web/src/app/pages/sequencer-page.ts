@@ -38,15 +38,17 @@ import tailwind from "../../css/tailwind";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
-import { t, tf } from "../i18n/messages.js";
+import { t, tf, type MessageKey } from "../i18n/messages.js";
 import {
   keyPcLabel,
   planSequence,
   parseStemFromTags,
   resolveYamnetSlugs,
+  MUSIC_STYLE_IDS,
   type GenAuto,
   type GenFormStyle,
   type GenGrooveChoice,
+  type GenMusicStyleChoice,
   type GenPaletteChoice,
   type GenScaleMode,
   type GenTriState,
@@ -70,7 +72,7 @@ import {
   trackToInsertConfig,
   trackXfadeZones,
 } from "../seq-schedule.js";
-import { seqUiState, type SeqUiState } from "../seq-ui-state.js";
+import { seqUiState, DEFAULT_SEQ_GEN_UI, type SeqUiState } from "../seq-ui-state.js";
 import {
   exportPublish,
   type BounceResult,
@@ -79,6 +81,10 @@ import {
 import { exportToast } from "../export-toast.js";
 import { seqOctatrackExport } from "../seq-octatrack-export.js";
 import { listenShare, type ListenMeta } from "../listen-share.js";
+import {
+  reelExport,
+  type ReelEncodeResult,
+} from "../reel-export.js";
 import { auth } from "../auth.js";
 import { saveBounceToLibrary } from "../sample-actions.js";
 import {
@@ -590,6 +596,8 @@ export class GlSequencerPage extends LitElement {
   @state() private exportError: string | null = null;
   @state() private exportPermalink: string | null = null;
   @state() private exportLibraryOk: string | null = null;
+  @state() private reelResult: ReelEncodeResult | null = null;
+  @state() private reelEncoding = false;
   @state() private seqModal: SeqConfigModal = null;
   @state() private draftBpm = 120;
   @state() private draftBars = 16;
@@ -597,7 +605,8 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenDensity: number | GenAuto = 1;
   @state() private draftGenEnergy: number | GenAuto = 0.55;
   @state() private draftGenDrumsTextures: number | GenAuto = 0.55;
-  @state() private draftGenGroove: GenGrooveChoice = "straight";
+  @state() private draftGenMusicStyle: GenMusicStyleChoice = "auto";
+  @state() private draftGenGroove: GenGrooveChoice = "auto";
   @state() private draftGenKey: number | GenAuto = "auto";
   @state() private draftGenScale: GenScaleMode = "auto";
   @state() private draftGenPalette: GenPaletteChoice = "auto";
@@ -610,6 +619,8 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenStutter: GenTriState = "auto";
   @state() private draftGenCallResponse: GenTriState = "auto";
   @state() private draftGenLockPitch: GenTriState = "off";
+  @state() private draftGenPitchUp: number | GenAuto = "auto";
+  @state() private draftGenPitchDown: number | GenAuto = "auto";
   /** Pool for generation: all / favorites / sample class. */
   @state() private draftGenSampleFilter: SampleClass | "all" | "favorite" =
     "all";
@@ -744,6 +755,7 @@ export class GlSequencerPage extends LitElement {
     cancelAnimationFrame(this.#raf);
     cancelAnimationFrame(this.#wavePaintRaf);
     this.#engine?.stop();
+    this.#revokeReel();
     super.disconnectedCallback();
   }
 
@@ -783,6 +795,30 @@ export class GlSequencerPage extends LitElement {
       drawerFilter: this.drawerFilter ?? "all",
       magnetOff: this.magnetOff,
       followPlayhead: this.#followPlayhead,
+      gen: {
+        seed: this.draftGenSeed >>> 0,
+        density: this.draftGenDensity,
+        energy: this.draftGenEnergy,
+        drumsVsTexture: this.draftGenDrumsTextures,
+        musicStyle: this.draftGenMusicStyle,
+        groove: this.draftGenGroove,
+        keyRootPc: this.draftGenKey,
+        scaleMode: this.draftGenScale,
+        palette: this.draftGenPalette,
+        formStyle: this.draftGenForm,
+        humanize: this.draftGenHumanize,
+        variation: this.draftGenVariation,
+        bpmSync: this.draftGenBpmSync,
+        lockTempoPow2: this.draftGenLockTempoPow2,
+        reverse: this.draftGenReverse,
+        stutter: this.draftGenStutter,
+        callResponse: this.draftGenCallResponse,
+        lockPitch: this.draftGenLockPitch,
+        pitchUpSemitones: this.draftGenPitchUp,
+        pitchDownSemitones: this.draftGenPitchDown,
+        sampleFilter: this.draftGenSampleFilter,
+        advanced: this.draftGenAdvanced,
+      },
     };
   }
 
@@ -809,6 +845,7 @@ export class GlSequencerPage extends LitElement {
       this.magnetOff = false;
       this.#followPlayhead = true;
       this.#pendingScrollLeft = 0;
+      this.#applyGenUi(DEFAULT_SEQ_GEN_UI);
       set(seqDrawerKey, { filter: "all" });
       return;
     }
@@ -824,6 +861,7 @@ export class GlSequencerPage extends LitElement {
     this.drawerOpen = s.drawerOpen;
     this.magnetOff = s.magnetOff;
     this.#followPlayhead = s.followPlayhead;
+    this.#applyGenUi(s.gen ?? DEFAULT_SEQ_GEN_UI);
     set(seqDrawerKey, { filter: s.drawerFilter });
     if (s.viewMode === "global" && s.followPlayhead) {
       this.#pendingScrollLeft = null;
@@ -831,6 +869,37 @@ export class GlSequencerPage extends LitElement {
     } else {
       this.#pendingScrollLeft = s.scrollLeft;
     }
+  }
+
+  #applyGenUi(g: NonNullable<SeqUiState["gen"]>): void {
+    this.draftGenSeed = g.seed >>> 0;
+    this.draftGenDensity = g.density;
+    this.draftGenEnergy = g.energy;
+    this.draftGenDrumsTextures = g.drumsVsTexture;
+    this.draftGenMusicStyle = g.musicStyle as GenMusicStyleChoice;
+    this.draftGenGroove = g.groove as GenGrooveChoice;
+    this.draftGenKey = g.keyRootPc;
+    this.draftGenScale = g.scaleMode as GenScaleMode;
+    this.draftGenPalette = g.palette as GenPaletteChoice;
+    this.draftGenForm = g.formStyle as GenFormStyle;
+    this.draftGenHumanize = g.humanize;
+    this.draftGenVariation = g.variation;
+    this.draftGenBpmSync = g.bpmSync as GenTriState;
+    this.draftGenLockTempoPow2 =
+      g.lockTempoPow2 === "on" ? "on" : "off";
+    this.draftGenReverse = g.reverse as GenTriState;
+    this.draftGenStutter = g.stutter as GenTriState;
+    this.draftGenCallResponse = g.callResponse as GenTriState;
+    this.draftGenLockPitch = g.lockPitch === "on" ? "on" : "off";
+    this.draftGenPitchUp = g.pitchUpSemitones;
+    this.draftGenPitchDown = g.pitchDownSemitones;
+    this.draftGenSampleFilter = g.sampleFilter;
+    this.draftGenAdvanced = g.advanced;
+  }
+
+  /** Persist generator drafts (localStorage via seqUiState). */
+  #persistGenUi(): void {
+    this.#persistUiState();
   }
 
   override firstUpdated(): void {
@@ -2430,6 +2499,48 @@ export class GlSequencerPage extends LitElement {
               </sonic-button>
             </div>
             <div class="flex flex-col gap-2 border-t border-neutral-3 pt-3">
+              <strong>${t("export.reel")}</strong>
+              <div class="row flex flex-wrap items-center gap-2">
+                <sonic-button
+                  type="primary"
+                  ?disabled=${!!busy}
+                  ?loading=${this.reelEncoding}
+                  @click=${() => void this.#exportReelGenerate()}
+                >
+                  ${t("export.reelGenerate")}
+                </sonic-button>
+                <sonic-button
+                  variant="outline"
+                  type="neutral"
+                  ?disabled=${!!busy || !this.reelResult}
+                  @click=${() => void this.#exportReelDownload()}
+                >
+                  ${glIcon("download", { slot: "prefix", size: "xs" })}
+                  ${t("export.reelDownload")}
+                </sonic-button>
+                ${reelExport.canShare()
+                  ? html`<sonic-button
+                      variant="outline"
+                      type="neutral"
+                      ?disabled=${!!busy || !this.reelResult}
+                      @click=${() => void this.#exportReelShare()}
+                    >
+                      ${t("export.reelShare")}
+                    </sonic-button>`
+                  : nothing}
+              </div>
+              <p class="m-0 text-sm text-neutral-9">${t("export.reelHint")}</p>
+              ${this.reelResult
+                ? html`<video
+                      class="mx-auto max-h-64 w-auto rounded-md bg-neutral-1"
+                      style="aspect-ratio:9/16"
+                      controls
+                      playsinline
+                      src=${this.reelResult.objectUrl}
+                    ></video>`
+                : nothing}
+            </div>
+            <div class="flex flex-col gap-2 border-t border-neutral-3 pt-3">
               <strong>${t("export.listenLink")}</strong>
               ${!auth.getJwt()
                 ? html`<p class="text-sm text-neutral-9">
@@ -2539,20 +2650,25 @@ export class GlSequencerPage extends LitElement {
 
   onExportHide = (): void => {
     this.exportOpen = false;
+    this.#revokeReel();
   };
+
+  #revokeReel(): void {
+    if (this.reelResult) {
+      reelExport.revoke(this.reelResult.objectUrl);
+      this.reelResult = null;
+    }
+  }
 
   #openSeqModal(kind: Exclude<SeqConfigModal, null>): void {
     if (!this.project && kind !== "docs") return;
     this.draftBpm = this.project?.bpm ?? 120;
     this.draftBars = this.project?.bars ?? 16;
-    if (kind === "generate") {
-      this.draftGenSeed =
-        (Date.now() ^ ((this.project?.revision ?? 0) * 0x85ebca6b)) >>> 0;
-    }
     this.seqModal = kind;
   }
 
   onSeqModalHide = (): void => {
+    if (this.seqModal === "generate") this.#persistGenUi();
     this.seqModal = null;
   };
 
@@ -2675,6 +2791,7 @@ export class GlSequencerPage extends LitElement {
                   @input=${(e: Event) => {
                     this.draftGenSeed =
                       Number((e.target as HTMLInputElement).value) >>> 0;
+                    this.#persistGenUi();
                   }}
                 />
                 <sonic-button
@@ -2683,6 +2800,7 @@ export class GlSequencerPage extends LitElement {
                   size="sm"
                   @click=${() => {
                     this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+                    this.#persistGenUi();
                   }}
                 >
                   ${t("seq.genSeedReroll")}
@@ -2751,6 +2869,23 @@ export class GlSequencerPage extends LitElement {
               },
             })}
             ${this.#renderGenChoice({
+              label: t("seq.genMusicStyle"),
+              value: this.draftGenMusicStyle,
+              options: [
+                ["auto", t("seq.genAuto")],
+                ...MUSIC_STYLE_IDS.map(
+                  (id) =>
+                    [
+                      id,
+                      t(`seq.genStyle.${id}` as MessageKey),
+                    ] as [string, string],
+                ),
+              ],
+              onPick: (v) => {
+                this.draftGenMusicStyle = v as GenMusicStyleChoice;
+              },
+            })}
+            ${this.#renderGenChoice({
               label: t("seq.genGroove"),
               value: this.draftGenGroove,
               options: [
@@ -2770,6 +2905,7 @@ export class GlSequencerPage extends LitElement {
               ?active=${this.draftGenAdvanced}
               @click=${() => {
                 this.draftGenAdvanced = !this.draftGenAdvanced;
+                this.#persistGenUi();
               }}
             >
               ${t("seq.genAdvanced")}
@@ -2793,6 +2929,43 @@ export class GlSequencerPage extends LitElement {
                   ${this.draftGenLockPitch === "on"
                     ? nothing
                     : html`
+                        ${this.#renderGenChoice({
+                          label: t("seq.genPitchDown"),
+                          value:
+                            this.draftGenPitchDown === "auto"
+                              ? "auto"
+                              : String(this.draftGenPitchDown),
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ...([0, 1, 2, 3, 5, 7, 12, 24] as const).map(
+                              (n) => [String(n), String(n)] as [string, string],
+                            ),
+                          ],
+                          onPick: (v) => {
+                            this.draftGenPitchDown =
+                              v === "auto" ? "auto" : Number(v);
+                          },
+                        })}
+                        ${this.#renderGenChoice({
+                          label: t("seq.genPitchUp"),
+                          value:
+                            this.draftGenPitchUp === "auto"
+                              ? "auto"
+                              : String(this.draftGenPitchUp),
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ...([0, 1, 2, 3, 5, 7, 12, 24] as const).map(
+                              (n) => [String(n), String(n)] as [string, string],
+                            ),
+                          ],
+                          onPick: (v) => {
+                            this.draftGenPitchUp =
+                              v === "auto" ? "auto" : Number(v);
+                          },
+                        })}
+                        <span class="text-[0.65rem] text-neutral-500 opacity-80"
+                          >${t("seq.genPitchRangeHint")}</span
+                        >
                         ${this.#renderGenChoice({
                           label: t("seq.genKey"),
                           value:
@@ -3001,6 +3174,7 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #commitGenerate(): Promise<void> {
+    this.#persistGenUi();
     this.seqModal = null;
     await this.#generateSequence({ confirmed: true });
   }
@@ -3009,6 +3183,7 @@ export class GlSequencerPage extends LitElement {
     this.draftGenDensity = "auto";
     this.draftGenEnergy = "auto";
     this.draftGenDrumsTextures = "auto";
+    this.draftGenMusicStyle = "auto";
     this.draftGenGroove = "auto";
     this.draftGenKey = "auto";
     this.draftGenScale = "auto";
@@ -3022,9 +3197,12 @@ export class GlSequencerPage extends LitElement {
     this.draftGenStutter = "auto";
     this.draftGenCallResponse = "auto";
     this.draftGenLockPitch = "off";
+    this.draftGenPitchUp = "auto";
+    this.draftGenPitchDown = "auto";
     this.draftGenSampleFilter = "all";
     this.draftGenAdvanced = true;
     this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+    this.#persistGenUi();
   }
 
   #genPoolSamples(): Sample[] {
@@ -3052,7 +3230,10 @@ export class GlSequencerPage extends LitElement {
                 variant="outline"
                 type="neutral"
                 ?active=${opts.value === value}
-                @click=${() => opts.onPick(value)}
+                @click=${() => {
+                  opts.onPick(value);
+                  this.#persistGenUi();
+                }}
               >
                 ${label}
               </sonic-button>
@@ -3091,6 +3272,7 @@ export class GlSequencerPage extends LitElement {
             ?active=${isAuto}
             @click=${() => {
               opts.onChange(isAuto ? opts.fallback : "auto");
+              this.#persistGenUi();
             }}
           >
             ${t("seq.genAuto")}
@@ -3105,6 +3287,7 @@ export class GlSequencerPage extends LitElement {
           .valueAsNumber=${sliderValue}
           @input=${(e: Event) => {
             opts.onChange((e.target as HTMLInputElement).valueAsNumber);
+            this.#persistGenUi();
           }}
         />
         ${display
@@ -3140,6 +3323,7 @@ export class GlSequencerPage extends LitElement {
     this.exportPermalink = null;
     this.exportLibraryOk = null;
     this.#bounceCache = null;
+    this.#revokeReel();
     set(exportFormKey, {
       title: this.project?.title ?? "Glane",
       sharing: this.exportSharing || "private",
@@ -3402,6 +3586,72 @@ export class GlSequencerPage extends LitElement {
       exportToast.fail(msg);
     } finally {
       this.exportBusy = null;
+    }
+  }
+
+  async #exportReelGenerate(): Promise<void> {
+    if (this.exportBusy) {
+      exportToast.progress(t("export.busy"));
+      return;
+    }
+    this.exportError = null;
+    this.reelEncoding = true;
+    try {
+      const bounce = await this.#ensureBounce(false);
+      if (!bounce) {
+        exportToast.fail(this.exportError ?? t("export.error"));
+        return;
+      }
+      this.#revokeReel();
+      this.#setExportProgress(t("export.reelEncoding"));
+      const styleId =
+        this.draftGenMusicStyle === "auto"
+          ? undefined
+          : this.draftGenMusicStyle;
+      const result = await reelExport.encode({
+        buffer: bounce.buffer,
+        title: this.exportTitle || this.project?.title || "Glane",
+        styleId,
+        onProgress: (ratio) => {
+          this.#setExportProgress(
+            tf("export.reelEncodingPct", { pct: Math.round(ratio * 100) }),
+          );
+        },
+      });
+      this.reelResult = result;
+      exportToast.done(t("export.reelReady"));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : t("export.error");
+      this.exportError = msg;
+      exportToast.fail(msg);
+    } finally {
+      this.reelEncoding = false;
+      this.exportBusy = null;
+    }
+  }
+
+  #exportReelDownload(): void {
+    if (!this.reelResult) return;
+    reelExport.download(
+      this.exportTitle || this.project?.title || "glane",
+      this.reelResult,
+    );
+    exportToast.done(t("export.doneDownload"));
+  }
+
+  async #exportReelShare(): Promise<void> {
+    if (!this.reelResult) return;
+    const r = await reelExport.share(
+      this.exportTitle || this.project?.title || "Glane",
+      this.reelResult,
+    );
+    if (r === "unsupported") {
+      this.exportError = t("export.reelShareUnsupported");
+      exportToast.fail(t("export.reelShareUnsupported"));
+      return;
+    }
+    if (r === "failed") {
+      exportToast.fail(t("export.error"));
     }
   }
 
@@ -4667,6 +4917,7 @@ export class GlSequencerPage extends LitElement {
       density: this.draftGenDensity,
       energy: this.draftGenEnergy,
       drumsVsTexture: this.draftGenDrumsTextures,
+      musicStyle: this.draftGenMusicStyle,
       groove: this.draftGenGroove,
       keyRootPc: this.draftGenKey,
       scaleMode: this.draftGenScale,
@@ -4679,6 +4930,8 @@ export class GlSequencerPage extends LitElement {
       stutter: this.draftGenStutter,
       callResponse: this.draftGenCallResponse,
       lockPitch: this.draftGenLockPitch,
+      pitchUpSemitones: this.draftGenPitchUp,
+      pitchDownSemitones: this.draftGenPitchDown,
       lockTempoPow2: this.draftGenLockTempoPow2,
       tracks: this.tracks.map((t) => ({ id: t.id, index: t.index })),
       samples: pool.map((s) => {
@@ -4693,12 +4946,16 @@ export class GlSequencerPage extends LitElement {
           loopScore: s.loopScore ?? a?.loopScore,
           loopStartMs: s.loopStartMs,
           loopEndMs: s.loopEndMs,
+          loopXfadeMs: s.loopXfadeMs,
           pitchHz: a?.pitchHz,
           noteName: a?.noteName,
           harmonicity: a?.harmonicity,
           centroidHz: a?.centroidHz,
           transientDensity: a?.transientDensity,
           analysisBpm: a?.bpm,
+          lufs: a?.lufs,
+          peakDbtp: a?.peakDbtp,
+          classScores: s.classScores as Record<string, number> | undefined,
           forceRole: s.forceRole,
           tags: s.tags,
           subclass: s.subclass,

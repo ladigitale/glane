@@ -157,7 +157,7 @@ export function roleHintFromYamnet(
   ) {
     return "texture";
   }
-  if (/\b(music|techno|hip-hop|orchestra|electronic-music)\b/.test(y)) {
+  if (/\b(music|techno|hip-hop|hiphop|orchestra|electronic-music|reggae|jazz|rock|disco|funk|blues|classical|ambient|house|drum-and-bass)\b/.test(y)) {
     return "loop";
   }
   if (
