@@ -1,7 +1,6 @@
 /** Deterministic generative helpers — song-form motifs + expressive roles. */
 
 import {
-  DEFAULT_TRACK_FX,
   ExprRoleSchema,
   normalizeTrackFx,
   parseExprRoleTag,
@@ -205,52 +204,295 @@ function sectionDensityBoost(base: number, energy: number): number {
   return clamp(base * (0.8 + e * 0.4), 0.4, 1.25);
 }
 
+type SpectralBand = "sub" | "low" | "mid" | "high" | "air";
+
+type SpectralOccupancy = {
+  id: string;
+  role: ExprRole;
+  hz: number;
+};
+
+/** Centroid when analysed; else approximate from pitched MIDI. */
+function sampleCentroidHz(s: SequenceSampleIn): number | null {
+  if (s.centroidHz != null && s.centroidHz > 20 && s.centroidHz < 16_000) {
+    return s.centroidHz;
+  }
+  const midi = sampleSourceMidi(s);
+  if (midi != null) return 440 * Math.pow(2, (midi - 69) / 12);
+  return null;
+}
+
+function bandFromHz(hz: number): SpectralBand {
+  if (hz < 120) return "sub";
+  if (hz < 400) return "low";
+  if (hz < 1600) return "mid";
+  if (hz < 4500) return "high";
+  return "air";
+}
+
+/** Ideal centre + acceptable bands for a mix role (arrangement scaffolding). */
+function roleSpectralTarget(role: ExprRole): {
+  idealHz: number;
+  bands: readonly SpectralBand[];
+} {
+  switch (role) {
+    case "kick":
+      return { idealHz: 85, bands: ["sub", "low"] };
+    case "bass":
+      return { idealHz: 120, bands: ["sub", "low"] };
+    case "snare":
+      return { idealHz: 1000, bands: ["mid", "high"] };
+    case "hat":
+      return { idealHz: 6500, bands: ["high", "air"] };
+    case "perc":
+      return { idealHz: 2200, bands: ["mid", "high"] };
+    case "chord":
+      return { idealHz: 480, bands: ["low", "mid"] };
+    case "lead":
+      return { idealHz: 1600, bands: ["mid", "high"] };
+    case "loop":
+      return { idealHz: 650, bands: ["low", "mid"] };
+    case "texture":
+      return { idealHz: 1400, bands: ["mid", "high"] };
+    case "fx":
+      return { idealHz: 3800, bands: ["high", "air"] };
+  }
+}
+
+/** Lower = better fit (same polarity as scoreSampleForRole). */
+function spectralFitPenalty(s: SequenceSampleIn, role: ExprRole): number {
+  const hz = sampleCentroidHz(s);
+  if (hz == null) return 0.15;
+  const { idealHz, bands } = roleSpectralTarget(role);
+  const band = bandFromHz(hz);
+  let pen = bands.includes(band) ? 0 : 1.35;
+  const oct = Math.abs(Math.log2(hz / Math.max(20, idealHz)));
+  pen += Math.min(2.2, oct * 0.6);
+  return pen;
+}
+
+function spectralClashPenalty(
+  s: SequenceSampleIn,
+  role: ExprRole,
+  occupied: readonly SpectralOccupancy[],
+): number {
+  const hz = sampleCentroidHz(s);
+  if (hz == null || occupied.length === 0) return 0;
+  let pen = 0;
+  for (const o of occupied) {
+    if (o.id === s.id) {
+      pen += 1.6;
+      continue;
+    }
+    const oct = Math.abs(Math.log2(hz / o.hz));
+    if (oct >= 0.65) continue;
+    const bothLow =
+      (role === "kick" || role === "bass") &&
+      (o.role === "kick" || o.role === "bass");
+    // Kick+bass may share lows; other same-band stacks get carved apart.
+    pen += bothLow ? 0.4 : 1.55 * (1 - oct / 0.65);
+  }
+  return pen;
+}
+
+function roleEqBands(
+  role: ExprRole,
+  rnd: () => number,
+): { low: number; mid: number; high: number } {
+  switch (role) {
+    case "kick":
+      return {
+        low: 1.2 + rnd() * 0.2,
+        mid: 0.8 + rnd() * 0.1,
+        high: 0.62 + rnd() * 0.12,
+      };
+    case "bass":
+      return {
+        low: 1.12 + rnd() * 0.18,
+        mid: 1.05 + rnd() * 0.1,
+        high: 0.58 + rnd() * 0.14,
+      };
+    case "snare":
+      return {
+        low: 0.72 + rnd() * 0.1,
+        mid: 1.12 + rnd() * 0.12,
+        high: 1.15 + rnd() * 0.15,
+      };
+    case "hat":
+      return {
+        low: 0.42 + rnd() * 0.14,
+        mid: 0.88 + rnd() * 0.1,
+        high: 1.28 + rnd() * 0.22,
+      };
+    case "perc":
+      return {
+        low: 0.68 + rnd() * 0.12,
+        mid: 1.05 + rnd() * 0.08,
+        high: 1.15 + rnd() * 0.15,
+      };
+    case "chord":
+      return {
+        low: 0.82 + rnd() * 0.1,
+        mid: 1.08 + rnd() * 0.1,
+        high: 0.92 + rnd() * 0.1,
+      };
+    case "lead":
+      return {
+        low: 0.68 + rnd() * 0.12,
+        mid: 1.05 + rnd() * 0.1,
+        high: 1.18 + rnd() * 0.15,
+      };
+    case "loop":
+      return {
+        low: 0.88 + rnd() * 0.08,
+        mid: 1.05 + rnd() * 0.08,
+        high: 0.92 + rnd() * 0.1,
+      };
+    case "texture":
+      return {
+        low: 0.78 + rnd() * 0.1,
+        mid: 0.95 + rnd() * 0.08,
+        high: 1.08 + rnd() * 0.14,
+      };
+    case "fx":
+      return {
+        low: 0.6 + rnd() * 0.14,
+        mid: 0.9 + rnd() * 0.1,
+        high: 1.22 + rnd() * 0.2,
+      };
+  }
+}
+
+/** Nudge EQ when the home sample sits off the role's spectral seat. */
+function correctEqForSample(
+  bands: { low: number; mid: number; high: number },
+  role: ExprRole,
+  sample: SequenceSampleIn | undefined,
+): { low: number; mid: number; high: number } {
+  const hz = sample ? sampleCentroidHz(sample) : null;
+  if (hz == null) return bands;
+  const ideal = roleSpectralTarget(role).idealHz;
+  const ratio = hz / ideal;
+  let { low, mid, high } = bands;
+  if (ratio > 2.4) {
+    high *= 0.72;
+    mid *= 0.92;
+    low *= 1.12;
+  } else if (ratio > 1.6) {
+    high *= 0.85;
+    low *= 1.06;
+  } else if (ratio < 0.4) {
+    high *= 1.14;
+    mid *= 0.9;
+    low *= 0.88;
+  } else if (ratio < 0.65) {
+    high *= 1.08;
+    low *= 0.94;
+  }
+  return {
+    low: clamp(low, 0.35, 1.6),
+    mid: clamp(mid, 0.45, 1.45),
+    high: clamp(high, 0.35, 1.7),
+  };
+}
+
+/**
+ * Bake role spectral EQ onto a track FX. Wet FX stays wet unless the sample is
+ * badly off-band — then carve with EQ so the mix seat is preserved.
+ */
+function withSpectralTrackEq(
+  fx: TrackFx,
+  role: ExprRole,
+  sample: SequenceSampleIn | undefined,
+  rnd: () => number,
+): TrackFx {
+  const bands = correctEqForSample(roleEqBands(role, rnd), role, sample);
+  if (fx.type === "eq" || fx.type === "none") {
+    return fxEq(bands.low, bands.mid, bands.high);
+  }
+  const hz = sample ? sampleCentroidHz(sample) : null;
+  const ideal = roleSpectralTarget(role).idealHz;
+  const off =
+    hz != null ? Math.abs(Math.log2(hz / Math.max(20, ideal))) > 1.15 : false;
+  if (off && (isDrumRole(role) || role === "bass" || rnd() < 0.55)) {
+    return fxEq(bands.low, bands.mid, bands.high);
+  }
+  return fx;
+}
+
 /**
  * Classic-song sample identity: each section kind keeps one home sample so
  * verse / chorus returns reuse the same voice. Contrast lives in bridge/outro.
+ * Selection prefers role spectral seat + avoids stacking with other tracks.
  */
-function homeSampleIndexForKind(
+function pickHomeSampleForKind(
   kind: SectionKind,
-  poolLen: number,
-  assigned: Map<SectionKind, number>,
-): number {
-  if (poolLen <= 1) return 0;
+  role: ExprRole,
+  pool: SequenceSampleIn[],
+  assigned: Map<SectionKind, SequenceSampleIn>,
+  occupied: readonly SpectralOccupancy[],
+): SequenceSampleIn {
   const cached = assigned.get(kind);
-  if (cached != null) return cached;
-
-  const taken = new Set(assigned.values());
-  const prefer = (candidates: number[]): number => {
-    for (const raw of candidates) {
-      const idx = ((raw % poolLen) + poolLen) % poolLen;
-      if (!taken.has(idx)) return idx;
-    }
-    return ((candidates[0]! % poolLen) + poolLen) % poolLen;
-  };
-
-  let idx: number;
-  switch (kind) {
-    case "chorus":
-      idx = prefer([1, 0, 2]);
-      break;
-    case "prechorus":
-      idx = assigned.get("verse") ?? prefer([0, 1]);
-      break;
-    case "bridge":
-      idx = prefer([2, 1, poolLen - 1, 0]);
-      break;
-    case "outro":
-      idx = assigned.get("bridge") ?? prefer([2, poolLen - 1, 1, 0]);
-      break;
-    case "intro":
-      idx = assigned.get("verse") ?? prefer([0, 1]);
-      break;
-    case "verse":
-    default:
-      idx = prefer([0, 1]);
-      break;
+  if (cached) return cached;
+  if (pool.length === 0) {
+    throw new Error("pickHomeSampleForKind: empty pool");
   }
-  assigned.set(kind, idx);
-  return idx;
+
+  if (kind === "prechorus" || kind === "intro") {
+    const verse = assigned.get("verse");
+    if (verse) {
+      assigned.set(kind, verse);
+      return verse;
+    }
+  }
+  if (kind === "verse") {
+    const intro = assigned.get("intro");
+    if (intro) {
+      assigned.set(kind, intro);
+      return intro;
+    }
+  }
+  if (kind === "outro") {
+    const bridge = assigned.get("bridge");
+    if (bridge) {
+      assigned.set(kind, bridge);
+      return bridge;
+    }
+  }
+
+  const avoidIds = new Set<string>();
+  if (kind === "chorus") {
+    const verse = assigned.get("verse");
+    if (verse) avoidIds.add(verse.id);
+  }
+  if (kind === "bridge" || kind === "outro") {
+    for (const s of assigned.values()) avoidIds.add(s.id);
+  }
+
+  let best = pool[0]!;
+  let bestScore = Infinity;
+  for (const s of pool) {
+    let sc =
+      scoreSampleForRole(s, role) + spectralClashPenalty(s, role, occupied);
+    if (avoidIds.has(s.id) && pool.length > 1) sc += 2.8;
+    if (sc < bestScore) {
+      bestScore = sc;
+      best = s;
+    }
+  }
+  assigned.set(kind, best);
+  return best;
+}
+
+function registerSpectralOccupancy(
+  occupied: SpectralOccupancy[],
+  role: ExprRole,
+  sample: SequenceSampleIn,
+): void {
+  const hz = sampleCentroidHz(sample);
+  if (hz == null) return;
+  if (occupied.some((o) => o.id === sample.id)) return;
+  occupied.push({ id: sample.id, role, hz });
 }
 
 /**
@@ -1368,6 +1610,8 @@ function scoreSampleForRole(s: SequenceSampleIn, role: ExprRole): number {
   if (role === "bass" && (sampleSourceMidi(s) ?? 60) < 52) score -= 1;
   if (role === "chord" && (s.harmonicity ?? 0) > 0.35) score -= 1;
   if (role === "lead" && (s.harmonicity ?? 0) > 0.4) score -= 0.6;
+  // Seat the voice in the mix: prefer samples whose centroid matches the role band
+  score += spectralFitPenalty(s, role);
   // Loudness / peak: prefer controlled levels for sustained roles
   if (s.lufs != null && Number.isFinite(s.lufs)) {
     if (role === "texture" || role === "loop" || role === "chord") {
@@ -2329,28 +2573,23 @@ function pickRoleFx(
     style === "ambient";
 
   switch (role) {
-    case "kick":
-      return fxEq(
-        1.15 + rnd() * 0.25,
-        0.9 + rnd() * 0.1,
-        0.75 + rnd() * 0.15,
-      );
-    case "hat":
-      return fxEq(
-        0.55 + rnd() * 0.2,
-        0.95,
-        1.2 + rnd() * 0.3,
-      );
+    case "kick": {
+      const b = roleEqBands(role, rnd);
+      return fxEq(b.low, b.mid, b.high);
+    }
+    case "hat": {
+      const b = roleEqBands(role, rnd);
+      return fxEq(b.low, b.mid, b.high);
+    }
     case "bass":
       // Rare chorus on disco/funk bass; else EQ
       if (modP > 0.45 && rnd() < 0.22) {
         return fxChorus(rnd, bias, false);
       }
-      return fxEq(
-        1.2 + rnd() * 0.3,
-        0.95,
-        0.7 + rnd() * 0.2,
-      );
+      {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
     case "snare":
       if (rnd() < wetP * 0.85) {
         return pickSpaceFx(
@@ -2364,18 +2603,24 @@ function pickRoleFx(
           [0.15, 0.35],
         );
       }
-      return fxEq(0.85, 1.1, 1.2);
+      {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
     case "chord": {
       const r = rnd();
-      if (r < modP * 0.7) return fxChorus(rnd, bias, true);
-      if (r < wetP) {
+      if (r < modP * 0.55) return fxChorus(rnd, bias, true);
+      if (r < wetP * 0.85) {
         return fxReverb(bpm, rnd, bias, 0.22, 0.45, [1.5, 2, 3]);
       }
-      return fxEq(0.95, 1, 1.05);
+      {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
     }
     case "lead": {
       const r = rnd();
-      if (r < wetP * bias.echoBias) {
+      if (r < wetP * bias.echoBias * 0.85) {
         return fxEcho(
           bpm,
           rnd,
@@ -2387,23 +2632,31 @@ function pickRoleFx(
           0.45,
         );
       }
-      if (r < wetP * bias.echoBias + modP * 0.45) {
+      if (r < wetP * bias.echoBias * 0.85 + modP * 0.4) {
         return lyrical || rnd() < 0.55
           ? fxVibrato(rnd, lyrical)
           : fxTremolo(rnd, energy > 0.6);
       }
-      if (r < wetP * bias.echoBias + modP) {
+      if (r < wetP * bias.echoBias * 0.85 + modP * 0.85) {
         return fxChorus(rnd, bias, true);
       }
-      if (r < wetP + modP * 0.3) {
+      if (r < wetP * 0.9 + modP * 0.25) {
         return fxReverb(bpm, rnd, bias, 0.16, 0.38, [1, 1.5, 2]);
       }
-      return fxEq(0.9, 1.05, 1.1);
+      {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
     }
     case "texture": {
       const r = rnd();
-      if (r < modP * 0.55) return fxChorus(rnd, bias, true);
-      if (r < modP * 0.55 + wetP * 0.25) {
+      // Prefer mild EQ seat more often so beds don't all occupy the same band.
+      if (r < 0.32) {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
+      if (r < 0.32 + modP * 0.45) return fxChorus(rnd, bias, true);
+      if (r < 0.32 + modP * 0.45 + wetP * 0.22) {
         return fxEcho(
           bpm,
           rnd,
@@ -2419,8 +2672,12 @@ function pickRoleFx(
     }
     case "loop": {
       const r = rnd();
-      if (r < modP * 0.5) return fxTremolo(rnd, energy > 0.55);
-      if (r < modP * 0.5 + wetP * 0.45) {
+      if (r < 0.38) {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
+      if (r < 0.38 + modP * 0.4) return fxTremolo(rnd, energy > 0.55);
+      if (r < 0.38 + modP * 0.4 + wetP * 0.35) {
         return pickSpaceFx(
           bpm,
           rnd,
@@ -2432,13 +2689,16 @@ function pickRoleFx(
           [0.15, 0.35],
         );
       }
-      if (r < modP * 0.5 + wetP * 0.45 + modP * 0.25) {
+      if (r < 0.38 + modP * 0.4 + wetP * 0.35 + modP * 0.2) {
         return fxChorus(rnd, bias, false);
       }
-      return { ...DEFAULT_TRACK_FX };
+      {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
     }
     case "perc":
-      if (rnd() < wetP * 0.55) {
+      if (rnd() < wetP * 0.45) {
         return fxEcho(
           bpm,
           rnd,
@@ -2450,12 +2710,19 @@ function pickRoleFx(
           0.35,
         );
       }
-      if (rnd() < modP * 0.25) return fxTremolo(rnd, true);
-      return { ...DEFAULT_TRACK_FX };
+      if (rnd() < modP * 0.2) return fxTremolo(rnd, true);
+      {
+        const b = roleEqBands(role, rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
     case "fx":
     default: {
       const r = rnd();
-      if (r < wetP * bias.echoBias) {
+      if (r < 0.28) {
+        const b = roleEqBands("fx", rnd);
+        return fxEq(b.low, b.mid, b.high);
+      }
+      if (r < 0.28 + wetP * bias.echoBias) {
         return fxEcho(
           bpm,
           rnd,
@@ -2467,7 +2734,7 @@ function pickRoleFx(
           0.55,
         );
       }
-      if (r < wetP * bias.echoBias + modP * 0.6) {
+      if (r < 0.28 + wetP * bias.echoBias + modP * 0.5) {
         const m = rnd();
         if (m < 0.45) return fxChorus(rnd, bias, true);
         if (m < 0.75) return fxTremolo(rnd, energy > 0.5);
@@ -2564,7 +2831,8 @@ function pickTrackMix(
  * Controls: seed + music style/patterns + density/energy/mix/groove; advanced
  * locks (key, palette, form, humanize, variation, bpm-sync, reverse, stutter,
  * call–response, lock-pitch). Sample voices stay pinned per section kind so
- * verse/chorus returns stay familiar. Uses sample analysis + ML tags when present.
+ * verse/chorus returns stay familiar; spectral seating (centroid + role EQ)
+ * spreads lows / mids / highs. Uses sample analysis + ML tags when present.
  * Pass `"auto"` to let the seed pick; omit for engine defaults.
  */
 export function planSequence(opts: {
@@ -2822,6 +3090,9 @@ export function planSequence(opts: {
           ? (0.12 + energy * 0.1) * (0.55 + variation * 0.9)
           : 0;
 
+  /** Cross-track spectral seats already claimed (centroid occupancy). */
+  const spectralOccupied: SpectralOccupancy[] = [];
+
   for (let ti = 0; ti < sortedTracks.length; ti++) {
     const track = sortedTracks[ti]!;
     const role = roles[ti] ?? "perc";
@@ -2853,13 +3124,14 @@ export function planSequence(opts: {
           : 14) * humanize;
 
     // Stable home sample per section kind (verse↔verse, chorus↔chorus).
-    const homeByKind = new Map<SectionKind, number>();
+    const homeByKind = new Map<SectionKind, SequenceSampleIn>();
     const kindOccurrence = new Map<SectionKind, number>();
     /** Same sample window when a section kind returns (familiar ear-hook). */
     const loopContentByKey = new Map<
       string,
       { contentOffsetMs: number; loopEnabled: boolean; loopLengthMs?: number }
     >();
+    let trackFxRefined = false;
 
     for (const section of sections) {
       const baseMotif =
@@ -2901,11 +3173,24 @@ export function planSequence(opts: {
                 ? Math.max(1, Math.min(2, section.bars))
                 : 1;
 
-      const homeIdx = homeSampleIndexForKind(
+      const homeWasNew = !homeByKind.has(section.kind);
+      const homeSample = pickHomeSampleForKind(
         section.kind,
-        samplePool.length,
+        role,
+        samplePool,
         homeByKind,
+        spectralOccupied,
       );
+      if (homeWasNew) {
+        registerSpectralOccupancy(spectralOccupied, role, homeSample);
+      }
+      if (!trackFxRefined) {
+        const plan = trackPlans[ti];
+        if (plan) {
+          plan.fx = withSpectralTrackEq(plan.fx, role, homeSample, rnd);
+        }
+        trackFxRefined = true;
+      }
 
       for (let b = 0; b < section.bars; b += barStride) {
         const absBar = section.startBar + b;
@@ -2919,18 +3204,28 @@ export function planSequence(opts: {
         const degreeHint = chord.degree;
 
         // Stick to the section home sample; rare fill ornament only at high variation.
-        let sampleIdx = homeIdx;
+        let sample = homeSample;
         const lastBar = b + barStride >= section.bars;
         const allowOrnament =
           variation > 0.6 &&
           samplePool.length > 1 &&
           (lastBar || section.altSample || section.kind === "bridge");
         if (allowOrnament && rnd() < (variation - 0.6) * 0.5) {
-          sampleIdx =
-            (homeIdx + pickInt(rnd, 1, samplePool.length - 1)) %
-            samplePool.length;
+          // Prefer an ornament that still respects the role band when possible.
+          let bestOrn = samplePool.find((s) => s.id !== homeSample.id) ?? homeSample;
+          let bestSc = Infinity;
+          for (const cand of samplePool) {
+            if (cand.id === homeSample.id) continue;
+            const sc =
+              spectralFitPenalty(cand, role) +
+              spectralClashPenalty(cand, role, spectralOccupied) * 0.5;
+            if (sc < bestSc) {
+              bestSc = sc;
+              bestOrn = cand;
+            }
+          }
+          sample = bestOrn;
         }
-        const sample = samplePool[sampleIdx]!;
 
         if (
           !sectionAllowsRole(role, section, b, energy, rnd)
