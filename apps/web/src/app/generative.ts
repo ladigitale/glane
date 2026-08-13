@@ -206,6 +206,54 @@ function sectionDensityBoost(base: number, energy: number): number {
 }
 
 /**
+ * Classic-song sample identity: each section kind keeps one home sample so
+ * verse / chorus returns reuse the same voice. Contrast lives in bridge/outro.
+ */
+function homeSampleIndexForKind(
+  kind: SectionKind,
+  poolLen: number,
+  assigned: Map<SectionKind, number>,
+): number {
+  if (poolLen <= 1) return 0;
+  const cached = assigned.get(kind);
+  if (cached != null) return cached;
+
+  const taken = new Set(assigned.values());
+  const prefer = (candidates: number[]): number => {
+    for (const raw of candidates) {
+      const idx = ((raw % poolLen) + poolLen) % poolLen;
+      if (!taken.has(idx)) return idx;
+    }
+    return ((candidates[0]! % poolLen) + poolLen) % poolLen;
+  };
+
+  let idx: number;
+  switch (kind) {
+    case "chorus":
+      idx = prefer([1, 0, 2]);
+      break;
+    case "prechorus":
+      idx = assigned.get("verse") ?? prefer([0, 1]);
+      break;
+    case "bridge":
+      idx = prefer([2, 1, poolLen - 1, 0]);
+      break;
+    case "outro":
+      idx = assigned.get("bridge") ?? prefer([2, poolLen - 1, 1, 0]);
+      break;
+    case "intro":
+      idx = assigned.get("verse") ?? prefer([0, 1]);
+      break;
+    case "verse":
+    default:
+      idx = prefer([0, 1]);
+      break;
+  }
+  assigned.set(kind, idx);
+  return idx;
+}
+
+/**
  * Soft gate: should this role place hits on this bar of the section?
  * Creates audible silence / strip-downs (intro entrance, bridge drop, outro fade).
  */
@@ -2515,7 +2563,8 @@ function pickTrackMix(
  * Plan a full multi-track sequence over `bars`, drawing from the library.
  * Controls: seed + music style/patterns + density/energy/mix/groove; advanced
  * locks (key, palette, form, humanize, variation, bpm-sync, reverse, stutter,
- * call–response, lock-pitch). Uses sample analysis + ML tags when present.
+ * call–response, lock-pitch). Sample voices stay pinned per section kind so
+ * verse/chorus returns stay familiar. Uses sample analysis + ML tags when present.
  * Pass `"auto"` to let the seed pick; omit for engine defaults.
  */
 export function planSequence(opts: {
@@ -2542,7 +2591,7 @@ export function planSequence(opts: {
   formStyle?: GenFormStyle;
   /** Timing jitter strength (0–1), or `"auto"`. */
   humanize?: number | GenAuto;
-  /** Motif evolve / sample rotate / reverse·stutter intensity (0–1), or `"auto"`. */
+  /** Motif evolve / fill ornaments (0–1), or `"auto"`. Home samples stay pinned. */
   variation?: number | GenAuto;
   bpmSync?: GenTriState;
   reverse?: GenTriState;
@@ -2619,10 +2668,15 @@ export function planSequence(opts: {
           styleProfile.humanizeCenter ?? 1,
           styleProfile.humanizeCenter,
         );
-  const variation =
-    opts.variation === undefined
-      ? 0.55
-      : resolveSlider(opts.variation, rnd, 0, 1, 0.55);
+  // Bias toward familiarity: auto stays near ~0.32 (ornaments, not sample churn).
+  const variation = resolveStyleBiasedSlider(
+    opts.variation,
+    rnd,
+    0,
+    1,
+    0.32,
+    0.32,
+  );
   const scaleMode: GenScaleMode =
     opts.scaleMode && opts.scaleMode !== "auto"
       ? opts.scaleMode
@@ -2798,15 +2852,25 @@ export function planSequence(opts: {
           ? 18 + energy * 10
           : 14) * humanize;
 
-    let sampleCursor = 0;
-    const rotateEvery = Math.max(
-      1,
-      2 - Math.floor(energy * 1.5 * (0.5 + variation)),
-    );
+    // Stable home sample per section kind (verse↔verse, chorus↔chorus).
+    const homeByKind = new Map<SectionKind, number>();
+    const kindOccurrence = new Map<SectionKind, number>();
+    /** Same sample window when a section kind returns (familiar ear-hook). */
+    const loopContentByKey = new Map<
+      string,
+      { contentOffsetMs: number; loopEnabled: boolean; loopLengthMs?: number }
+    >();
 
     for (const section of sections) {
       const baseMotif =
         section.kind === "bridge" || section.kind === "outro" ? motifAlt : motif;
+      const occurrence = kindOccurrence.get(section.kind) ?? 0;
+      kindOccurrence.set(section.kind, occurrence + 1);
+      // Returning sections stay closer to the home motif (classic song recall).
+      const evolveScale =
+        occurrence === 0
+          ? 0.22 + variation * 0.5
+          : 0.1 + variation * 0.32;
 
       const sparseSection =
         section.kind === "intro" ||
@@ -2837,6 +2901,12 @@ export function planSequence(opts: {
                 ? Math.max(1, Math.min(2, section.bars))
                 : 1;
 
+      const homeIdx = homeSampleIndexForKind(
+        section.kind,
+        samplePool.length,
+        homeByKind,
+      );
+
       for (let b = 0; b < section.bars; b += barStride) {
         const absBar = section.startBar + b;
         const barTick = absBar * ticksPerBar;
@@ -2848,20 +2918,19 @@ export function planSequence(opts: {
             });
         const degreeHint = chord.degree;
 
-        // Rotate samples mid-song
-        if (b % rotateEvery === 0 || section.altSample) {
-          sampleCursor = (sampleCursor + 1) % samplePool.length;
-        }
-        if (
-          section.altSample &&
+        // Stick to the section home sample; rare fill ornament only at high variation.
+        let sampleIdx = homeIdx;
+        const lastBar = b + barStride >= section.bars;
+        const allowOrnament =
+          variation > 0.6 &&
           samplePool.length > 1 &&
-          rnd() < 0.4 + variation * 0.55
-        ) {
-          sampleCursor =
-            (sampleCursor + pickInt(rnd, 1, samplePool.length - 1)) %
+          (lastBar || section.altSample || section.kind === "bridge");
+        if (allowOrnament && rnd() < (variation - 0.6) * 0.5) {
+          sampleIdx =
+            (homeIdx + pickInt(rnd, 1, samplePool.length - 1)) %
             samplePool.length;
         }
-        const sample = samplePool[sampleCursor]!;
+        const sample = samplePool[sampleIdx]!;
 
         if (
           !sectionAllowsRole(role, section, b, energy, rnd)
@@ -2888,7 +2957,7 @@ export function planSequence(opts: {
             role,
             section: {
               ...section,
-              evolve: section.evolve * (0.45 + variation * 0.9),
+              evolve: section.evolve * evolveScale,
             },
             barInSection: b,
             beatsPerBar,
@@ -3062,22 +3131,30 @@ export function planSequence(opts: {
             ((sample.loopScore ?? 0) > 0.5 &&
               (factor > 1.05 || role === "texture" || role === "loop"));
 
-          const {
-            contentOffsetMs,
-            loopEnabled,
-            loopLengthMs,
-          } = pickLoopContent({
-            sample,
-            role,
-            lengthMs,
-            bpm,
-            beatsPerBar,
-            loopEnabled: loopSeed,
-            stretchMode,
-            energy,
-            variation,
-            rnd,
-          });
+          const contentKey = `${section.kind}:${sample.id}:${stretchMode}`;
+          let loopPick = loopContentByKey.get(contentKey);
+          if (!loopPick) {
+            loopPick = pickLoopContent({
+              sample,
+              role,
+              lengthMs,
+              bpm,
+              beatsPerBar,
+              loopEnabled: loopSeed,
+              stretchMode,
+              energy,
+              variation,
+              rnd,
+            });
+            loopContentByKey.set(contentKey, loopPick);
+          }
+          // Stable offset/slice when the section returns; loop flag follows clip length.
+          const contentOffsetMs = loopPick.contentOffsetMs;
+          const loopLengthMs = loopPick.loopLengthMs;
+          const loopEnabled =
+            loopLengthMs != null
+              ? lengthMs > loopLengthMs * 1.05
+              : loopPick.loopEnabled;
 
           const reverse =
             reverseBaseChance > 0 &&
