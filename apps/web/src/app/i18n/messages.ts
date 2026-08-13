@@ -306,6 +306,9 @@ const fr = {
   "seq.genLockTempoPow2": "Tempo ×2ⁿ",
   "seq.genLockTempoPow2Hint":
     "Adapte le tempo seulement en ×¼, ×½, ×1, ×2, ×4 ou ×8 (pas de ratio libre).",
+  "seq.genForbidPitchStretch": "Sans stretch pitch",
+  "seq.genForbidPitchStretchHint":
+    "Interdit le mode stretch « pitch » (preserve-pitch). Remplacé par copy (pitch fixe) ou resample.",
   "seq.genLockPitch": "Pitch fixe",
   "seq.genLockPitchHint":
     "Hauteur native : pas de transposition, mélodie ni accords. Idéal pour boucles / repeats.",
@@ -726,6 +729,9 @@ const en: Record<keyof typeof fr, string> = {
   "seq.genLockTempoPow2": "Tempo ×2ⁿ",
   "seq.genLockTempoPow2Hint":
     "Only adapt tempo by ×¼, ×½, ×1, ×2, ×4, or ×8 (no free ratios).",
+  "seq.genForbidPitchStretch": "No pitch stretch",
+  "seq.genForbidPitchStretchHint":
+    "Disallow stretch mode “pitch” (preserve-pitch). Falls back to copy (fixed pitch) or resample.",
   "seq.genLockPitch": "Fixed pitch",
   "seq.genLockPitchHint":
     "Native pitch: no transpose, melody, or chords. Best for loops / repeats.",

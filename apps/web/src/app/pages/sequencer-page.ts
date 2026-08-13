@@ -615,6 +615,7 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenVariation: number | GenAuto = "auto";
   @state() private draftGenBpmSync: GenTriState = "auto";
   @state() private draftGenLockTempoPow2: GenTriState = "off";
+  @state() private draftGenForbidPitchStretch: GenTriState = "off";
   @state() private draftGenReverse: GenTriState = "auto";
   @state() private draftGenStutter: GenTriState = "auto";
   @state() private draftGenCallResponse: GenTriState = "auto";
@@ -810,6 +811,7 @@ export class GlSequencerPage extends LitElement {
         variation: this.draftGenVariation,
         bpmSync: this.draftGenBpmSync,
         lockTempoPow2: this.draftGenLockTempoPow2,
+        forbidPitchStretch: this.draftGenForbidPitchStretch,
         reverse: this.draftGenReverse,
         stutter: this.draftGenStutter,
         callResponse: this.draftGenCallResponse,
@@ -887,6 +889,8 @@ export class GlSequencerPage extends LitElement {
     this.draftGenBpmSync = g.bpmSync as GenTriState;
     this.draftGenLockTempoPow2 =
       g.lockTempoPow2 === "on" ? "on" : "off";
+    this.draftGenForbidPitchStretch =
+      g.forbidPitchStretch === "on" ? "on" : "off";
     this.draftGenReverse = g.reverse as GenTriState;
     this.draftGenStutter = g.stutter as GenTriState;
     this.draftGenCallResponse = g.callResponse as GenTriState;
@@ -3075,6 +3079,22 @@ export class GlSequencerPage extends LitElement {
                     >${t("seq.genLockTempoPow2Hint")}</span
                   >
                   ${this.#renderGenChoice({
+                    label: t("seq.genForbidPitchStretch"),
+                    value:
+                      this.draftGenForbidPitchStretch === "on" ? "on" : "off",
+                    options: [
+                      ["off", t("seq.genOff")],
+                      ["on", t("seq.genOn")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenForbidPitchStretch =
+                        v === "on" ? "on" : "off";
+                    },
+                  })}
+                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
+                    >${t("seq.genForbidPitchStretchHint")}</span
+                  >
+                  ${this.#renderGenChoice({
                     label: t("seq.genReverse"),
                     value: this.draftGenReverse,
                     options: [
@@ -3193,6 +3213,7 @@ export class GlSequencerPage extends LitElement {
     this.draftGenVariation = "auto";
     this.draftGenBpmSync = "auto";
     this.draftGenLockTempoPow2 = "off";
+    this.draftGenForbidPitchStretch = "off";
     this.draftGenReverse = "auto";
     this.draftGenStutter = "auto";
     this.draftGenCallResponse = "auto";
@@ -4933,6 +4954,7 @@ export class GlSequencerPage extends LitElement {
       pitchUpSemitones: this.draftGenPitchUp,
       pitchDownSemitones: this.draftGenPitchDown,
       lockTempoPow2: this.draftGenLockTempoPow2,
+      forbidPitchStretch: this.draftGenForbidPitchStretch,
       tracks: this.tracks.map((t) => ({ id: t.id, index: t.index })),
       samples: pool.map((s) => {
         const a = analysisById.get(s.id);

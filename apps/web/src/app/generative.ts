@@ -1968,6 +1968,18 @@ function stretchWithoutPitchShift(mode: StretchMode): StretchMode {
   return mode === "resample" ? "preserve-pitch" : mode;
 }
 
+/**
+ * Drop `preserve-pitch` (UI label "pitch") when forbidden.
+ * With pitch lock → `copy` (keep height); else → `resample` (tempo via rate).
+ */
+function withoutPreservePitchStretch(
+  mode: StretchMode,
+  lockPitch: boolean,
+): StretchMode {
+  if (mode !== "preserve-pitch") return mode;
+  return lockPitch ? "copy" : "resample";
+}
+
 /** Allowed tempo-rate multiples when pow2 lock is on. */
 const TEMPO_POW2_RATIOS = [0.25, 0.5, 1, 2, 4, 8] as const;
 
@@ -2885,6 +2897,11 @@ export function planSequence(opts: {
    * rate changes). `"auto"` / `"off"` = free ratio.
    */
   lockTempoPow2?: GenTriState;
+  /**
+   * Forbid stretch mode `preserve-pitch` (UI: "pitch"). Falls back to `copy`
+   * when pitch is locked, else `resample`. `"on"` / `"off"` (default off).
+   */
+  forbidPitchStretch?: GenTriState;
 }): SequencePlanResult {
   const { bars, beatsPerBar, ppq, bpm, seed, tracks, samples } = opts;
   if (bars < 1 || tracks.length === 0 || samples.length === 0) {
@@ -2958,6 +2975,7 @@ export function planSequence(opts: {
   const callResponseMode: GenTriState = opts.callResponse ?? "auto";
   const lockPitch = opts.lockPitch === "on";
   const lockTempoPow2 = opts.lockTempoPow2 === "on";
+  const forbidPitchStretch = opts.forbidPitchStretch === "on";
   const resolvePitchBound = (v: number | GenAuto | undefined): number => {
     if (v === "auto" || v == null || !Number.isFinite(v)) return 12;
     return Math.round(clamp(v, 0, 24));
@@ -3375,6 +3393,9 @@ export function planSequence(opts: {
             lockPitch,
             rnd,
           });
+          if (forbidPitchStretch) {
+            stretchMode = withoutPreservePitchStretch(stretchMode, lockPitch);
+          }
 
           // Pow2 tempo lock: avoid non-grid resample/stretch; tile or leave native.
           if (

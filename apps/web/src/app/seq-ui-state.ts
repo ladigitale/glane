@@ -44,6 +44,7 @@ export type SeqGenUiState = {
   variation: number | "auto";
   bpmSync: string;
   lockTempoPow2: string;
+  forbidPitchStretch: string;
   reverse: string;
   stutter: string;
   callResponse: string;
@@ -85,6 +86,7 @@ export const DEFAULT_SEQ_GEN_UI: SeqGenUiState = {
   variation: "auto",
   bpmSync: "auto",
   lockTempoPow2: "off",
+  forbidPitchStretch: "off",
   reverse: "auto",
   stutter: "auto",
   callResponse: "auto",
@@ -164,6 +166,11 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
       o.lockTempoPow2,
       new Set(["on", "off"]),
       DEFAULT_SEQ_GEN_UI.lockTempoPow2,
+    ),
+    forbidPitchStretch: oneOf(
+      o.forbidPitchStretch,
+      new Set(["on", "off"]),
+      DEFAULT_SEQ_GEN_UI.forbidPitchStretch,
     ),
     reverse: oneOf(o.reverse, TRI, DEFAULT_SEQ_GEN_UI.reverse),
     stutter: oneOf(o.stutter, TRI, DEFAULT_SEQ_GEN_UI.stutter),
