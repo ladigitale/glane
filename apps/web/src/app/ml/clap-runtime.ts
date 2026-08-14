@@ -8,8 +8,6 @@ import {
   resampleLinear,
   type ClapEmbeddingFeatures,
 } from "@glane/audio-ml";
-import ortWasmMjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
-import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
 
 export const CLAP_MODEL_ID = "Xenova/clap-htsat-unfused";
 export const CLAP_STATUS_EVENT = "glane:clap-status";
@@ -45,25 +43,21 @@ function emitStatus(detail: ClapStatusDetail): void {
   window.dispatchEvent(new CustomEvent(CLAP_STATUS_EVENT, { detail }));
 }
 
-function absoluteUrl(path: string): string {
-  if (/^(https?:|blob:|data:)/.test(path)) return path;
-  return new URL(path, globalThis.location.origin).href;
+/** Same-origin ORT files copied by Vite from @huggingface/transformers/dist (ORT version match). */
+function transformersOrtWasmRoot(): string {
+  return `${import.meta.env.BASE_URL}ml/transformers-ort`.replace(/\/?$/, "");
 }
 
 async function loadTransformers(): Promise<Transformers> {
   if (!tfPromise) {
     tfPromise = import("@huggingface/transformers").then((tf) => {
-      // Vite hashes the asset (`….jsep-xxxx.mjs`); a directory prefix would make ORT
-      // request the unhashed name (404 → SPA HTML → "Failed to fetch … module").
-      // Pass explicit hashed URLs (same pattern as demucs-runtime).
+      // Do NOT point at onnxruntime-web: transformers bundles its own ORT (≠ app dep).
+      // CDN default breaks under COEP; public/ml/transformers-ort is same-origin.
       try {
         const wasm = tf.env.backends?.onnx?.wasm;
         if (wasm) {
           wasm.numThreads = 1;
-          wasm.wasmPaths = {
-            mjs: absoluteUrl(ortWasmMjsUrl),
-            wasm: absoluteUrl(ortWasmUrl),
-          };
+          wasm.wasmPaths = `${transformersOrtWasmRoot()}/`;
         }
       } catch {
         /* older env shape */

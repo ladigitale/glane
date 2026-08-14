@@ -17,8 +17,6 @@ import {
   frameCount,
   sliceFrames,
 } from "@glane/audio-dsp";
-import ortWasmMjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
-import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
 
 export const DEMUCS_MODEL_URL =
   "https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx";
@@ -46,6 +44,13 @@ export function formatOrtError(e: unknown): string {
       `(${raw.slice(0, 100)})`
     );
   }
+  if (/both async and sync fetching of the wasm|no available backend/i.test(raw)) {
+    return (
+      "Backend ONNX WASM indisponible (fichiers /ml/ort/). " +
+      "Redémarre `yarn dev` pour recopier les WASM, puis hard-refresh. " +
+      `(${raw.slice(0, 120)})`
+    );
+  }
   return raw;
 }
 
@@ -54,9 +59,9 @@ function isOom(e: unknown): boolean {
   return /bad_alloc|ERROR_CODE:\s*6|out of memory|OOM/i.test(raw);
 }
 
-function absoluteUrl(path: string): string {
-  if (/^(https?:|blob:|data:)/.test(path)) return path;
-  return new URL(path, globalThis.location.origin).href;
+/** Same-origin ORT files copied by Vite from onnxruntime-web/dist. */
+function ortWasmRoot(): string {
+  return `${import.meta.env.BASE_URL}ml/ort`.replace(/\/?$/, "");
 }
 
 export async function hasWebGpu(): Promise<boolean> {
@@ -84,10 +89,7 @@ async function loadOrt(preferGpu: boolean): Promise<OrtModule> {
 
 function configureWasm(ort: OrtModule): void {
   ort.env.wasm.numThreads = 1;
-  ort.env.wasm.wasmPaths = {
-    mjs: absoluteUrl(ortWasmMjsUrl),
-    wasm: absoluteUrl(ortWasmUrl),
-  };
+  ort.env.wasm.wasmPaths = `${ortWasmRoot()}/`;
 }
 
 function lowMemOpts(

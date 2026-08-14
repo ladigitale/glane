@@ -24,17 +24,39 @@ function copyDirFiles(src: string, dest: string, filter?: (name: string) => bool
   }
 }
 
-/** Same-origin MediaPipe WASM (required under COEP). ORT uses Vite ?url imports. */
-function copyMediapipeWasm(): Plugin {
+/**
+ * Same-origin ML WASM under COEP (ADR-0015).
+ * - MediaPipe → YAMNet
+ * - transformers dist ORT → CLAP (must match the ORT version bundled in transformers)
+ * - onnxruntime-web → Demucs (app dependency)
+ * Unhashed public paths avoid Vite hash / SPA-fallback 404s that break ORT locateFile.
+ */
+function copyMlWasm(): Plugin {
   const sync = () => {
     const mp = resolvePkgDir("@mediapipe", "tasks-audio", "wasm");
     if (mp) {
       copyDirFiles(mp, path.join(rootDir, "public/ml/mediapipe-wasm"));
     }
+    const tfOrt = resolvePkgDir("@huggingface", "transformers", "dist");
+    if (tfOrt) {
+      copyDirFiles(
+        tfOrt,
+        path.join(rootDir, "public/ml/transformers-ort"),
+        (name) => name.startsWith("ort-wasm-simd-threaded.jsep."),
+      );
+    }
+    const ort = resolvePkgDir("onnxruntime-web", "dist");
+    if (ort) {
+      copyDirFiles(
+        ort,
+        path.join(rootDir, "public/ml/ort"),
+        (name) => name.startsWith("ort-wasm-simd-threaded.jsep."),
+      );
+    }
   };
 
   return {
-    name: "copy-mediapipe-wasm",
+    name: "copy-ml-wasm",
     buildStart: sync,
     configureServer() {
       sync();
@@ -56,7 +78,7 @@ export default defineConfig({
     },
   },
   plugins: [
-    copyMediapipeWasm(),
+    copyMlWasm(),
     VitePWA({
       registerType: "autoUpdate",
       // ML WASM/ORT are fetched on demand (Cache Storage / HF); do not SW-precache.
