@@ -12,6 +12,7 @@ import { sampleOpfs } from "@glane/audio-io";
 import {
   DSP_THRESHOLDS,
   EventHunter,
+  computeInterestScore,
   durationMsFromPcm,
   frameCount,
   sliceFrames,
@@ -25,6 +26,7 @@ import {
   type FileProcessMode,
 } from "./db.js";
 import { processQueue } from "./process-queue.js";
+import { cullExcessProcessedSamples } from "./sample-interest-cull.js";
 import {
   decodeAudioFileToPcm,
   isImportableAudio,
@@ -108,7 +110,9 @@ async function persistSample(opts: {
   loopXfadeMs?: number;
   loopScore?: number;
   nameExtra?: string;
-}): Promise<Sample> {
+  /** When false, score+save only — caller culls then enqueues (file hunt). */
+  polishNow?: boolean;
+}): Promise<Sample | null> {
   const id = createEntityId();
   await sampleOpfs.savePcm(
     id,
@@ -148,11 +152,23 @@ async function persistSample(opts: {
     loopXfadeMs: opts.loopXfadeMs,
     loopScore: opts.loopScore,
     loopProposed: opts.loopProposed,
+    interestScore: computeInterestScore({
+      pcm: toMonoPcm(opts.pcm, opts.session.channelCount),
+      sampleRate: opts.session.sampleRate,
+      kind: opts.kind,
+      confidence: opts.confidence,
+      loopScore: opts.loopScore,
+    }),
     createdAt: nowIso(),
     updatedAt: nowIso(),
     revision: 0,
   };
   await db.samples.put(sample);
+  if (opts.polishNow === false) return sample;
+
+  const cull = await cullExcessProcessedSamples(opts.session.id);
+  if (cull.culledIds.length > 0) processQueue.refresh();
+  if (cull.culledIds.includes(id)) return null;
   void processQueue.enqueue(id, opts.kind);
   return sample;
 }
@@ -180,6 +196,7 @@ async function persistExtraction(opts: {
     loopEndMs: extraction.loopEndMs,
     loopXfadeMs: extraction.loopXfadeMs,
     loopScore: extraction.loopScore,
+    polishNow: false,
   });
 }
 
@@ -307,20 +324,35 @@ async function processHunt(
   throwIfAborted(signal);
   await handle(hunter.flush());
 
+  const durationMs = Math.max(
+    1,
+    durationMsFromPcm(pcm, sampleRate, session.channelCount),
+  );
   await finishSession(session, {
-    durationMs: Math.max(
-      1,
-      durationMsFromPcm(pcm, sampleRate, session.channelCount),
-    ),
+    durationMs,
     status: "ready",
   });
 
-  onProgress?.({ phase: "done", ratio: 1, extracted: samples.length });
+  // Cull against audio duration, then polish keepers only.
+  const cull = await cullExcessProcessedSamples(session.id);
+  if (cull.culledIds.length > 0) processQueue.refresh();
+  const kept: Sample[] = [];
+  for (const s of samples) {
+    if (cull.culledIds.includes(s.id)) continue;
+    const row = await db.samples.get(s.id);
+    if (!row || row.deletedAt) continue;
+    const kind =
+      row.class === "texture" || row.class === "noise" ? "texture" : "oneshot";
+    void processQueue.enqueue(row.id, kind);
+    kept.push(row);
+  }
+
+  onProgress?.({ phase: "done", ratio: 1, extracted: kept.length });
   return {
     sessionId: session.id,
-    extracted: samples.length,
+    extracted: kept.length,
     skippedVoice,
-    samples,
+    samples: kept,
   };
 }
 
@@ -381,6 +413,7 @@ async function processSong(
       loopScore: 0.7,
       nameExtra: `${captureName} · slice ${i + 1}/${sliced.slices.length} · ${durationMs}ms`,
     });
+    if (!saved) continue;
     samples.push(saved);
     onSample?.(saved);
     if (i % 4 === 3) {
@@ -449,6 +482,16 @@ async function processWhole(
     status: "ready",
     dominantBpm: tempo?.bpm ?? null,
   });
+
+  if (!saved) {
+    onProgress?.({ phase: "done", ratio: 1, extracted: 0 });
+    return {
+      sessionId: session.id,
+      extracted: 0,
+      skippedVoice: 0,
+      samples: [],
+    };
+  }
 
   onSample?.(saved);
   onProgress?.({ phase: "done", ratio: 1, extracted: 1 });

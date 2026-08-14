@@ -13,8 +13,10 @@ import {
 import {
   EventHunter,
   DSP_THRESHOLDS,
+  computeInterestScore,
   durationMsFromPcm,
   songSlice,
+  toMonoPcm,
   type CaptureLiveState,
 } from "@glane/audio-dsp";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
@@ -44,7 +46,7 @@ import {
   isProcessingError,
   processQueue,
 } from "../process-queue.js";
-import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
+import { SAMPLES_CULLED_EVENT, cullExcessProcessedSamples } from "../sample-interest-cull.js";
 import {
   PROJECT_CHANGE_EVENT,
   projectWorkspace,
@@ -1391,6 +1393,13 @@ export class GlCapturePage extends LitElement {
           hunt.channelCount,
         ),
       );
+      const interestScore = computeInterestScore({
+        pcm: toMonoPcm(extraction.pcm, hunt.channelCount),
+        sampleRate: hunt.sampleRate,
+        kind: extraction.kind,
+        confidence: extraction.confidence,
+        loopScore: extraction.loopScore,
+      });
       const sample: Sample = {
         id,
         sessionId: hunt.id,
@@ -1409,11 +1418,19 @@ export class GlCapturePage extends LitElement {
         loopXfadeMs: extraction.loopXfadeMs,
         loopScore: extraction.loopScore,
         loopProposed: extraction.loopProposed,
+        interestScore,
         createdAt: nowIso(),
         updatedAt: nowIso(),
         revision: 0,
       };
       await db.samples.put(sample);
+      // Rank + soft-cap before polish so we do not queue hundreds of rejects.
+      const cull = await cullExcessProcessedSamples(hunt.id);
+      if (cull.culledIds.length > 0) processQueue.refresh();
+      if (cull.culledIds.includes(id)) {
+        this.liveState = "listening";
+        return;
+      }
       void processQueue.enqueue(id, extraction.kind);
       if (!opts.ignoreStop && this.#stopping) return;
 
@@ -1423,6 +1440,7 @@ export class GlCapturePage extends LitElement {
           class: sample.class,
           tags: sample.tags ?? [],
           loopProposed: Boolean(sample.loopProposed),
+          interestScore: sample.interestScore,
         },
         ...this.extracted,
       ].slice(0, 40);
@@ -1451,13 +1469,19 @@ export class GlCapturePage extends LitElement {
     this.#hunt = null;
     if (hunt) {
       const ended = nowIso();
-      void db.sessions.put({
-        ...hunt,
-        endedAt: ended,
-        durationMs: Math.round(performance.now() - this.#recordStartedAt),
-        status: "ready",
-        updatedAt: ended,
-      });
+      const durationMs = Math.round(performance.now() - this.#recordStartedAt);
+      void db.sessions
+        .put({
+          ...hunt,
+          endedAt: ended,
+          durationMs,
+          status: "ready",
+          updatedAt: ended,
+        })
+        .then(() => cullExcessProcessedSamples(hunt.id))
+        .then((cull) => {
+          if (cull.culledIds.length > 0) processQueue.refresh();
+        });
     }
     this.liveState = this.micOpen ? "listening" : "idle";
     this.clockMs = 0;
@@ -1494,15 +1518,21 @@ export class GlCapturePage extends LitElement {
     const stopped = await live?.stop();
     if (hunt && wasRecording) {
       const ended = nowIso();
-      void db.sessions.put({
-        ...hunt,
-        endedAt: ended,
-        durationMs:
-          stopped?.durationMs ??
-          Math.round(performance.now() - this.#recordStartedAt),
-        status: "ready",
-        updatedAt: ended,
-      });
+      const durationMs =
+        stopped?.durationMs ??
+        Math.round(performance.now() - this.#recordStartedAt);
+      void db.sessions
+        .put({
+          ...hunt,
+          endedAt: ended,
+          durationMs,
+          status: "ready",
+          updatedAt: ended,
+        })
+        .then(() => cullExcessProcessedSamples(hunt.id))
+        .then((cull) => {
+          if (cull.culledIds.length > 0) processQueue.refresh();
+        });
     }
     void this.#persistCapturePrefs();
   }

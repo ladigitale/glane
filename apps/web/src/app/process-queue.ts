@@ -2,7 +2,10 @@ import { createEntityId, nowIso } from "@glane/core-model";
 import { sampleOpfs } from "@glane/audio-io";
 import type { ProcessWorkerResponse } from "@glane/audio-dsp";
 import { db, type ProcessJob } from "./db.js";
-import { cullExcessProcessedSamples } from "./sample-interest-cull.js";
+import {
+  cullExcessProcessedSamples,
+  pruneSessionByInterest,
+} from "./sample-interest-cull.js";
 import { enqueueYamnetEnrich } from "./ml/enrich-queue.js";
 import { enqueueClapEmbed } from "./ml/clap-queue.js";
 
@@ -209,7 +212,11 @@ export const processQueue = (() => {
         updatedAt: nowIso(),
         revision: (sample.revision ?? 0) + 1,
       });
-      void cullExcessProcessedSamples(sample.sessionId).catch(() => undefined);
+      void cullExcessProcessedSamples(sample.sessionId)
+        .then((r) => {
+          if (r.culledIds.length > 0) emit();
+        })
+        .catch(() => undefined);
       void enqueueYamnetEnrich(msg.sampleId).catch(() => undefined);
       void enqueueClapEmbed(msg.sampleId).catch(() => undefined);
     }
@@ -374,6 +381,22 @@ export const processQueue = (() => {
     return true;
   }
 
+  /** Cull over-quota hunt sessions that still have open polish jobs. */
+  async function pruneOpenJobsByInterest(): Promise<void> {
+    const open = await db.processJobs
+      .where("status")
+      .anyOf(["pending", "running"])
+      .toArray();
+    const sessions = new Set<string>();
+    for (const j of open) {
+      const s = await db.samples.get(j.sampleId);
+      if (s && !s.deletedAt) sessions.add(s.sessionId);
+    }
+    for (const sessionId of sessions) {
+      await pruneSessionByInterest(sessionId);
+    }
+  }
+
   return {
     subscribe(fn: Listener): () => void {
       listeners.add(fn);
@@ -397,14 +420,23 @@ export const processQueue = (() => {
       }
       await syncErrorTags();
       await repairMissingPeakNorm();
+      // Drop over-quota hunt captures before polishing (incl. pre-score backlog).
+      await pruneOpenJobsByInterest();
       emit();
       void pump();
+    },
+
+    /** Recompute banner after jobs were removed outside the queue (cull/delete). */
+    refresh(): void {
+      emit();
     },
 
     async enqueue(
       sampleId: string,
       kind: ProcessJob["kind"],
-    ): Promise<ProcessJob> {
+    ): Promise<ProcessJob | null> {
+      const sample = await db.samples.get(sampleId);
+      if (!sample || sample.deletedAt) return null;
       const job = await putPendingJob(sampleId, kind);
       emit();
       if (started) void pump();

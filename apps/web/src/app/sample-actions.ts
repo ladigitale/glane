@@ -44,6 +44,11 @@ export async function deleteSample(sampleId: string): Promise<void> {
 
   await sampleOpfs.deletePcm(sampleId);
 
+  const jobs = await db.processJobs.where("sampleId").equals(sampleId).toArray();
+  if (jobs.length > 0) {
+    await db.processJobs.bulkDelete(jobs.map((j) => j.id));
+  }
+
   await db.ops.add({
     id: createEntityId(),
     entityType: "sample",

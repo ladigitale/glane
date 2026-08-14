@@ -1,4 +1,6 @@
-import type { Sample, Session } from "@glane/core-model";
+import { nowIso, type Sample, type Session } from "@glane/core-model";
+import { computeInterestScore, toMonoPcm } from "@glane/audio-dsp";
+import { sampleOpfs } from "@glane/audio-io";
 import {
   DEFAULT_TARGET_CAPTURES_PER_MIN,
   db,
@@ -24,7 +26,7 @@ export type CullResult = {
   target: number;
 };
 
-/** Soft-cap for processed samples in a hunt, toward target captures/min. */
+/** Soft-cap for samples in a hunt, toward target captures/min. */
 export function targetKeepCount(
   sessionDurationMs: number,
   targetPerMin: number,
@@ -37,17 +39,58 @@ export function targetKeepCount(
   );
 }
 
-function isProcessedKeepCandidate(s: Sample): boolean {
+/** Provisional / polished interest — enough to rank before polish queue. */
+function isInterestCullCandidate(s: Sample): boolean {
   if (s.deletedAt) return false;
   if (s.favorite) return false;
   if (s.interestScore == null || !Number.isFinite(s.interestScore)) return false;
-  const tags = s.tags ?? [];
-  return tags.includes("processing:done");
+  return true;
+}
+
+function inferKind(sample: {
+  class?: string;
+  tags?: string[];
+  name?: string;
+}): "oneshot" | "texture" {
+  if (sample.class === "texture" || sample.class === "noise") return "texture";
+  if ((sample.tags ?? []).includes("texture")) return "texture";
+  if (sample.name?.includes(" · texture · ")) return "texture";
+  return "oneshot";
 }
 
 /**
- * Soft-delete least interesting processed samples in a session until count ≈ target.
- * Favorites and unprocessed clips are never removed. Detection rate stats are untouched.
+ * Fill missing interestScore from OPFS (recovery for pre-score captures).
+ */
+export async function backfillInterestScores(
+  sessionId: string,
+): Promise<number> {
+  const rows = await db.samples.where("sessionId").equals(sessionId).toArray();
+  let n = 0;
+  for (const s of rows) {
+    if (s.deletedAt) continue;
+    if (s.interestScore != null && Number.isFinite(s.interestScore)) continue;
+    const audio = await sampleOpfs.loadPcm(s.id);
+    if (!audio || audio.pcm.length === 0) continue;
+    const score = computeInterestScore({
+      pcm: toMonoPcm(audio.pcm, audio.channelCount),
+      sampleRate: audio.sampleRate,
+      kind: inferKind(s),
+      confidence: s.confidence,
+      loopScore: s.loopScore,
+    });
+    await db.samples.update(s.id, {
+      interestScore: score,
+      updatedAt: nowIso(),
+    });
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * Soft-delete least interesting samples in a session until count ≈ target.
+ * Favorites and unscored clips are never removed. Runs before polish so the
+ * process queue only works on keepers.
  */
 export async function cullExcessProcessedSamples(
   sessionId: string,
@@ -67,10 +110,10 @@ export async function cullExcessProcessedSamples(
   const rows = await db.samples.where("sessionId").equals(sessionId).toArray();
   const alive = rows.filter((s) => !s.deletedAt);
   const protectedCount = alive.filter(
-    (s) => s.favorite || !isProcessedKeepCandidate(s),
+    (s) => s.favorite || !isInterestCullCandidate(s),
   ).length;
   const candidates = alive
-    .filter(isProcessedKeepCandidate)
+    .filter(isInterestCullCandidate)
     .sort(
       (a, b) =>
         (a.interestScore ?? 0) - (b.interestScore ?? 0) ||
@@ -108,6 +151,14 @@ export async function cullExcessProcessedSamples(
     kept: alive.length - culledIds.length,
     target,
   };
+}
+
+/** Score missing rows then cull — used on capture persist and queue start. */
+export async function pruneSessionByInterest(
+  sessionId: string,
+): Promise<CullResult> {
+  await backfillInterestScores(sessionId);
+  return cullExcessProcessedSamples(sessionId);
 }
 
 function sessionElapsedMs(session: Session): number {
