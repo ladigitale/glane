@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/time.test.ts src/track-fx.test.ts"
+    "test": "tsx --test src/time.test.ts src/track-fx.test.ts src/project.test.ts"
   },
   "dependencies": {
     "zod": "^3.23.8"

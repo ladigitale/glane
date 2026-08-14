@@ -53,7 +53,7 @@ import {
 import { editorFormKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
-import { renderMoreMenu, type MoreMenuEntry, type MoreMenuItem } from "../more-menu.js";
+import { renderMoreMenu, type MoreMenuEntry } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { formatClock } from "../timeline/timeline.js";
 import type { TransportAction } from "../transport-bar.js";
@@ -412,7 +412,7 @@ export class GlEditorPage extends LitElement {
 
   async #retryProcess(): Promise<void> {
     if (!this.sampleId) return;
-    await processQueue.retrySample(this.sampleId);
+    await processQueue.reanalyzeSample(this.sampleId);
     this.sample = (await db.samples.get(this.sampleId)) ?? this.sample;
   }
 
@@ -889,15 +889,12 @@ export class GlEditorPage extends LitElement {
         disabled: busy || isStem || !this.sampleId,
         onClick: () => void this.#separate(),
       },
-      ...(isProcessingError(this.sample?.tags)
-        ? [
-            {
-              label: t("library.retryProcess"),
-              icon: "refresh-cw",
-              onClick: () => void this.#retryProcess(),
-            } satisfies MoreMenuItem,
-          ]
-        : []),
+      {
+        label: t("library.analyze"),
+        icon: "refresh-cw",
+        disabled: busy || !this.sampleId,
+        onClick: () => void this.#retryProcess(),
+      },
       {
         label: t("editor.delete"),
         icon: "trash-2",

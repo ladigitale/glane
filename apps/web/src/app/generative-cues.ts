@@ -175,10 +175,12 @@ export function mlScoreAdjust(
   cues: SampleMlCues,
   role: ExprRole,
   inferred: ExprRole,
+  popScale = 1,
 ): number {
   let delta = 0;
   const { stem, yamnet, subclass, interestScore, rating, confidence, clapCohesion } =
     cues;
+  const pop = Math.min(1, Math.max(0, popScale));
 
   if (
     stem === "drums" &&
@@ -202,16 +204,16 @@ export function mlScoreAdjust(
   else if (yHint && yHint === inferred) delta -= 0.8;
 
   if (interestScore != null && Number.isFinite(interestScore)) {
-    delta -= interestScore * 2;
+    delta -= interestScore * 2 * pop;
   }
   if (rating != null && Number.isFinite(rating)) {
-    delta -= (rating - 3) * 0.55;
+    delta -= (rating - 3) * 0.55 * pop;
   }
   if (confidence != null && Number.isFinite(confidence) && inferred === role) {
     delta -= confidence * 0.6;
   }
   if (clapCohesion != null && Number.isFinite(clapCohesion)) {
-    delta -= Math.max(0, clapCohesion) * 2.4;
+    delta -= Math.max(0, clapCohesion) * 2.4 * pop;
   }
 
   // Prefer stem children over undifferentiated parents when ranking kit/bass
@@ -231,18 +233,27 @@ type WithClap = SampleMlCues & { id: string; favorite?: boolean };
 /**
  * Attach `clapCohesion` from stored HF/CLAP vectors (no model load).
  * Seed = favorite with vector, else highest interest, else first vector.
+ * Pass `rnd` to pick a different CLAP anchor per generation seed.
  */
-export function withClapCohesion<T extends WithClap>(samples: T[]): T[] {
+export function withClapCohesion<T extends WithClap>(
+  samples: T[],
+  rnd?: () => number,
+): T[] {
   const withVec = samples.filter(
     (s) => Array.isArray(s.clapVector) && s.clapVector!.length > 0,
   );
   if (withVec.length < 2) return samples;
 
-  let seed = withVec.find((s) => s.favorite);
-  if (!seed) {
-    seed = [...withVec].sort(
-      (a, b) => (b.interestScore ?? 0) - (a.interestScore ?? 0),
-    )[0];
+  let seed: T | undefined;
+  if (rnd) {
+    seed = withVec[Math.floor(rnd() * withVec.length)];
+  } else {
+    seed = withVec.find((s) => s.favorite);
+    if (!seed) {
+      seed = [...withVec].sort(
+        (a, b) => (b.interestScore ?? 0) - (a.interestScore ?? 0),
+      )[0];
+    }
   }
   if (!seed?.clapVector) return samples;
 

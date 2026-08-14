@@ -42,9 +42,12 @@ export type SeqGenUiState = {
   formStyle: string;
   humanize: number | "auto";
   variation: number | "auto";
+  sampleVariety: number | "auto";
   bpmSync: string;
   lockTempoPow2: string;
   forbidPitchStretch: string;
+  stretchUpRatio: number | "auto";
+  stretchDownRatio: number | "auto";
   reverse: string;
   stutter: string;
   callResponse: string;
@@ -52,6 +55,8 @@ export type SeqGenUiState = {
   pitchUpSemitones: number | "auto";
   pitchDownSemitones: number | "auto";
   sampleFilter: SampleClass | "all" | "favorite";
+  /** Exact tag matches (OR); empty = all. */
+  tagFilter: string[];
   advanced: boolean;
 };
 
@@ -84,9 +89,12 @@ export const DEFAULT_SEQ_GEN_UI: SeqGenUiState = {
   formStyle: "auto",
   humanize: "auto",
   variation: "auto",
+  sampleVariety: "auto",
   bpmSync: "auto",
   lockTempoPow2: "off",
   forbidPitchStretch: "off",
+  stretchUpRatio: "auto",
+  stretchDownRatio: "auto",
   reverse: "auto",
   stutter: "auto",
   callResponse: "auto",
@@ -94,6 +102,7 @@ export const DEFAULT_SEQ_GEN_UI: SeqGenUiState = {
   pitchUpSemitones: "auto",
   pitchDownSemitones: "auto",
   sampleFilter: "all",
+  tagFilter: [],
   advanced: false,
 };
 
@@ -129,6 +138,21 @@ function oneOf(v: unknown, allowed: Set<string>, fallback: string): string {
   return typeof v === "string" && allowed.has(v) ? v : fallback;
 }
 
+function parseTagFilter(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of v) {
+    if (typeof item !== "string" || !item || item.startsWith("processing:")) {
+      continue;
+    }
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+}
+
 function parseGen(raw: unknown): SeqGenUiState | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const o = raw as Partial<SeqGenUiState>;
@@ -161,6 +185,12 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
     formStyle: oneOf(o.formStyle, FORMS, DEFAULT_SEQ_GEN_UI.formStyle),
     humanize: autoOrNumber(o.humanize, 0, 1, DEFAULT_SEQ_GEN_UI.humanize),
     variation: autoOrNumber(o.variation, 0, 1, DEFAULT_SEQ_GEN_UI.variation),
+    sampleVariety: autoOrNumber(
+      o.sampleVariety,
+      0,
+      1,
+      DEFAULT_SEQ_GEN_UI.sampleVariety,
+    ),
     bpmSync: oneOf(o.bpmSync, TRI, DEFAULT_SEQ_GEN_UI.bpmSync),
     lockTempoPow2: oneOf(
       o.lockTempoPow2,
@@ -171,6 +201,18 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
       o.forbidPitchStretch,
       new Set(["on", "off"]),
       DEFAULT_SEQ_GEN_UI.forbidPitchStretch,
+    ),
+    stretchUpRatio: autoOrNumber(
+      o.stretchUpRatio,
+      1,
+      16,
+      DEFAULT_SEQ_GEN_UI.stretchUpRatio,
+    ),
+    stretchDownRatio: autoOrNumber(
+      o.stretchDownRatio,
+      1 / 16,
+      1,
+      DEFAULT_SEQ_GEN_UI.stretchDownRatio,
     ),
     reverse: oneOf(o.reverse, TRI, DEFAULT_SEQ_GEN_UI.reverse),
     stutter: oneOf(o.stutter, TRI, DEFAULT_SEQ_GEN_UI.stutter),
@@ -193,6 +235,7 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
       DEFAULT_SEQ_GEN_UI.pitchDownSemitones,
     ),
     sampleFilter,
+    tagFilter: parseTagFilter(o.tagFilter),
     advanced: !!o.advanced,
   };
 }

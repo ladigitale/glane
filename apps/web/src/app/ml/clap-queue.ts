@@ -34,7 +34,7 @@ let embedChain: Promise<unknown> = Promise.resolve();
  */
 export async function enqueueClapEmbed(
   sampleId: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; replace?: boolean },
 ): Promise<void> {
   const run = async (): Promise<void> => {
     pending.add(sampleId);
@@ -50,6 +50,7 @@ export async function enqueueClapEmbed(
 
       const existing = await db.analyses.get(sampleId);
       if (
+        !opts?.replace &&
         clapFeatureFromAnalysis(existing?.features as Record<string, unknown>)
       ) {
         return;

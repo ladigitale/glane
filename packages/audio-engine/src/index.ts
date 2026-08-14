@@ -2,6 +2,7 @@ import { asSampleIndex, type SampleIndex } from "@glane/core-model";
 import {
   createTrackBus,
   disposeTrackBus,
+  scheduleGainAdsr,
   updateTrackBus,
   type TrackBus,
   type TrackInsertConfig,
@@ -13,6 +14,7 @@ export {
   createTrackBus,
   disposeTrackBus,
   fxTailSamples,
+  scheduleGainAdsr,
   updateTrackBus,
   wireOfflineTrackBus,
 } from "./track-insert";
@@ -36,6 +38,10 @@ export type ScheduledClip = {
   gain: number;
   fadeInMs: number;
   fadeOutMs: number;
+  /** Track ADSR decay (ms). 0 = skip. */
+  decayMs?: number;
+  /** Track ADSR sustain 0–1. Default 1. */
+  sustain?: number;
   /** Playback rate (2^(semitones/12)). Default 1. */
   playbackRate?: number;
   /** Loop buffer to fill `durationSamples` (stops at clip end). */
@@ -50,7 +56,7 @@ export type ScheduledClip = {
   loopEndSec?: number;
 };
 
-const LOOKAHEAD_S = 0.15;
+const LOOKAHEAD_S = 0.5;
 const TIMER_MS = 25;
 const VOICE_POOL = 32;
 
@@ -60,6 +66,8 @@ const VOICE_POOL = 32;
 export class TransportEngine {
   readonly ctx: AudioContext;
   readonly master: GainNode;
+  /** Tap on the master bus for a VU (does not alter the signal). */
+  readonly analyser: AnalyserNode;
   #voices: Voice[] = [];
   #clips: ScheduledClip[] = [];
   #buses = new Map<string, TrackBus>();
@@ -78,6 +86,10 @@ export class TransportEngine {
   constructor(ctx?: AudioContext) {
     this.ctx = ctx ?? new AudioContext({ latencyHint: "interactive" });
     this.master = this.ctx.createGain();
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 512;
+    this.analyser.smoothingTimeConstant = 0.35;
+    this.master.connect(this.analyser);
     this.master.connect(this.ctx.destination);
     for (let i = 0; i < VOICE_POOL; i++) {
       const gain = this.ctx.createGain();
@@ -139,6 +151,12 @@ export class TransportEngine {
   setClips(clips: ScheduledClip[]): void {
     this.#clips = clips;
     this.invalidate();
+    if (this.#playing) this.#schedule();
+  }
+
+  /** Arm clips entering the lookahead window. Safe from rAF (main-thread timer backup). */
+  scheduleAhead(): void {
+    this.#schedule();
   }
 
   invalidate(): void {
@@ -348,19 +366,14 @@ export class TransportEngine {
     const offsetSec = bufferOffsetSamples / this.sampleRate;
     const dur = Math.max(0.001, durSamples / this.sampleRate);
     const gain = clip.gain;
-    const fadeInS = Math.max(0, clip.fadeInMs / 1000);
     const intoSec = intoClip / this.sampleRate;
-
-    v.gain.gain.cancelScheduledValues(t);
-    if (intoSec >= fadeInS || fadeInS <= 0) {
-      // Mid-clip past fade-in: full level immediately (do not re-duck volume)
-      v.gain.gain.setValueAtTime(gain, t);
-    } else {
-      const startGain = gain * (intoSec / fadeInS);
-      const remainFade = fadeInS - intoSec;
-      v.gain.gain.setValueAtTime(startGain, t);
-      v.gain.gain.linearRampToValueAtTime(gain, t + remainFade);
-    }
+    const clipDur = intoSec + dur;
+    scheduleGainAdsr(v.gain.gain, t, clipDur, intoSec, gain, {
+      attackMs: clip.fadeInMs,
+      decayMs: clip.decayMs ?? 0,
+      sustain: clip.sustain ?? 1,
+      releaseMs: clip.fadeOutMs,
+    });
 
     if (clip.loop) {
       const ls = Math.max(0, clip.loopStartSec ?? 0);
@@ -375,22 +388,9 @@ export class TransportEngine {
         // Editor: hold until transport stop / wrap policy
         src.start(t, loopOffset);
       } else {
-        // Montage: loop buffer only for the clip's timeline length
-        if (clip.fadeOutMs > 0) {
-          const fadeOutS = clip.fadeOutMs / 1000;
-          const fadeStart = Math.max(t, t + dur - fadeOutS);
-          v.gain.gain.setValueAtTime(gain, fadeStart);
-          v.gain.gain.linearRampToValueAtTime(0, t + dur);
-        }
         src.start(t, loopOffset, dur);
       }
     } else {
-      if (clip.fadeOutMs > 0) {
-        const fadeOutS = clip.fadeOutMs / 1000;
-        const fadeStart = Math.max(t, t + dur - fadeOutS);
-        v.gain.gain.setValueAtTime(gain, fadeStart);
-        v.gain.gain.linearRampToValueAtTime(0, t + dur);
-      }
       src.start(t, offsetSec, dur);
     }
 
@@ -472,22 +472,12 @@ export class TransportEngine {
       const t = clip.startSample / sr;
       const dur = Math.max(0.001, durSamples / sr);
       const gain = clip.gain;
-      const fadeInS = Math.max(0, clip.fadeInMs / 1000);
-      const fadeOutS = Math.max(0, clip.fadeOutMs / 1000);
-
-      g.gain.setValueAtTime(0, t);
-      if (fadeInS > 0) {
-        g.gain.linearRampToValueAtTime(gain, t + Math.min(fadeInS, dur));
-      } else {
-        g.gain.setValueAtTime(gain, t);
-      }
-      if (fadeOutS > 0 && dur > fadeOutS) {
-        const fadeStart = t + dur - fadeOutS;
-        g.gain.setValueAtTime(gain, fadeStart);
-        g.gain.linearRampToValueAtTime(0, t + dur);
-      } else if (fadeOutS > 0) {
-        g.gain.linearRampToValueAtTime(0, t + dur);
-      }
+      scheduleGainAdsr(g.gain, t, dur, 0, gain, {
+        attackMs: clip.fadeInMs,
+        decayMs: clip.decayMs ?? 0,
+        sustain: clip.sustain ?? 1,
+        releaseMs: clip.fadeOutMs,
+      });
 
       const offsetSec = contentOffset / sr;
       src.start(t, offsetSec, dur);

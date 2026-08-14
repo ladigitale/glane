@@ -4,6 +4,10 @@ import { DSP_THRESHOLDS } from "./config/thresholds.js";
 import { computeInterestScore } from "./interest-score.js";
 import { autoCropPcm } from "./auto-crop.js";
 import {
+  characterizePcm,
+  type ClipCharacterization,
+} from "./characterize.js";
+import {
   clampChannelCount,
   durationMsFromPcm,
   mapInterleavedChannels,
@@ -38,6 +42,7 @@ export type ProcessWorkerResponse =
       loopXfadeMs?: number;
       loopScore?: number;
       interestScore: number;
+      analysis: ClipCharacterization;
     }
   | {
       type: "error";
@@ -75,7 +80,7 @@ export function runProcessJob(
         "peak-norm",
         "processing:done",
       ];
-      return {
+      return packResult({
         pcm: out,
         tags,
         durationMs,
@@ -90,7 +95,7 @@ export function runProcessJob(
           kind: "texture",
           loopScore,
         }),
-      };
+      }, sampleRate, ch);
     }
   }
 
@@ -109,7 +114,7 @@ export function runProcessJob(
   const out = normalizePeak(source, target);
   const durationMs = durationMsFromPcm(out, sampleRate, ch);
   const loopScore = kind === "texture" ? 0.35 : undefined;
-  return {
+  return packResult({
     pcm: out,
     tags,
     durationMs,
@@ -124,5 +129,19 @@ export function runProcessJob(
       kind,
       loopScore,
     }),
+  }, sampleRate, ch);
+}
+
+function packResult(
+  result: Omit<
+    Extract<ProcessWorkerResponse, { type: "done" }>,
+    "type" | "jobId" | "sampleId" | "analysis"
+  >,
+  sampleRate: number,
+  channelCount: number,
+): Omit<Extract<ProcessWorkerResponse, { type: "done" }>, "type" | "jobId" | "sampleId"> {
+  return {
+    ...result,
+    analysis: characterizePcm(result.pcm, sampleRate, channelCount),
   };
 }

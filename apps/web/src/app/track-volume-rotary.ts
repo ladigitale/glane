@@ -28,6 +28,14 @@ export class GlTrackVolumeRotary extends LitElement {
         -webkit-user-select: none;
         color: var(--gl-fg);
       }
+      :host([compact]) {
+        width: 36px;
+        height: 36px;
+      }
+      :host([large]) {
+        width: 56px;
+        height: 56px;
+      }
       :host(:active) {
         cursor: grabbing;
       }
@@ -56,6 +64,9 @@ export class GlTrackVolumeRotary extends LitElement {
   ];
 
   @property({ type: Number }) gainDb = 0;
+  @property() label = "Volume piste";
+  @property({ type: Boolean, reflect: true }) compact = false;
+  @property({ type: Boolean, reflect: true }) large = false;
 
   #dragging = false;
 
@@ -78,7 +89,7 @@ export class GlTrackVolumeRotary extends LitElement {
         aria-valuemin="0"
         aria-valuemax=${TRACK_GAIN_LIN_MAX}
         aria-valuenow=${Number(lin.toFixed(2))}
-        aria-label="Volume piste"
+        aria-label=${this.label}
         @pointerdown=${this.#onDown}
       >
         ${svg`

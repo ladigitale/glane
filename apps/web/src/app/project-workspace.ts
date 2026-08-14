@@ -38,6 +38,7 @@ async function createBlankProject(title: string): Promise<Project> {
     timeSignature: [4, 4],
     bars: 16,
     masterGainDb: 0,
+    preampGainDb: 0,
     revision: 0,
     createdAt: now,
     updatedAt: now,

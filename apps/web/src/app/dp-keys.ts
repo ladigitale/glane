@@ -60,6 +60,12 @@ export const editorFormKey = new DataProviderKey<EditorForm>("glEditorForm");
 export type ExportForm = {
   title: string;
   sharing: "private" | "public";
+  /** Reel bichromy — background. */
+  reelBg: string;
+  /** Reel bichromy — accent / waveform. */
+  reelAccent: string;
+  /** Reel visual scenes to include (FormCheckable multi). */
+  reelScenes: string[];
 };
 
 export const exportFormKey = new DataProviderKey<ExportForm>("glExportForm");

@@ -18,7 +18,10 @@ const pending = new Set<string>();
 /**
  * T2 YAMNet enrichment after polish (ADR-0020). Non-blocking; fail-soft.
  */
-export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
+export async function enqueueYamnetEnrich(
+  sampleId: string,
+  opts?: { force?: boolean },
+): Promise<void> {
   if (pending.has(sampleId)) return;
   pending.add(sampleId);
   try {
@@ -29,7 +32,12 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
     const sample = await db.samples.get(sampleId);
     if (!sample || sample.deletedAt) return;
     const tags = sample.tags ?? [];
-    if (tags.includes(ML_TAG.done) || tags.includes(ML_TAG.yamnet)) return;
+    if (
+      !opts?.force &&
+      (tags.includes(ML_TAG.done) || tags.includes(ML_TAG.yamnet))
+    ) {
+      return;
+    }
     if (!tags.includes("processing:done")) return;
 
     await db.samples.update(sampleId, {

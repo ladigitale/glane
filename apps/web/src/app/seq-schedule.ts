@@ -167,11 +167,15 @@ export function clipToScheduled(
   const offsetSamples = msToSamples(clip.contentOffsetMs, sampleRate);
   let fadeInMs = clip.fadeInMs;
   let fadeOutMs = clip.fadeOutMs;
-  // Track A/R raises one-shot fades; loops keep clip fades only (no re-trigger).
+  let decayMs = 0;
+  let sustain = 1;
+  // Track ADSR raises one-shot fades; loops keep clip fades only (no re-trigger).
   if (trackFx && !clip.loopEnabled) {
     const fx = normalizeTrackFx(trackFx);
     fadeInMs = Math.max(fadeInMs, fx.attackMs);
     fadeOutMs = Math.max(fadeOutMs, fx.releaseMs);
+    decayMs = fx.decayMs;
+    sustain = fx.sustain;
   }
   const scheduled: ScheduledClip = {
     id: clip.id,
@@ -183,6 +187,8 @@ export function clipToScheduled(
     gain: dbToGain(clip.gainDb),
     fadeInMs,
     fadeOutMs,
+    decayMs,
+    sustain,
     playbackRate: Math.pow(2, (clip.pitchSemitones ?? 0) / 12),
     loop: clip.loopEnabled,
   };
@@ -206,14 +212,16 @@ export function clipToScheduled(
   return scheduled;
 }
 
-/** Track bus config for TransportEngine (gain / pan / FX insert). */
+/** Track bus config for TransportEngine (preamp / gain / pan / FX insert). */
 export function trackToInsertConfig(
   tr: Track,
   bpm = 120,
+  preampDb = 0,
 ): TrackInsertConfig {
   return {
     id: tr.id,
     gain: gainDbToLin(tr.gainDb),
+    preamp: gainDbToLin(preampDb),
     pan: Number.isFinite(tr.pan) ? tr.pan : 0,
     fx: normalizeTrackFx(tr.fx),
     bpm,

@@ -165,6 +165,8 @@ export const ProjectSchema = z.object({
   timeSignature: z.tuple([z.number().int(), z.number().int()]),
   bars: z.number().int().positive(),
   masterGainDb: z.number(),
+  /** Global preamp (dB) multiplied with each track's local gain, before FX. */
+  preampGainDb: z.number().optional(),
   snapConfig: z.string().optional(),
   revision: z.number().int().nonnegative(),
   createdAt: z.string().datetime(),
@@ -173,8 +175,17 @@ export const ProjectSchema = z.object({
 });
 export type Project = z.infer<typeof ProjectSchema>;
 
+/** Fill missing mix fields (legacy IDB rows without `preampGainDb`). */
+export function normalizeProject(raw: Project): Project {
+  return {
+    ...raw,
+    masterGainDb: Number.isFinite(raw.masterGainDb) ? raw.masterGainDb : 0,
+    preampGainDb: Number.isFinite(raw.preampGainDb) ? raw.preampGainDb : 0,
+  };
+}
+
 /**
- * One light wet insert per track (ADR-0016), plus always-on tone + A/R envelope.
+ * One light wet insert per track (ADR-0016), plus optional HP/LP and ADSR.
  * Wet: None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato.
  */
 export const TrackFxTypeSchema = z.enum([
@@ -194,17 +205,44 @@ export const ECHO_DELAY_BEATS_MAX = 4;
 /** Web Audio DelayNode max for tempo-synced echo. */
 export const ECHO_DELAY_MAX_SEC = 4;
 
-/** Always-on high-pass (Hz). Floor = open. */
+/** High-pass (Hz). Floor = bypass. */
 export const TRACK_HP_HZ_MIN = 20;
 export const TRACK_HP_HZ_MAX = 2_000;
 export const TRACK_HP_HZ_OPEN = TRACK_HP_HZ_MIN;
-/** Always-on low-pass (Hz). Ceiling = open. */
+/** Default cutoff when the high-pass filter is switched on. */
+export const TRACK_HP_HZ_ON = 120;
+/** Low-pass (Hz). Ceiling = bypass. */
 export const TRACK_LP_HZ_MIN = 200;
 export const TRACK_LP_HZ_MAX = 20_000;
 export const TRACK_LP_HZ_OPEN = TRACK_LP_HZ_MAX;
-/** Track one-shot envelope (ms) — raises clip fades via Math.max. */
+/** Default cutoff when the low-pass filter is switched on. */
+export const TRACK_LP_HZ_ON = 8_000;
+/** Track one-shot ADSR (ms / sustain 0–1) — raises clip fades via Math.max. */
 export const TRACK_ATTACK_MS_MAX = 500;
+export const TRACK_DECAY_MS_MAX = 2_000;
 export const TRACK_RELEASE_MS_MAX = 2_000;
+
+export type TrackAdsr = {
+  attackMs: number;
+  decayMs: number;
+  sustain: number;
+  releaseMs: number;
+};
+
+export const DEFAULT_TRACK_ADSR: TrackAdsr = {
+  attackMs: 0,
+  decayMs: 0,
+  sustain: 1,
+  releaseMs: 0,
+};
+
+/** Modest one-shot shape used when the ADSR filter is switched on. */
+export const TRACK_ADSR_ON: TrackAdsr = {
+  attackMs: 8,
+  decayMs: 80,
+  sustain: 0.7,
+  releaseMs: 120,
+};
 
 export const TrackFxSchema = z.object({
   type: TrackFxTypeSchema.default("none"),
@@ -230,13 +268,17 @@ export const TrackFxSchema = z.object({
   low: z.number().min(0).max(2).default(1),
   mid: z.number().min(0).max(2).default(1),
   high: z.number().min(0).max(2).default(1),
-  /** High-pass cutoff Hz (always-on; TRACK_HP_HZ_OPEN = bypass). */
+  /** High-pass cutoff Hz (TRACK_HP_HZ_OPEN = bypass). */
   hpHz: z.number().min(TRACK_HP_HZ_MIN).max(TRACK_HP_HZ_MAX).default(TRACK_HP_HZ_OPEN),
-  /** Low-pass cutoff Hz (always-on; TRACK_LP_HZ_OPEN = bypass). */
+  /** Low-pass cutoff Hz (TRACK_LP_HZ_OPEN = bypass). */
   lpHz: z.number().min(TRACK_LP_HZ_MIN).max(TRACK_LP_HZ_MAX).default(TRACK_LP_HZ_OPEN),
-  /** Attack envelope for one-shots (ms). */
+  /** ADSR attack (ms). */
   attackMs: z.number().min(0).max(TRACK_ATTACK_MS_MAX).default(0),
-  /** Release envelope for one-shots (ms). */
+  /** ADSR decay (ms) — peak → sustain. */
+  decayMs: z.number().min(0).max(TRACK_DECAY_MS_MAX).default(0),
+  /** ADSR sustain level (0–1). */
+  sustain: z.number().min(0).max(1).default(1),
+  /** ADSR release (ms). */
   releaseMs: z.number().min(0).max(TRACK_RELEASE_MS_MAX).default(0),
 });
 export type TrackFx = z.infer<typeof TrackFxSchema>;
@@ -255,8 +297,7 @@ export const DEFAULT_TRACK_FX: TrackFx = {
   high: 1,
   hpHz: TRACK_HP_HZ_OPEN,
   lpHz: TRACK_LP_HZ_OPEN,
-  attackMs: 0,
-  releaseMs: 0,
+  ...DEFAULT_TRACK_ADSR,
 };
 
 function clampFx(n: number, lo: number, hi: number): number {
@@ -303,16 +344,110 @@ export function trackFxHasWet(fx: TrackFx): boolean {
   return normalizeTrackFx(fx).type !== "none";
 }
 
-/** HP/LP not at open defaults. */
-export function trackFxHasTone(fx: TrackFx): boolean {
-  const n = normalizeTrackFx(fx);
-  return n.hpHz > TRACK_HP_HZ_OPEN + 0.5 || n.lpHz < TRACK_LP_HZ_OPEN - 0.5;
+/** High-pass not at bypass. */
+export function trackFxHasHp(fx: TrackFx): boolean {
+  return normalizeTrackFx(fx).hpHz > TRACK_HP_HZ_OPEN + 0.5;
 }
 
-/** Non-zero track A/R envelope. */
+/** Low-pass not at bypass. */
+export function trackFxHasLp(fx: TrackFx): boolean {
+  return normalizeTrackFx(fx).lpHz < TRACK_LP_HZ_OPEN - 0.5;
+}
+
+/** HP and/or LP engaged. */
+export function trackFxHasTone(fx: TrackFx): boolean {
+  return trackFxHasHp(fx) || trackFxHasLp(fx);
+}
+
+/** Non-default track ADSR. */
 export function trackFxHasEnvelope(fx: TrackFx): boolean {
   const n = normalizeTrackFx(fx);
-  return n.attackMs > 0 || n.releaseMs > 0;
+  return (
+    n.attackMs > 0 ||
+    n.decayMs > 0 ||
+    n.sustain < 0.999 ||
+    n.releaseMs > 0
+  );
+}
+
+export function trackFxAdsr(fx: TrackFx): TrackAdsr {
+  const n = normalizeTrackFx(fx);
+  return {
+    attackMs: n.attackMs,
+    decayMs: n.decayMs,
+    sustain: n.sustain,
+    releaseMs: n.releaseMs,
+  };
+}
+
+export function trackFxToggleHp(fx: TrackFx): TrackFx {
+  const n = normalizeTrackFx(fx);
+  return {
+    ...n,
+    hpHz: trackFxHasHp(n) ? TRACK_HP_HZ_OPEN : TRACK_HP_HZ_ON,
+  };
+}
+
+export function trackFxToggleLp(fx: TrackFx): TrackFx {
+  const n = normalizeTrackFx(fx);
+  return {
+    ...n,
+    lpHz: trackFxHasLp(n) ? TRACK_LP_HZ_OPEN : TRACK_LP_HZ_ON,
+  };
+}
+
+export function trackFxToggleAdsr(fx: TrackFx): TrackFx {
+  const n = normalizeTrackFx(fx);
+  return {
+    ...n,
+    ...(trackFxHasEnvelope(n) ? DEFAULT_TRACK_ADSR : TRACK_ADSR_ON),
+  };
+}
+
+/**
+ * Shrink A/D/R so they fit in `durMs` (attack, then release, leftover → decay).
+ */
+export function fitTrackAdsr(
+  attackMs: number,
+  decayMs: number,
+  releaseMs: number,
+  durMs: number,
+): Pick<TrackAdsr, "attackMs" | "decayMs" | "releaseMs"> {
+  const dur = Math.max(0, durMs);
+  const a = Math.min(Math.max(0, attackMs), dur);
+  const r = Math.min(Math.max(0, releaseMs), dur - a);
+  const d = Math.min(Math.max(0, decayMs), Math.max(0, dur - a - r));
+  return { attackMs: a, decayMs: d, releaseMs: r };
+}
+
+/** Linear ADSR gain at `tMs` into a clip of `durMs` (0–1). */
+export function adsrGain01(tMs: number, durMs: number, adsr: TrackAdsr): number {
+  const dur = Math.max(0.001, durMs);
+  const { attackMs: a, decayMs: d, releaseMs: r } = fitTrackAdsr(
+    adsr.attackMs,
+    adsr.decayMs,
+    adsr.releaseMs,
+    dur,
+  );
+  const s = Math.min(1, Math.max(0, adsr.sustain));
+  const attackPeak = d > 0 ? 1 : s;
+  const decayEnd = a + d;
+  const releaseStart = Math.max(decayEnd, dur - r);
+
+  if (tMs <= 0) return a > 0 ? 0 : attackPeak;
+  if (tMs >= dur) return r > 0 ? 0 : s;
+
+  if (a > 0 && tMs < a) return (tMs / a) * attackPeak;
+  if (d > 0 && tMs < decayEnd) {
+    const u = (tMs - a) / d;
+    return attackPeak + (s - attackPeak) * u;
+  }
+  if (r > 0 && tMs >= releaseStart) {
+    const span = dur - releaseStart;
+    if (span <= 0) return 0;
+    return s * (1 - (tMs - releaseStart) / span);
+  }
+  return s;
 }
 
 /** Needs a live track bus (wet and/or tone filters). */

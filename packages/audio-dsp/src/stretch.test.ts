@@ -80,7 +80,7 @@ describe("stretchBuffer", () => {
     };
     const inRate = countZc(input) / input.length;
     const outRate = countZc(out) / out.length;
-    // Pitch should stay within ~15% (WSOLA, not a phase vocoder).
+    // Pitch should stay within ~15% (granular WSOLA, not a phase vocoder).
     assert.ok(
       Math.abs(outRate - inRate) / inRate < 0.15,
       `zc rate in=${inRate.toFixed(4)} out=${outRate.toFixed(4)}`,

@@ -1,9 +1,21 @@
 /**
- * Client-side vertical Reel (audio bounce + canvas waveform → MediaRecorder).
+ * Client-side vertical Reel (audio bounce + WebGL viz → MediaRecorder).
  * No Instagram API — download / Web Share for Stories & Reels import.
  */
 import { APP_NAME } from "@glane/core-model";
 import { audioExport } from "@glane/audio-io";
+import {
+  REEL_SCENE_IDS,
+  buildEnergySeries,
+  createReelViz,
+  createRng,
+  drawBrandMark,
+  energyAt,
+  planScenes,
+  scenesAt,
+  type ReelPalette,
+  type ReelSceneId,
+} from "./reel-export-viz";
 
 export const REEL_MAX_DURATION_S = 30;
 export const REEL_FADE_OUT_S = 1.5;
@@ -11,20 +23,20 @@ export const REEL_WIDTH = 1080;
 export const REEL_HEIGHT = 1920;
 export const REEL_FPS = 30;
 
-export type ReelPalette = {
-  top: string;
-  bottom: string;
-  wave: string;
-  waveDim: string;
-  text: string;
-  accent: string;
-};
+export type { ReelPalette, ReelSceneId };
+export { REEL_SCENE_IDS };
 
 export type ReelEncodeOpts = {
   buffer: AudioBuffer;
   title: string;
-  /** Music style id when known; drives palette. */
-  styleId?: string;
+  /** Background colour (bichromy). */
+  bgColor?: string;
+  /** Accent / wave colour (bichromy). */
+  accentColor?: string;
+  /** Scenes allowed in the random sequence; empty → all. */
+  scenes?: readonly ReelSceneId[];
+  /** Optional fixed seed (tests); default = random each encode. */
+  seed?: number;
   onProgress?: (ratio: number) => void;
 };
 
@@ -36,117 +48,68 @@ export type ReelEncodeResult = {
   extension: "webm" | "mp4";
 };
 
-const DEFAULT_PALETTE: ReelPalette = {
-  top: "#10161a",
-  bottom: "#1b2830",
-  wave: "#8ec8b8",
-  waveDim: "#3a5a54",
-  text: "#e8f0ef",
-  accent: "#c8e8e0",
-};
+const DEFAULT_BG = "#10161a";
+const DEFAULT_ACCENT = "#8ec8b8";
 
-const STYLE_PALETTES: Record<string, ReelPalette> = {
-  techno: {
-    top: "#08080f",
-    bottom: "#1a1030",
-    wave: "#9b7cff",
-    waveDim: "#3a2a60",
-    text: "#ece8f8",
-    accent: "#c4b0ff",
-  },
-  house: {
-    top: "#100c14",
-    bottom: "#2a1840",
-    wave: "#ff7ab8",
-    waveDim: "#5a3050",
-    text: "#f8e8f0",
-    accent: "#ffb0d4",
-  },
-  ambient: {
-    top: "#0a1418",
-    bottom: "#163038",
-    wave: "#6ec8b8",
-    waveDim: "#2a5050",
-    text: "#e0f0ee",
-    accent: "#a8e0d4",
-  },
-  hiphop: {
-    top: "#120c0a",
-    bottom: "#2a1810",
-    wave: "#e8a050",
-    waveDim: "#5a4030",
-    text: "#f0e8e0",
-    accent: "#f0c080",
-  },
-  dnb: {
-    top: "#0a0c10",
-    bottom: "#142028",
-    wave: "#50e0a0",
-    waveDim: "#285040",
-    text: "#e0f8f0",
-    accent: "#90f0c8",
-  },
-  jazz: {
-    top: "#14100c",
-    bottom: "#2a2018",
-    wave: "#d4a878",
-    waveDim: "#504030",
-    text: "#f0e8e0",
-    accent: "#e8c8a0",
-  },
-  rock: {
-    top: "#100808",
-    bottom: "#281010",
-    wave: "#e06060",
-    waveDim: "#502828",
-    text: "#f0e8e8",
-    accent: "#f09090",
-  },
-  metal: {
-    top: "#080808",
-    bottom: "#181818",
-    wave: "#c0c0c8",
-    waveDim: "#404048",
-    text: "#f0f0f0",
-    accent: "#e0e0e8",
-  },
-  reggae: {
-    top: "#0c1408",
-    bottom: "#203010",
-    wave: "#70c040",
-    waveDim: "#305020",
-    text: "#e8f0e0",
-    accent: "#a0e060",
-  },
-  dub: {
-    top: "#081410",
-    bottom: "#102820",
-    wave: "#40c090",
-    waveDim: "#205040",
-    text: "#e0f0e8",
-    accent: "#70e0b0",
-  },
-  pop: {
-    top: "#101018",
-    bottom: "#202038",
-    wave: "#70b0ff",
-    waveDim: "#304060",
-    text: "#e8eef8",
-    accent: "#a0c8ff",
-  },
-  folk: {
-    top: "#141208",
-    bottom: "#282418",
-    wave: "#c8a860",
-    waveDim: "#504830",
-    text: "#f0ebe0",
-    accent: "#e0c880",
-  },
-};
+function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x));
+}
 
-function paletteFor(styleId?: string): ReelPalette {
-  if (!styleId || styleId === "auto") return DEFAULT_PALETTE;
-  return STYLE_PALETTES[styleId] ?? DEFAULT_PALETTE;
+function parseHex(hex: string): [number, number, number] {
+  const raw = hex.trim().replace("#", "");
+  const h =
+    raw.length === 3
+      ? raw[0]! + raw[0] + raw[1] + raw[1] + raw[2] + raw[2]
+      : raw.slice(0, 6);
+  const n = parseInt(h, 16);
+  if (!Number.isFinite(n)) return [0.06, 0.09, 0.1];
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
+function toHex(r: number, g: number, b: number): string {
+  const to = (x: number) =>
+    Math.round(clamp01(x) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+function mix(
+  a: [number, number, number],
+  b: [number, number, number],
+  t: number,
+): [number, number, number] {
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+  ];
+}
+
+function luminance(rgb: [number, number, number]): number {
+  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+}
+
+/** Strict two-tone palette from background + accent pickers. */
+function bichromePalette(bgHex: string, accentHex: string): ReelPalette {
+  const bg = parseHex(bgHex || DEFAULT_BG);
+  const ac = parseHex(accentHex || DEFAULT_ACCENT);
+  const top = mix(bg, [0, 0, 0], 0.18);
+  const bottom = mix(bg, ac, 0.12);
+  const waveDim = mix(bg, ac, 0.35);
+  const textRgb =
+    luminance(bg) > 0.45
+      ? mix(bg, [0, 0, 0], 0.85)
+      : mix(ac, [1, 1, 1], 0.85);
+  const accentLite = mix(ac, [1, 1, 1], 0.22);
+  return {
+    top: toHex(...top),
+    bottom: toHex(...bottom),
+    wave: toHex(...ac),
+    waveDim: toHex(...waveDim),
+    text: toHex(...textRgb),
+    accent: toHex(...accentLite),
+  };
 }
 
 function pickMimeType(): { mimeType: string; extension: "webm" | "mp4" } | null {
@@ -183,7 +146,6 @@ function clipBuffer(src: AudioBuffer, maxDurationS: number): AudioBuffer {
   const durationS = Math.min(src.duration, maxDurationS);
   const frameCount = Math.max(1, Math.floor(durationS * src.sampleRate));
   if (frameCount >= src.length) {
-    // Clone so we can fade in place without mutating the bounce cache.
     const clone = new AudioBuffer({
       length: src.length,
       numberOfChannels: src.numberOfChannels,
@@ -211,8 +173,7 @@ function clipBuffer(src: AudioBuffer, maxDurationS: number): AudioBuffer {
 function buildPeaks(buf: AudioBuffer, columns: number): Float32Array {
   const peaks = new Float32Array(columns);
   const ch0 = buf.getChannelData(0);
-  const ch1 =
-    buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+  const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
   const block = Math.max(1, Math.floor(buf.length / columns));
   for (let i = 0; i < columns; i++) {
     const start = i * block;
@@ -226,7 +187,6 @@ function buildPeaks(buf: AudioBuffer, columns: number): Float32Array {
     }
     peaks[i] = peak;
   }
-  // Soft normalize
   let max = 0.001;
   for (let i = 0; i < columns; i++) {
     if (peaks[i]! > max) max = peaks[i]!;
@@ -235,85 +195,149 @@ function buildPeaks(buf: AudioBuffer, columns: number): Float32Array {
   return peaks;
 }
 
-function drawFrame(
+function drawWaveform(
   ctx: CanvasRenderingContext2D,
   opts: {
     w: number;
     h: number;
     peaks: Float32Array;
     progress: number;
-    title: string;
+    rms: number;
     palette: ReelPalette;
   },
 ): void {
-  const { w, h, peaks, progress, title, palette } = opts;
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, palette.top);
-  grad.addColorStop(1, palette.bottom);
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
-
-  // Soft vignette
-  const vig = ctx.createRadialGradient(
-    w / 2,
-    h * 0.45,
-    w * 0.1,
-    w / 2,
-    h * 0.45,
-    w * 0.75,
-  );
-  vig.addColorStop(0, "rgba(0,0,0,0)");
-  vig.addColorStop(1, "rgba(0,0,0,0.35)");
-  ctx.fillStyle = vig;
-  ctx.fillRect(0, 0, w, h);
-
-  const waveTop = h * 0.28;
-  const waveH = h * 0.36;
+  const { w, h, peaks, progress, rms, palette } = opts;
+  const waveTop = h * 0.34;
+  const waveH = h * 0.3;
   const midY = waveTop + waveH / 2;
   const padX = w * 0.08;
   const drawW = w - padX * 2;
   const cols = peaks.length;
   const barW = drawW / cols;
   const playCol = Math.floor(progress * cols);
+  const liveBoost = 1 + rms * 0.35;
 
   for (let i = 0; i < cols; i++) {
     const mag = peaks[i] ?? 0;
-    const barH = Math.max(2, mag * waveH * 0.92);
+    const near = 1 - Math.min(1, Math.abs(i - playCol) / 18);
+    const boost = i === playCol ? liveBoost : 1 + near * rms * 0.15;
+    const barH = Math.max(2, mag * waveH * 0.92 * boost);
     const x = padX + i * barW;
     ctx.fillStyle = i <= playCol ? palette.wave : palette.waveDim;
-    ctx.globalAlpha = i <= playCol ? 0.95 : 0.55;
+    ctx.globalAlpha = i <= playCol ? 0.92 : 0.45;
     ctx.fillRect(x, midY - barH / 2, Math.max(1, barW * 0.72), barH);
   }
   ctx.globalAlpha = 1;
 
-  // Playhead
   const px = padX + progress * drawW;
   ctx.strokeStyle = palette.accent;
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(px, waveTop - 24);
-  ctx.lineTo(px, waveTop + waveH + 24);
+  ctx.moveTo(px, waveTop - 20);
+  ctx.lineTo(px, waveTop + waveH + 20);
   ctx.stroke();
+}
 
-  // Brand
+function drawOverlay(
+  ctx: CanvasRenderingContext2D,
+  opts: {
+    w: number;
+    h: number;
+    title: string;
+    palette: ReelPalette;
+    peaks: Float32Array;
+    progress: number;
+    rms: number;
+  },
+): void {
+  const { w, h, title, palette, peaks, progress, rms } = opts;
+
+  drawWaveform(ctx, { w, h, peaks, progress, rms, palette });
+
+  const brandY = h * 0.12;
+  const markSize = 72;
+  const gap = 20;
+  ctx.font = "600 52px system-ui, sans-serif";
+  const nameW = ctx.measureText(APP_NAME).width;
+  const totalW = markSize + gap + nameW;
+  const left = (w - totalW) / 2;
+  drawBrandMark(ctx, left + markSize / 2, brandY, markSize, palette.accent);
   ctx.fillStyle = palette.accent;
-  ctx.font = "600 42px system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText(APP_NAME, w / 2, h * 0.14);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(APP_NAME, left + markSize + gap, brandY);
 
-  // Title
   ctx.fillStyle = palette.text;
   ctx.font = "500 48px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
   const label = title.trim() || APP_NAME;
   const maxTitleW = w * 0.84;
   let display = label;
   if (ctx.measureText(display).width > maxTitleW) {
-    while (display.length > 1 && ctx.measureText(`${display}…`).width > maxTitleW) {
+    while (
+      display.length > 1 &&
+      ctx.measureText(`${display}…`).width > maxTitleW
+    ) {
       display = display.slice(0, -1);
     }
     display = `${display}…`;
   }
-  ctx.fillText(display, w / 2, h * 0.82);
+  ctx.fillText(display, w / 2, h * 0.88);
+}
+
+/** Canvas2D fallback when WebGL is unavailable. */
+function drawFallbackFrame(
+  ctx: CanvasRenderingContext2D,
+  opts: {
+    w: number;
+    h: number;
+    progress: number;
+    timeS: number;
+    rms: number;
+    bass: number;
+    title: string;
+    palette: ReelPalette;
+    peaks: Float32Array;
+  },
+): void {
+  const { w, h, progress, timeS, rms, bass, title, palette, peaks } = opts;
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, palette.top);
+  grad.addColorStop(1, palette.bottom);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  const cx = w / 2;
+  const cy = h * 0.45;
+  ctx.strokeStyle = palette.wave;
+  ctx.lineWidth = 3;
+  for (let i = 0; i < 5; i++) {
+    const r = (80 + i * 70) * (1 + bass * 0.25 * Math.sin(timeS * 6 + i));
+    ctx.globalAlpha = 0.35 + rms * 0.4;
+    ctx.beginPath();
+    const sides = 3 + ((i * 2) % 5);
+    for (let s = 0; s <= sides; s++) {
+      const a = (s / sides) * Math.PI * 2 + timeS * (0.2 + i * 0.05);
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r * 1.1;
+      if (s === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  drawOverlay(ctx, { w, h, title, palette, peaks, progress, rms });
+}
+
+function normalizeScenes(
+  scenes: readonly ReelSceneId[] | undefined,
+): ReelSceneId[] {
+  if (!scenes || scenes.length === 0) return [...REEL_SCENE_IDS];
+  const allowed = new Set<string>(REEL_SCENE_IDS);
+  const out = scenes.filter((s): s is ReelSceneId => allowed.has(s));
+  return out.length > 0 ? out : [...REEL_SCENE_IDS];
 }
 
 async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
@@ -327,7 +351,16 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
     applyFadeOut(clipped, REEL_FADE_OUT_S);
   }
   const durationS = clipped.duration;
-  const palette = paletteFor(opts.styleId);
+  const seed =
+    opts.seed ??
+    (Math.floor(Math.random() * 0xffffffff) ^ (Date.now() & 0xffffffff));
+  const rng = createRng(seed);
+  const palette = bichromePalette(
+    opts.bgColor ?? DEFAULT_BG,
+    opts.accentColor ?? DEFAULT_ACCENT,
+  );
+  const scenes = planScenes(durationS, rng, normalizeScenes(opts.scenes));
+  const energy = buildEnergySeries(clipped, REEL_FPS);
   const peaks = buildPeaks(clipped, 240);
 
   const canvas = document.createElement("canvas");
@@ -336,14 +369,48 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas2D unavailable");
 
-  drawFrame(ctx, {
-    w: REEL_WIDTH,
-    h: REEL_HEIGHT,
-    peaks,
-    progress: 0,
-    title: opts.title,
-    palette,
-  });
+  const viz = createReelViz(REEL_WIDTH, REEL_HEIGHT);
+
+  const paint = (elapsed: number) => {
+    const progress = Math.min(1, elapsed / durationS);
+    const e = energyAt(energy, progress);
+    const sc = scenesAt(scenes, elapsed);
+    if (viz) {
+      viz.render({
+        timeS: elapsed,
+        progress,
+        energy: e,
+        sceneA: sc.a,
+        sceneB: sc.b,
+        mix: sc.mix,
+        palette,
+      });
+      ctx.drawImage(viz.canvas, 0, 0);
+      drawOverlay(ctx, {
+        w: REEL_WIDTH,
+        h: REEL_HEIGHT,
+        title: opts.title,
+        palette,
+        peaks,
+        progress,
+        rms: e.rms,
+      });
+    } else {
+      drawFallbackFrame(ctx, {
+        w: REEL_WIDTH,
+        h: REEL_HEIGHT,
+        progress,
+        timeS: elapsed,
+        rms: e.rms,
+        bass: e.bass,
+        title: opts.title,
+        palette,
+        peaks,
+      });
+    }
+  };
+
+  paint(0);
 
   const audioCtx = new AudioContext({ sampleRate: clipped.sampleRate });
   try {
@@ -365,8 +432,8 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
       videoBitsPerSecond: 4_000_000,
       audioBitsPerSecond: 192_000,
     });
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
+    recorder.ondataavailable = (ev) => {
+      if (ev.data.size > 0) chunks.push(ev.data);
     };
 
     const stopped = new Promise<Blob>((resolve, reject) => {
@@ -397,14 +464,7 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
       const tick = () => {
         const elapsed = audioCtx.currentTime - t0;
         const progress = Math.min(1, elapsed / durationS);
-        drawFrame(ctx, {
-          w: REEL_WIDTH,
-          h: REEL_HEIGHT,
-          peaks,
-          progress,
-          title: opts.title,
-          palette,
-        });
+        paint(elapsed);
         opts.onProgress?.(progress);
         if (elapsed >= durationS - 0.02) {
           finish();
@@ -429,6 +489,7 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
       extension: mime.extension,
     };
   } finally {
+    viz?.dispose();
     await audioCtx.close().catch(() => undefined);
   }
 }
@@ -476,5 +537,10 @@ export const reelExport = {
   share,
   canShare,
   revoke,
-  paletteFor,
+  sceneIds: REEL_SCENE_IDS,
+  defaults: {
+    bgColor: DEFAULT_BG,
+    accentColor: DEFAULT_ACCENT,
+    scenes: REEL_SCENE_IDS,
+  },
 } as const;

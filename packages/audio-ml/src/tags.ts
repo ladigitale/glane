@@ -25,6 +25,17 @@ export function isMlStatusTag(tag: string): boolean {
   );
 }
 
+/** YAMNet / CLAP status only — keep Demucs markers when re-enriching. */
+function isEnrichStatusTag(tag: string): boolean {
+  return (
+    tag === ML_TAG.done ||
+    tag === ML_TAG.skipped ||
+    tag === ML_TAG.running ||
+    tag === ML_TAG.yamnet ||
+    tag === ML_TAG.clap
+  );
+}
+
 export function isYamnetLabelTag(tag: string): boolean {
   return tag.startsWith(YAMNET_TAG_PREFIX);
 }
@@ -33,11 +44,11 @@ export function isStemTag(tag: string): boolean {
   return tag.startsWith(STEM_TAG_PREFIX);
 }
 
-/** Strip previous ML status / yamnet labels before re-enrich. */
+/** Strip previous YAMNet / CLAP status + labels before re-enrich. */
 export function stripMlTags(tags: readonly string[]): string[] {
   return tags.filter(
     (t) =>
-      !isMlStatusTag(t) &&
+      !isEnrichStatusTag(t) &&
       !isYamnetLabelTag(t) &&
       !t.startsWith(CLAP_TAG_PREFIX),
   );

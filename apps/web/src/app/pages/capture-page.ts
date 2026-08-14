@@ -788,7 +788,7 @@ export class GlCapturePage extends LitElement {
                             type="button"
                             title=${t("library.retryProcess")}
                             @click=${() =>
-                              void processQueue.retrySample(row.id)}
+                              void processQueue.reanalyzeSample(row.id)}
                           >
                             ${glIcon("refresh-cw", { size: "sm" })}
                           </button>`

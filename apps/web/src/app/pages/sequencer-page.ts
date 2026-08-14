@@ -5,6 +5,7 @@ import {
   asTick,
   createEntityId,
   msToSamples,
+  normalizeProject,
   normalizeTrack,
   nowIso,
   samplesToTicks,
@@ -17,7 +18,7 @@ import {
   type Track,
   type TrackFx,
 } from "@glane/core-model";
-import { TransportEngine } from "@glane/audio-engine";
+import { TransportEngine, type TrackInsertConfig } from "@glane/audio-engine";
 import {
   frameCount,
   interleavedToAudioBuffer,
@@ -92,6 +93,7 @@ import { listenShare, type ListenMeta } from "../listen-share.js";
 import {
   reelExport,
   type ReelEncodeResult,
+  type ReelSceneId,
 } from "../reel-export.js";
 import { auth } from "../auth.js";
 import { saveBounceToLibrary } from "../sample-actions.js";
@@ -112,9 +114,12 @@ import "../track-fx-control.js";
 import "../pop-select.js";
 import "../seek-bar.js";
 import "../transport-bar.js";
+import "../vu-meter.js";
 import { glIcon } from "../icon.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import type { TransportAction } from "../transport-bar.js";
+import type { GlSeekBar } from "../seek-bar.js";
+import type { GlTransportBar } from "../transport-bar.js";
 
 const MIN_CLIP_TICKS = PPQ / 4;
 const HANDLE_PX = 44;
@@ -127,6 +132,8 @@ const MIN_BPM = 40;
 const MAX_BPM = 300;
 /** Live play: only decode/stretch clips in this window ahead of the playhead. */
 const PLAY_PRELOAD_BEATS = 16;
+/** Refill the live window when remaining coverage drops below this (hysteresis). */
+const PLAY_REFILL_BEATS = 8;
 /** Cap decoded PCM / AudioBuffer caches (mobile OOM on big gens). */
 const PCM_CACHE_MAX = 32;
 const BUFFER_CACHE_MAX = 48;
@@ -144,6 +151,16 @@ const STRETCH_LABEL: Record<StretchMode, string> = {
   "preserve-pitch": "pitch",
   resample: "resample",
 };
+
+const GEN_STRETCH_UP_RATIOS = [1, 1.5, 2, 4, 8] as const;
+const GEN_STRETCH_DOWN_RATIOS = [1, 0.5, 0.25, 0.125] as const;
+
+function genStretchRatioLabel(n: number): string {
+  if (n === 0.5) return "×½";
+  if (n === 0.25) return "×¼";
+  if (n === 0.125) return "×⅛";
+  return `×${n}`;
+}
 
 type TrimEdge = "start" | "end";
 
@@ -163,6 +180,9 @@ export class GlSequencerPage extends LitElement {
     .timeline {
       flex: 1;
       min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
       overflow: auto;
       scrollbar-width: none;
       -ms-overflow-style: none;
@@ -177,18 +197,25 @@ export class GlSequencerPage extends LitElement {
     .timeline-canvas {
       position: relative;
       box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      flex: 1 0 auto;
+      min-height: 100%;
     }
     .track {
       display: flex;
+      flex: 1 1 0;
+      min-height: 0;
       width: 100%;
       min-width: 100%;
       box-sizing: border-box;
-      min-height: 56px;
       border-bottom: 1px solid color-mix(in srgb, var(--gl-fg) 12%, transparent);
     }
     .track-label {
       width: ${TRACK_LABEL_PX}px;
       flex-shrink: 0;
+      min-height: 0;
+      overflow: hidden;
       background: var(--gl-ink);
       position: sticky;
       right: 0;
@@ -233,7 +260,7 @@ export class GlSequencerPage extends LitElement {
       position: relative;
       flex: 1;
       min-width: 800px;
-      min-height: 56px;
+      min-height: 0;
       box-sizing: border-box;
       overflow: hidden;
     }
@@ -438,6 +465,7 @@ export class GlSequencerPage extends LitElement {
       top: 0;
       left: 0;
       z-index: 20;
+      flex-shrink: 0;
       width: var(--gl-tl-view-w, 100%);
       box-sizing: border-box;
       height: ${CANCEL_ZONE_H}px;
@@ -457,6 +485,7 @@ export class GlSequencerPage extends LitElement {
     }
     .time-ruler {
       display: flex;
+      flex-shrink: 0;
       width: 100%;
       min-width: 100%;
       box-sizing: border-box;
@@ -627,9 +656,12 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenForm: GenFormStyle = "auto";
   @state() private draftGenHumanize: number | GenAuto = "auto";
   @state() private draftGenVariation: number | GenAuto = "auto";
+  @state() private draftGenSampleVariety: number | GenAuto = "auto";
   @state() private draftGenBpmSync: GenTriState = "auto";
   @state() private draftGenLockTempoPow2: GenTriState = "off";
   @state() private draftGenForbidPitchStretch: GenTriState = "off";
+  @state() private draftGenStretchUp: number | GenAuto = "auto";
+  @state() private draftGenStretchDown: number | GenAuto = "auto";
   @state() private draftGenReverse: GenTriState = "auto";
   @state() private draftGenStutter: GenTriState = "auto";
   @state() private draftGenCallResponse: GenTriState = "auto";
@@ -639,6 +671,8 @@ export class GlSequencerPage extends LitElement {
   /** Pool for generation: all / favorites / sample class. */
   @state() private draftGenSampleFilter: SampleClass | "all" | "favorite" =
     "all";
+  /** Exact tag matches (OR); empty = all. */
+  @state() private draftGenTagFilter: string[] = [];
   @state() private draftGenAdvanced = false;
   /** Long-press context menu (screen coords). */
   @state() private clipCtx: { clipId: string; x: number; y: number } | null =
@@ -653,6 +687,18 @@ export class GlSequencerPage extends LitElement {
   @subscribe(exportFormKey.sharing)
   @state()
   exportSharing: "private" | "public" = "private";
+
+  @subscribe(exportFormKey.reelBg)
+  @state()
+  reelBg = reelExport.defaults.bgColor;
+
+  @subscribe(exportFormKey.reelAccent)
+  @state()
+  reelAccent = reelExport.defaults.accentColor;
+
+  @subscribe(exportFormKey.reelScenes)
+  @state()
+  reelScenes: string[] = [...reelExport.defaults.scenes];
 
   @state() private scStatus: SoundCloudStatus | null = null;
   @state() private listenMeta: ListenMeta | null = null;
@@ -742,6 +788,9 @@ export class GlSequencerPage extends LitElement {
     if (changed.has("playheadTick") && this.#followPlayhead) {
       this.#syncFollowScroll();
     }
+    if (this.playing && !this.#scrubbing) {
+      this.#paintTransportPlayhead(this.#transportPlayheadTick());
+    }
     if (
       changed.has("clips") ||
       changed.has("pxPerTick") ||
@@ -803,7 +852,7 @@ export class GlSequencerPage extends LitElement {
     const timeline = this.#timelineEl();
     return {
       pxPerTick: this.pxPerTick,
-      playheadTick: this.playheadTick,
+      playheadTick: this.#transportPlayheadTick(),
       selStartTick: this.selStartTick,
       selEndTick: this.selEndTick,
       selectedId: this.selectedId,
@@ -826,9 +875,12 @@ export class GlSequencerPage extends LitElement {
         formStyle: this.draftGenForm,
         humanize: this.draftGenHumanize,
         variation: this.draftGenVariation,
+        sampleVariety: this.draftGenSampleVariety,
         bpmSync: this.draftGenBpmSync,
         lockTempoPow2: this.draftGenLockTempoPow2,
         forbidPitchStretch: this.draftGenForbidPitchStretch,
+        stretchUpRatio: this.draftGenStretchUp,
+        stretchDownRatio: this.draftGenStretchDown,
         reverse: this.draftGenReverse,
         stutter: this.draftGenStutter,
         callResponse: this.draftGenCallResponse,
@@ -836,6 +888,7 @@ export class GlSequencerPage extends LitElement {
         pitchUpSemitones: this.draftGenPitchUp,
         pitchDownSemitones: this.draftGenPitchDown,
         sampleFilter: this.draftGenSampleFilter,
+        tagFilter: this.draftGenTagFilter,
         advanced: this.draftGenAdvanced,
       },
     };
@@ -903,11 +956,14 @@ export class GlSequencerPage extends LitElement {
     this.draftGenForm = g.formStyle as GenFormStyle;
     this.draftGenHumanize = g.humanize;
     this.draftGenVariation = g.variation;
+    this.draftGenSampleVariety = g.sampleVariety;
     this.draftGenBpmSync = g.bpmSync as GenTriState;
     this.draftGenLockTempoPow2 =
       g.lockTempoPow2 === "on" ? "on" : "off";
     this.draftGenForbidPitchStretch =
       g.forbidPitchStretch === "on" ? "on" : "off";
+    this.draftGenStretchUp = g.stretchUpRatio;
+    this.draftGenStretchDown = g.stretchDownRatio;
     this.draftGenReverse = g.reverse as GenTriState;
     this.draftGenStutter = g.stutter as GenTriState;
     this.draftGenCallResponse = g.callResponse as GenTriState;
@@ -915,6 +971,7 @@ export class GlSequencerPage extends LitElement {
     this.draftGenPitchUp = g.pitchUpSemitones;
     this.draftGenPitchDown = g.pitchDownSemitones;
     this.draftGenSampleFilter = g.sampleFilter;
+    this.draftGenTagFilter = g.tagFilter;
     this.draftGenAdvanced = g.advanced;
   }
 
@@ -950,6 +1007,10 @@ export class GlSequencerPage extends LitElement {
           `${Math.max(1, timeline.clientWidth)}px`,
         );
         this.#syncViewWindow();
+        cancelAnimationFrame(this.#wavePaintRaf);
+        this.#wavePaintRaf = requestAnimationFrame(() => {
+          void this.#paintClipWaves();
+        });
       };
       syncViewW();
       if (typeof ResizeObserver !== "undefined") {
@@ -988,11 +1049,19 @@ export class GlSequencerPage extends LitElement {
     const usableW = Math.max(64, timeline.clientWidth - TRACK_LABEL_PX);
     const start = timeline.scrollLeft / this.pxPerTick;
     const end = (timeline.scrollLeft + usableW) / this.pxPerTick;
-    this.viewStartTick = Math.max(0, Math.min(max, start));
-    this.viewEndTick = Math.max(
-      this.viewStartTick,
-      Math.min(max, end),
-    );
+    const viewStart = Math.max(0, Math.min(max, start));
+    const viewEnd = Math.max(viewStart, Math.min(max, end));
+    // During play, write the seek-bar directly — @state here re-renders the whole seq.
+    if (this.playing && !this.#scrubbing) {
+      const seek = this.renderRoot.querySelector<GlSeekBar>("gl-seek-bar");
+      if (seek) {
+        seek.viewStart = viewStart;
+        seek.viewEnd = viewEnd;
+      }
+      return;
+    }
+    this.viewStartTick = viewStart;
+    this.viewEndTick = viewEnd;
   }
 
   /**
@@ -1008,7 +1077,7 @@ export class GlSequencerPage extends LitElement {
     if (!timeline) return;
     const usableW = Math.max(64, timeline.clientWidth - TRACK_LABEL_PX);
     const next = scrollLeftToCenterUnit(
-      this.playheadTick,
+      this.#transportPlayheadTick(),
       this.pxPerTick,
       usableW,
       0,
@@ -1016,6 +1085,36 @@ export class GlSequencerPage extends LitElement {
     );
     if (timeline.scrollLeft !== next) timeline.scrollLeft = next;
     else this.#syncViewWindow();
+  }
+
+  /** Engine clock during play (avoids stale @state playheadTick). */
+  #transportPlayheadTick(): number {
+    if (this.#engine && this.playing && this.project && !this.#scrubbing) {
+      return samplesToTicks(
+        this.#engine.playheadSample(),
+        this.project.bpm,
+        this.#engine.sampleRate,
+      );
+    }
+    return this.playheadTick;
+  }
+
+  /** Move playhead chrome without a Lit render of the whole sequencer. */
+  #paintTransportPlayhead(tick: number): void {
+    const px = tick * this.pxPerTick;
+    const root = this.renderRoot;
+    const line = root.querySelector<HTMLElement>(".timeline-canvas > .playhead");
+    const handle = root.querySelector<HTMLElement>(".time-handle.playhead");
+    const progress = root.querySelector<HTMLElement>(".ruler-progress");
+    if (line) line.style.left = `${px}px`;
+    if (handle) handle.style.left = `${px}px`;
+    if (progress) progress.style.width = `${Math.max(0, px)}px`;
+    const seek = root.querySelector<GlSeekBar>("gl-seek-bar");
+    if (seek) seek.value = tick;
+    const bar = root.querySelector<GlTransportBar>("gl-transport-bar");
+    if (bar && this.project) {
+      bar.clock = formatClock(ticksToMs(tick, this.project.bpm));
+    }
   }
 
   /** Tick under clientX in the scrolled timeline (right tools gutter excluded). */
@@ -1272,6 +1371,7 @@ export class GlSequencerPage extends LitElement {
           ?disabled=${!this.project}
           @gl-transport=${this.#onTransport}
         >
+          ${this.project ? this.#renderMasterMix() : nothing}
         </gl-transport-bar>
       </div>
       ${this.ghost
@@ -1495,12 +1595,17 @@ export class GlSequencerPage extends LitElement {
           ${laneClips.map((c) => this.#renderClip(c))}
         </div>
         <div
-          class="track-label flex flex-col justify-center gap-0.5 px-1.5 py-1.5 text-xs text-neutral-500 ${fxOpen
+          class="track-label flex min-h-0 flex-col justify-center gap-0.5 overflow-hidden px-1.5 py-1 text-xs text-neutral-500 ${fxOpen
             ? "fx-open"
             : ""}"
         >
-          <span class="truncate text-content">${tr.name}</span>
-          <div class="flex flex-wrap items-center gap-0.5">
+          <div class="flex min-w-0 items-baseline justify-between gap-1">
+            <span class="truncate text-content">${tr.name}</span>
+            <span class="shrink-0 font-mono text-[0.6rem] opacity-75"
+              >×${lin.toFixed(lin === 0 || lin === 1 || lin === 2 ? 0 : 2)}</span
+            >
+          </div>
+          <div class="flex min-w-0 flex-nowrap items-center gap-0.5 overflow-hidden">
             <button
               type="button"
               class="mute-sw ${tr.mute ? "on" : ""}"
@@ -1526,6 +1631,7 @@ export class GlSequencerPage extends LitElement {
               ${glIcon("headphones", { size: "xs" })}
             </button>
             <gl-track-fx-control
+              compact
               .fx=${tr.fx}
               @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
                 void this.#onTrackFx(tr, e.detail.fx, e.detail.commit)}
@@ -1533,9 +1639,6 @@ export class GlSequencerPage extends LitElement {
                 this.#onTrackFxPop(tr.id, e.detail.open)}
             ></gl-track-fx-control>
           </div>
-          <span class="font-mono text-[0.6rem] opacity-75"
-            >×${lin.toFixed(lin === 0 || lin === 1 || lin === 2 ? 0 : 2)}</span
-          >
         </div>
       </div>
     `;
@@ -1808,7 +1911,7 @@ export class GlSequencerPage extends LitElement {
       this.#engine?.stop();
       this.playing = false;
     }
-    this.project = p;
+    this.project = normalizeProject(p);
     const rawTracks = await db.tracks
       .where("projectId")
       .equals(p.id)
@@ -1820,15 +1923,51 @@ export class GlSequencerPage extends LitElement {
       .toArray();
     this.selectedId = null;
     this.#engine = new TransportEngine();
-    this.#engine.master.gain.value = dbToGain(p.masterGainDb);
+    this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
     this.#syncTrackBuses();
   }
 
-  #syncTrackBuses(): void {
-    const bpm = this.project?.bpm ?? 120;
-    this.#engine?.syncTrackBuses(
-      this.tracks.map((tr) => trackToInsertConfig(tr, bpm)),
+  #preampDb(): number {
+    const v = this.project?.preampGainDb;
+    return Number.isFinite(v) ? (v as number) : 0;
+  }
+
+  #insertConfig(tr: Track): TrackInsertConfig {
+    return trackToInsertConfig(
+      tr,
+      this.project?.bpm ?? 120,
+      this.#preampDb(),
     );
+  }
+
+  #syncTrackBuses(): void {
+    this.#engine?.syncTrackBuses(this.tracks.map((tr) => this.#insertConfig(tr)));
+  }
+
+  #renderMasterMix() {
+    const p = this.project;
+    if (!p) return nothing;
+    return html`
+      <div
+        class="flex items-center gap-1.5"
+        role="group"
+        aria-label=${t("seq.preamp")}
+      >
+        <gl-track-volume-rotary
+          large
+          .label=${t("seq.preamp")}
+          title=${t("seq.preampHint")}
+          .gainDb=${p.preampGainDb ?? 0}
+          @gl-gain=${(e: CustomEvent<{ gainDb: number; commit: boolean }>) =>
+            void this.#onPreampGain(e.detail.gainDb, e.detail.commit)}
+        ></gl-track-volume-rotary>
+        <gl-vu-meter
+          .analyser=${this.#engine?.analyser ?? null}
+          ?active=${this.playing}
+          .label=${t("seq.masterVu")}
+        ></gl-vu-meter>
+      </div>
+    `;
   }
 
   async #toggleMute(tr: Track): Promise<void> {
@@ -1846,6 +1985,36 @@ export class GlSequencerPage extends LitElement {
   }
 
   #gainWriteBusy = false;
+  #mixWriteBusy = false;
+
+  async #persistProjectMix(commit: boolean): Promise<void> {
+    if (!this.project) return;
+    if (!commit) {
+      if (this.playing && !this.#mixWriteBusy) {
+        this.#mixWriteBusy = true;
+        try {
+          await db.projects.put(this.project);
+        } finally {
+          this.#mixWriteBusy = false;
+        }
+      }
+      return;
+    }
+    this.project = {
+      ...this.project,
+      updatedAt: nowIso(),
+      revision: this.project.revision + 1,
+    };
+    await db.projects.put(this.project);
+  }
+
+  async #onPreampGain(gainDb: number, commit: boolean): Promise<void> {
+    if (!this.project) return;
+    this.project = { ...this.project, preampGainDb: gainDb };
+    this.#bounceCache = null;
+    this.#syncTrackBuses();
+    await this.#persistProjectMix(commit);
+  }
 
   async #onTrackGain(
     tr: Track,
@@ -1855,9 +2024,7 @@ export class GlSequencerPage extends LitElement {
     tr.gainDb = gainDb;
     this.tracks = [...this.tracks];
     this.#bounceCache = null;
-    this.#engine?.setTrackInsert(
-      trackToInsertConfig(tr, this.project?.bpm ?? 120),
-    );
+    this.#engine?.setTrackInsert(this.#insertConfig(tr));
     if (!commit) {
       if (this.playing && !this.#gainWriteBusy) {
         this.#gainWriteBusy = true;
@@ -1880,9 +2047,7 @@ export class GlSequencerPage extends LitElement {
     tr.fx = fx;
     this.tracks = [...this.tracks];
     this.#bounceCache = null;
-    this.#engine?.setTrackInsert(
-      trackToInsertConfig(tr, this.project?.bpm ?? 120),
-    );
+    this.#engine?.setTrackInsert(this.#insertConfig(tr));
     if (commit) await db.tracks.put(tr);
   }
 
@@ -1938,7 +2103,10 @@ export class GlSequencerPage extends LitElement {
     const offsetSamples = msToSamples(clip.contentOffsetMs, entry.sampleRate);
     const track = this.tracks.find((t) => t.id === clip.trackId);
     const cssW = Math.max(8, clip.lengthTick * this.pxPerTick);
-    const cssH = Math.max(24, (track?.heightPx ?? 56) - 8);
+    const cssH = Math.max(
+      24,
+      canvas.clientHeight || (track?.heightPx ?? 56) - 8,
+    );
     const ch = entry.channelCount ?? 1;
     const wavePcm = toMonoPcm(
       clip.reverse ? reverseInterleaved(entry.pcm, ch) : entry.pcm,
@@ -2059,6 +2227,8 @@ export class GlSequencerPage extends LitElement {
       if (oldest == null) break;
       this.#bufferCache.delete(oldest);
     }
+    // Let the audio scheduler run between expensive stretch/decode jobs.
+    await new Promise<void>((r) => setTimeout(r, 0));
     return buf;
   }
 
@@ -2074,7 +2244,6 @@ export class GlSequencerPage extends LitElement {
     bakeCopy?: boolean;
   }) {
     if (!this.#engine || !this.project) return [];
-    this.#syncTrackBuses();
     const audible = audibleTrackIds(this.tracks);
     const trackFxById = new Map(
       this.tracks.map((tr) => [tr.id, tr.fx] as const),
@@ -2127,7 +2296,7 @@ export class GlSequencerPage extends LitElement {
 
   async #resyncSchedule(): Promise<void> {
     if (!this.#engine || !this.playing || !this.project) return;
-    const ph = this.playheadTick;
+    const ph = this.#transportPlayheadTick();
     const preload = this.#playPreloadTicks();
     const scheduled = await this.#buildSchedule({
       windowTicks: { from: ph, to: ph + preload },
@@ -2142,27 +2311,28 @@ export class GlSequencerPage extends LitElement {
     this.#scheduledToTick = fromTick + this.#playPreloadTicks();
     const pump = async () => {
       while (this.playing && gen === this.#hydrateGen && this.#engine && this.project) {
-        const ph = this.playheadTick;
+        const ph = this.#transportPlayheadTick();
         const preload = this.#playPreloadTicks();
-        const needTo = ph + preload;
-        // Also warm the transport loop start when we're near the end.
+        const refill = PLAY_REFILL_BEATS * PPQ;
         const loop = this.#transportLoopRange();
+        const remain = this.#scheduledToTick - ph;
+        const nearLoop = !!(loop && ph + refill >= loop.end);
+        if (remain > refill && !nearLoop) {
+          await new Promise<void>((r) => setTimeout(r, 80));
+          continue;
+        }
         let from = ph;
-        let to = needTo;
+        let to = ph + preload;
         if (loop && ph + preload >= loop.end) {
           from = Math.min(from, loop.start);
           to = Math.max(to, loop.start + preload);
-        }
-        if (to <= this.#scheduledToTick && !(loop && ph + preload >= loop.end)) {
-          await new Promise<void>((r) => setTimeout(r, 120));
-          continue;
         }
         const scheduled = await this.#buildSchedule({
           windowTicks: { from, to },
         });
         if (!this.playing || gen !== this.#hydrateGen || !this.#engine) return;
         this.#engine.setClips(scheduled);
-        this.#scheduledToTick = to;
+        this.#scheduledToTick = Math.max(to, this.#transportPlayheadTick() + preload);
         await new Promise<void>((r) => setTimeout(r, 0));
       }
     };
@@ -2571,6 +2741,35 @@ export class GlSequencerPage extends LitElement {
             </div>
             <div class="flex flex-col gap-2 border-t border-neutral-3 pt-3">
               <strong>${t("export.reel")}</strong>
+              <div class="flex flex-col gap-1.5">
+                <span class="form-label">${t("export.reelScenes")}</span>
+                <p class="form-description m-0">${t("export.reelScenesHint")}</p>
+                <div class="flex flex-wrap gap-x-4 gap-y-2">
+                  ${reelExport.sceneIds.map(
+                    (id) => html`
+                      <sonic-checkbox name="reelScenes" value=${id} size="sm">
+                        ${t(`export.reelScene.${id}` as MessageKey)}
+                      </sonic-checkbox>
+                    `,
+                  )}
+                </div>
+              </div>
+              <div class="flex flex-wrap items-end gap-3">
+                <sonic-input
+                  name="reelBg"
+                  type="color"
+                  size="sm"
+                  label=${t("export.reelBg")}
+                  class="w-28"
+                ></sonic-input>
+                <sonic-input
+                  name="reelAccent"
+                  type="color"
+                  size="sm"
+                  label=${t("export.reelAccent")}
+                  class="w-28"
+                ></sonic-input>
+              </div>
               <div class="row flex flex-wrap items-center gap-2">
                 <sonic-button
                   type="primary"
@@ -2895,10 +3094,44 @@ export class GlSequencerPage extends LitElement {
                 this.draftGenSampleFilter = v as SampleClass | "all" | "favorite";
               },
             })}
+            <div class="flex flex-col gap-1.5 text-xs text-neutral-500">
+              ${t("seq.genTagFilter")}
+              <gl-pop-select
+                class="w-full max-w-full"
+                size="sm"
+                multiple
+                .values=${this.draftGenTagFilter}
+                .options=${[
+                  { value: "", label: t("seq.allTags") },
+                  ...this.#genTagOptions,
+                ]}
+                placeholder=${t("seq.allTags")}
+                searchPlaceholder=${t("seq.popSearch")}
+                ?active=${this.draftGenTagFilter.length > 0}
+                @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
+                  this.draftGenTagFilter = e.detail.values.filter(Boolean);
+                  this.#persistGenUi();
+                }}
+              ></gl-pop-select>
+            </div>
             <span class="font-mono text-[0.65rem] text-neutral-500"
               >${tf("seq.genSampleFilterCount", {
                 n: this.#genPoolSamples().length,
               })}</span
+            >
+            ${this.#renderGenSlider({
+              label: t("seq.genSampleVariety"),
+              value: this.draftGenSampleVariety,
+              min: 0,
+              max: 100,
+              fallback: 45,
+              format: (n) => `${Math.round(n)}%`,
+              onChange: (v) => {
+                this.draftGenSampleVariety = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            <span class="text-[0.65rem] text-neutral-500 opacity-80"
+              >${t("seq.genSampleVarietyHint")}</span
             >
             ${this.#renderGenSlider({
               label: t("seq.genDensity"),
@@ -3162,6 +3395,51 @@ export class GlSequencerPage extends LitElement {
                     >${t("seq.genForbidPitchStretchHint")}</span
                   >
                   ${this.#renderGenChoice({
+                    label: t("seq.genStretchUp"),
+                    value:
+                      this.draftGenStretchUp === "auto"
+                        ? "auto"
+                        : String(this.draftGenStretchUp),
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ...GEN_STRETCH_UP_RATIOS.map(
+                        (n) =>
+                          [String(n), genStretchRatioLabel(n)] as [
+                            string,
+                            string,
+                          ],
+                      ),
+                    ],
+                    onPick: (v) => {
+                      this.draftGenStretchUp =
+                        v === "auto" ? "auto" : Number(v);
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genStretchDown"),
+                    value:
+                      this.draftGenStretchDown === "auto"
+                        ? "auto"
+                        : String(this.draftGenStretchDown),
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ...GEN_STRETCH_DOWN_RATIOS.map(
+                        (n) =>
+                          [String(n), genStretchRatioLabel(n)] as [
+                            string,
+                            string,
+                          ],
+                      ),
+                    ],
+                    onPick: (v) => {
+                      this.draftGenStretchDown =
+                        v === "auto" ? "auto" : Number(v);
+                    },
+                  })}
+                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
+                    >${t("seq.genStretchRatioHint")}</span
+                  >
+                  ${this.#renderGenChoice({
                     label: t("seq.genReverse"),
                     value: this.draftGenReverse,
                     options: [
@@ -3278,9 +3556,12 @@ export class GlSequencerPage extends LitElement {
     this.draftGenForm = "auto";
     this.draftGenHumanize = "auto";
     this.draftGenVariation = "auto";
+    this.draftGenSampleVariety = "auto";
     this.draftGenBpmSync = "auto";
     this.draftGenLockTempoPow2 = "off";
     this.draftGenForbidPitchStretch = "off";
+    this.draftGenStretchUp = "auto";
+    this.draftGenStretchDown = "auto";
     this.draftGenReverse = "auto";
     this.draftGenStutter = "auto";
     this.draftGenCallResponse = "auto";
@@ -3288,9 +3569,24 @@ export class GlSequencerPage extends LitElement {
     this.draftGenPitchUp = "auto";
     this.draftGenPitchDown = "auto";
     this.draftGenSampleFilter = "all";
+    this.draftGenTagFilter = [];
     this.draftGenAdvanced = true;
     this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
     this.#persistGenUi();
+  }
+
+  get #genTagOptions(): { value: string; label: string }[] {
+    const counts = new Map<string, number>();
+    for (const s of this.samples) {
+      if (s.deletedAt) continue;
+      for (const tag of s.tags ?? []) {
+        if (!tag || tag.startsWith("processing:")) continue;
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .map(([value, count]) => ({ value, label: `${value} (${count})` }))
+      .sort((a, b) => a.value.localeCompare(b.value, "fr"));
   }
 
   #genPoolSamples(): Sample[] {
@@ -3298,6 +3594,11 @@ export class GlSequencerPage extends LitElement {
     const f = this.draftGenSampleFilter;
     if (f === "favorite") list = list.filter((s) => s.favorite);
     else if (f !== "all") list = list.filter((s) => s.class === f);
+    if (this.draftGenTagFilter.length > 0) {
+      list = list.filter((s) =>
+        this.draftGenTagFilter.some((tag) => (s.tags ?? []).includes(tag)),
+      );
+    }
     return list;
   }
 
@@ -3415,6 +3716,12 @@ export class GlSequencerPage extends LitElement {
     set(exportFormKey, {
       title: this.project?.title ?? "Glane",
       sharing: this.exportSharing || "private",
+      reelBg: this.reelBg || reelExport.defaults.bgColor,
+      reelAccent: this.reelAccent || reelExport.defaults.accentColor,
+      reelScenes:
+        this.reelScenes?.length > 0
+          ? this.reelScenes
+          : [...reelExport.defaults.scenes],
     });
     this.exportOpen = true;
     this.scStatus = await exportPublish.fetchSoundCloudStatus();
@@ -3476,9 +3783,7 @@ export class GlSequencerPage extends LitElement {
           clips: scheduled,
           project: this.project,
           lengthTick: this.#projectLengthTick(),
-          tracks: this.tracks.map((tr) =>
-            trackToInsertConfig(tr, this.project!.bpm),
-          ),
+          tracks: this.tracks.map((tr) => this.#insertConfig(tr)),
           encodeMp3: false,
           onProgress: this.#onBounceProgress,
         });
@@ -3574,9 +3879,7 @@ export class GlSequencerPage extends LitElement {
         engine: this.#engine,
         clips: scheduled,
         tracks: this.tracks,
-        trackInserts: this.tracks.map((tr) =>
-          trackToInsertConfig(tr, this.project!.bpm),
-        ),
+        trackInserts: this.tracks.map((tr) => this.#insertConfig(tr)),
         project: this.project,
         lengthTick: this.#projectLengthTick(),
         title: this.exportTitle || this.project.title || "glane",
@@ -3692,14 +3995,21 @@ export class GlSequencerPage extends LitElement {
       }
       this.#revokeReel();
       this.#setExportProgress(t("export.reelEncoding"));
-      const styleId =
-        this.draftGenMusicStyle === "auto"
-          ? undefined
-          : this.draftGenMusicStyle;
+      const scenes = (
+        Array.isArray(this.reelScenes)
+          ? this.reelScenes
+          : this.reelScenes
+            ? [this.reelScenes as unknown as string]
+            : []
+      ).filter((s): s is ReelSceneId =>
+        (reelExport.sceneIds as readonly string[]).includes(s),
+      );
       const result = await reelExport.encode({
         buffer: bounce.buffer,
         title: this.exportTitle || this.project?.title || "Glane",
-        styleId,
+        bgColor: this.reelBg || reelExport.defaults.bgColor,
+        accentColor: this.reelAccent || reelExport.defaults.accentColor,
+        scenes,
         onProgress: (ratio) => {
           this.#setExportProgress(
             tf("export.reelEncodingPct", { pct: Math.round(ratio * 100) }),
@@ -3820,6 +4130,8 @@ export class GlSequencerPage extends LitElement {
     this.playing = false;
     cancelAnimationFrame(this.#raf);
     if (resetTick != null) this.playheadTick = resetTick;
+    this.#syncViewWindow();
+    this.#paintTransportPlayhead(this.playheadTick);
   }
 
   #handleTransport = async (action: TransportAction): Promise<void> => {
@@ -3853,6 +4165,7 @@ export class GlSequencerPage extends LitElement {
 
       // Decode only the next ~16 beats — never the whole sequence up front.
       const preload = this.#playPreloadTicks();
+      this.#syncTrackBuses();
       const scheduled = await this.#buildSchedule({
         windowTicks: { from: fromTick, to: fromTick + preload },
       });
@@ -3870,16 +4183,13 @@ export class GlSequencerPage extends LitElement {
       this.#setFollowPlayhead(true);
       this.playheadTick = fromTick;
       this.#syncFollowScroll();
+      this.#paintTransportPlayhead(fromTick);
       this.#armScheduleHydration(fromTick);
       const tick = () => {
         if (!this.#engine || !this.playing || !this.project) return;
+        this.#engine.scheduleAhead();
         if (!this.#scrubbing) {
-          const ph = this.#engine.playheadSample();
-          this.playheadTick = samplesToTicks(
-            ph,
-            this.project.bpm,
-            this.#engine.sampleRate,
-          );
+          this.#paintTransportPlayhead(this.#transportPlayheadTick());
         }
         this.#syncFollowScroll();
         this.#raf = requestAnimationFrame(tick);
@@ -5019,6 +5329,7 @@ export class GlSequencerPage extends LitElement {
       formStyle: this.draftGenForm,
       humanize: this.draftGenHumanize,
       variation: this.draftGenVariation,
+      sampleVariety: this.draftGenSampleVariety,
       bpmSync: this.draftGenBpmSync,
       reverse: this.draftGenReverse,
       stutter: this.draftGenStutter,
@@ -5028,6 +5339,8 @@ export class GlSequencerPage extends LitElement {
       pitchDownSemitones: this.draftGenPitchDown,
       lockTempoPow2: this.draftGenLockTempoPow2,
       forbidPitchStretch: this.draftGenForbidPitchStretch,
+      stretchUpRatio: this.draftGenStretchUp,
+      stretchDownRatio: this.draftGenStretchDown,
       tracks: this.tracks.map((t) => ({ id: t.id, index: t.index })),
       samples: pool.map((s) => {
         const a = analysisById.get(s.id);

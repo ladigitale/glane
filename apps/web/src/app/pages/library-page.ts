@@ -442,6 +442,12 @@ export class GlLibraryPage extends LitElement {
         onClick: () => void this.#batchAutoCrop(),
       },
       {
+        label: t("library.batchAnalyze"),
+        icon: "activity",
+        disabled: noSel,
+        onClick: () => void this.#batchAnalyze(),
+      },
+      {
         label: t("library.exportMachine"),
         icon: "download",
         disabled: noExport,
@@ -697,16 +703,12 @@ export class GlLibraryPage extends LitElement {
                               icon: "layers",
                               onClick: () => void this.#separate(s),
                             },
-                            ...(isProcessingError(s.tags)
-                              ? [
-                                  {
-                                    label: t("library.retryProcess"),
-                                    icon: "refresh-cw",
-                                    onClick: () =>
-                                      void processQueue.retrySample(s.id),
-                                  },
-                                ]
-                              : []),
+                            {
+                              label: t("library.analyze"),
+                              icon: "activity",
+                              onClick: () =>
+                                void processQueue.reanalyzeSample(s.id),
+                            },
                             {
                               label: t("library.copyToProject"),
                               icon: "folder-plus",
@@ -1156,6 +1158,23 @@ export class GlLibraryPage extends LitElement {
     });
     if (!ok) return;
     enqueueDemucsSeparate(eligible);
+  }
+
+  async #batchAnalyze(): Promise<void> {
+    const ids = this.#selectedInView();
+    if (ids.length === 0) return;
+    const ok = await glDialog.confirm({
+      title: t("library.batchAnalyze"),
+      message: tf("library.analyzeConfirm", { n: ids.length }),
+    });
+    if (!ok) return;
+    this.batchBusy = true;
+    try {
+      await processQueue.reanalyzeSamples(ids);
+      await this.#reload();
+    } finally {
+      this.batchBusy = false;
+    }
   }
 
   async #batchAutoCrop(): Promise<void> {

@@ -5,9 +5,13 @@ import {
   TRACK_HP_HZ_MIN,
   TRACK_LP_HZ_MAX,
   TRACK_LP_HZ_MIN,
+  adsrGain01,
   echoDelaySec,
+  fitTrackAdsr,
   normalizeTrackFx,
+  trackFxAdsr,
   trackFxIsActive,
+  type TrackAdsr,
   type TrackFx,
   type TrackFxType,
 } from "@glane/core-model";
@@ -16,6 +20,11 @@ export type TrackInsertConfig = {
   id: string;
   /** Linear track gain (0…2). */
   gain: number;
+  /**
+   * Linear preamp on bus input (before HP/LP/FX). Default 1.
+   * Combined with `gain` so a global trim sits next to local faders.
+   */
+  preamp?: number;
   pan: number;
   fx: TrackFx;
   /** Project tempo — resolves echo delayBeats → seconds. */
@@ -31,9 +40,9 @@ type InsertHandles = {
 
 export type TrackBus = {
   input: GainNode;
-  /** Always-on high-pass (before wet insert). */
+  /** High-pass (before wet insert; bypass at open cutoff). */
   hp: BiquadFilterNode;
-  /** Always-on low-pass (before wet insert). */
+  /** Low-pass (before wet insert; bypass at open cutoff). */
   lp: BiquadFilterNode;
   gain: GainNode;
   pan: StereoPannerNode;
@@ -92,6 +101,52 @@ function applyToneFilters(
 ): void {
   hp.frequency.value = clamp(fx.hpHz, TRACK_HP_HZ_MIN, TRACK_HP_HZ_MAX);
   lp.frequency.value = clamp(fx.lpHz, TRACK_LP_HZ_MIN, TRACK_LP_HZ_MAX);
+}
+
+/** Schedule a clip-relative ADSR onto a gain param (live + bake). */
+export function scheduleGainAdsr(
+  param: AudioParam,
+  audioStart: number,
+  clipDurSec: number,
+  intoSec: number,
+  peak: number,
+  adsr: TrackAdsr,
+): void {
+  const durMs = Math.max(0.001, clipDurSec) * 1000;
+  const intoMs = Math.max(0, intoSec) * 1000;
+  const fitted: TrackAdsr = {
+    sustain: clamp(adsr.sustain, 0, 1),
+    ...fitTrackAdsr(adsr.attackMs, adsr.decayMs, adsr.releaseMs, durMs),
+  };
+
+  param.cancelScheduledValues(audioStart);
+  param.setValueAtTime(peak * adsrGain01(intoMs, durMs, fitted), audioStart);
+
+  const a = fitted.attackMs;
+  const d = fitted.decayMs;
+  const r = fitted.releaseMs;
+  const s = fitted.sustain;
+  const attackPeak = d > 0 ? 1 : s;
+  const decayEnd = a + d;
+  const releaseStart = Math.max(decayEnd, durMs - r);
+
+  const points: Array<{ tMs: number; level: number }> = [];
+  if (a > 0) points.push({ tMs: a, level: attackPeak });
+  if (d > 0) points.push({ tMs: decayEnd, level: s });
+  if (r > 0) {
+    if (releaseStart > decayEnd + 0.01) {
+      points.push({ tMs: releaseStart, level: s });
+    }
+    points.push({ tMs: durMs, level: 0 });
+  }
+
+  for (const p of points) {
+    if (p.tMs <= intoMs + 0.01) continue;
+    param.linearRampToValueAtTime(
+      peak * p.level,
+      audioStart + (p.tMs - intoMs) / 1000,
+    );
+  }
 }
 
 function buildNone(from: AudioNode, gain: GainNode): InsertHandles {
@@ -419,6 +474,12 @@ function configBpm(config: TrackInsertConfig): number {
   return Number.isFinite(b) && (b as number) > 0 ? (b as number) : 120;
 }
 
+function configPreamp(config: TrackInsertConfig): number {
+  const p = config.preamp;
+  if (!Number.isFinite(p)) return 1;
+  return clamp(p as number, 0, 2);
+}
+
 export function createTrackBus(
   ctx: BaseAudioContext,
   destination: AudioNode,
@@ -427,7 +488,7 @@ export function createTrackBus(
   const fx = normalizeTrackFx(config.fx ?? DEFAULT_TRACK_FX);
   const bpm = configBpm(config);
   const input = ctx.createGain();
-  input.gain.value = 1;
+  input.gain.value = configPreamp(config);
   const hp = ctx.createBiquadFilter();
   hp.type = "highpass";
   hp.Q.value = 0.707;
@@ -455,19 +516,20 @@ export function updateTrackBus(
 ): void {
   const fx = normalizeTrackFx(config.fx ?? DEFAULT_TRACK_FX);
   const bpm = configBpm(config);
+  bus.input.gain.value = configPreamp(config);
   bus.gain.gain.value = clamp(config.gain, 0, 2);
   bus.pan.pan.value = clamp(config.pan, -1, 1);
   applyToneFilters(bus.hp, bus.lp, fx);
-  try {
-    bus.pan.disconnect();
-  } catch {
-    /* */
-  }
-  bus.pan.connect(destination);
 
   if (bus.insert.type !== fx.type) {
     bus.insert.dispose();
     bus.insert = buildInsert(ctx, bus.lp, bus.gain, fx, bpm);
+    try {
+      bus.pan.disconnect();
+    } catch {
+      /* */
+    }
+    bus.pan.connect(destination);
     return;
   }
   bus.insert.apply(fx, bpm);
@@ -524,7 +586,7 @@ export function fxTailSamples(
 /**
  * Bake a TrackFx insert onto interleaved PCM via OfflineAudioContext (ADR-0016).
  * Echo/reverb/chorus may grow the buffer by a decay tail; others keep length.
- * Always-on HP/LP and A/R envelope bake even when wet type is none.
+ * HP/LP and ADSR bake even when wet type is none.
  */
 export async function bakeTrackFx(
   pcm: Float32Array,
@@ -569,23 +631,7 @@ export async function bakeTrackFx(
   env.connect(input);
 
   const dur = Math.max(0.001, frames / sampleRate);
-  const attackS = Math.max(0, normalized.attackMs / 1000);
-  const releaseS = Math.max(0, normalized.releaseMs / 1000);
-  env.gain.cancelScheduledValues(0);
-  if (attackS > 0) {
-    env.gain.setValueAtTime(0, 0);
-    env.gain.linearRampToValueAtTime(1, Math.min(attackS, dur));
-  } else {
-    env.gain.setValueAtTime(1, 0);
-  }
-  if (releaseS > 0) {
-    if (dur > releaseS) {
-      env.gain.setValueAtTime(1, dur - releaseS);
-      env.gain.linearRampToValueAtTime(0, dur);
-    } else {
-      env.gain.linearRampToValueAtTime(0, dur);
-    }
-  }
+  scheduleGainAdsr(env.gain, 0, dur, 0, 1, trackFxAdsr(normalized));
   src.start(0);
 
   const rendered = await offline.startRendering();

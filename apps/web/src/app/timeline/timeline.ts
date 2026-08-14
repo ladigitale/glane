@@ -8,7 +8,7 @@ import { WaveformRenderer, type WaveformView } from "@glane/waveform";
 import type { PeakPyramid } from "@glane/audio-io";
 import { css } from "lit";
 
-export const TRACK_LABEL_PX = 148;
+export const TRACK_LABEL_PX = 176;
 export const RULER_H = 28;
 export const CANCEL_ZONE_H = 36;
 export const LANE_PAD_UNITS = 64;

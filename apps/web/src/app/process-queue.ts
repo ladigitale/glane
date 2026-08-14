@@ -1,6 +1,10 @@
-import { createEntityId, nowIso } from "@glane/core-model";
+import { createEntityId, nowIso, type SampleAnalysis } from "@glane/core-model";
 import { sampleOpfs } from "@glane/audio-io";
-import type { ProcessWorkerResponse } from "@glane/audio-dsp";
+import {
+  characterizePcm,
+  type ClipCharacterization,
+  type ProcessWorkerResponse,
+} from "@glane/audio-dsp";
 import { db, type ProcessJob } from "./db.js";
 import {
   cullExcessProcessedSamples,
@@ -50,6 +54,29 @@ function stripProcessingTags(tags: readonly string[]): string[] {
   );
 }
 
+async function persistCharacterization(
+  sampleId: string,
+  analysis: ClipCharacterization,
+  loopScore?: number,
+): Promise<void> {
+  const existing = await db.analyses.get(sampleId);
+  const row: SampleAnalysis = {
+    sampleId,
+    lufs: analysis.lufs,
+    peakDbtp: analysis.peakDbtp,
+    centroidHz: analysis.centroidHz,
+    harmonicity: analysis.harmonicity,
+    transientDensity: analysis.transientDensity,
+    features: existing?.features,
+  };
+  if (analysis.pitchHz != null) row.pitchHz = analysis.pitchHz;
+  if (analysis.noteName) row.noteName = analysis.noteName;
+  if (analysis.bpm != null) row.bpm = analysis.bpm;
+  const loop = loopScore ?? existing?.loopScore;
+  if (loop != null) row.loopScore = loop;
+  await db.analyses.put(row);
+}
+
 function inferKind(sample: {
   class?: string;
   tags?: string[];
@@ -71,6 +98,8 @@ export const processQueue = (() => {
   let pumping = false;
   let started = false;
   let currentSampleId: string | null = null;
+  /** After polish, re-run YAMNet / CLAP even if tags already exist. */
+  const forceMl = new Set<string>();
 
   function emit(): void {
     void snapshot().then((s) => {
@@ -212,13 +241,23 @@ export const processQueue = (() => {
         updatedAt: nowIso(),
         revision: (sample.revision ?? 0) + 1,
       });
+      await persistCharacterization(
+        msg.sampleId,
+        msg.analysis,
+        msg.loopScore,
+      );
       void cullExcessProcessedSamples(sample.sessionId)
         .then((r) => {
           if (r.culledIds.length > 0) emit();
         })
         .catch(() => undefined);
-      void enqueueYamnetEnrich(msg.sampleId).catch(() => undefined);
-      void enqueueClapEmbed(msg.sampleId).catch(() => undefined);
+      const force = forceMl.delete(msg.sampleId);
+      void enqueueYamnetEnrich(msg.sampleId, { force }).catch(() => undefined);
+      void enqueueClapEmbed(msg.sampleId, {
+        replace: force,
+      }).catch(() => undefined);
+    } else {
+      forceMl.delete(msg.sampleId);
     }
 
     await db.processJobs.put({
@@ -381,6 +420,34 @@ export const processQueue = (() => {
     return true;
   }
 
+  async function reanalyzeOne(sampleId: string): Promise<boolean> {
+    const sample = await db.samples.get(sampleId);
+    if (!sample || sample.deletedAt) return false;
+
+    const tags = sample.tags ?? [];
+    const needsPolish =
+      isProcessingError(tags) ||
+      isProcessingBusy(tags) ||
+      !tags.includes("processing:done");
+    if (needsPolish) {
+      forceMl.add(sampleId);
+      return requeueSample(sampleId);
+    }
+
+    const audio = await sampleOpfs.loadPcm(sampleId);
+    if (!audio || audio.pcm.length === 0) return false;
+    await persistCharacterization(
+      sampleId,
+      characterizePcm(audio.pcm, audio.sampleRate, audio.channelCount),
+      sample.loopScore,
+    );
+    void enqueueYamnetEnrich(sampleId, { force: true }).catch(() => undefined);
+    void enqueueClapEmbed(sampleId, { replace: true }).catch(() => undefined);
+    notifyProcessed(sampleId);
+    emit();
+    return true;
+  }
+
   /** Cull over-quota hunt sessions that still have open polish jobs. */
   async function pruneOpenJobsByInterest(): Promise<void> {
     const open = await db.processJobs
@@ -446,6 +513,23 @@ export const processQueue = (() => {
     /** Re-queue one sample after a polish error or stuck unfinished state. */
     async retrySample(sampleId: string): Promise<boolean> {
       return requeueSample(sampleId);
+    },
+
+    /**
+     * Full T2 pass: polish if missing/errored, always (re)compute analysis
+     * + YAMNet tags (CLAP if enabled). Already-polished audio is not recropped.
+     */
+    async reanalyzeSample(sampleId: string): Promise<boolean> {
+      return reanalyzeOne(sampleId);
+    },
+
+    async reanalyzeSamples(sampleIds: readonly string[]): Promise<number> {
+      let n = 0;
+      for (const id of sampleIds) {
+        if (await reanalyzeOne(id)) n++;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      return n;
     },
 
     /**

@@ -139,6 +139,10 @@ const fr = {
   "library.batchSeparate": "Séparer (stems)",
   "library.batchAutoCrop": "Recadrage auto",
   "library.batchAutoCropDone": "Recadrage auto : {cropped} modifié(s), {skipped} inchangé(s).",
+  "library.batchAnalyze": "Analyser / traiter",
+  "library.analyze": "Analyser / traiter",
+  "library.analyzeConfirm":
+    "Lancer le traitement et l’analyse (tags, loudness…) sur {n} son(s) ? Les tags existants seront recalculés. L’audio déjà traité n’est pas recoupé.",
   "library.separate": "Séparer (stems)",
   "library.separateConfirm": "Télécharge ~166 Mo la 1ʳᵉ fois. Préférer Chrome + WebGPU, ~1–2 Go libres. Max ~60 s. Continuer ?",
   "library.separateBatchConfirm": "Séparer {n} sons en file (séquentiel, ~166 Mo la 1ʳᵉ fois) ? Les stems déjà séparés sont ignorés.",
@@ -310,6 +314,8 @@ const fr = {
   "seq.genSampleFilterCount": "{n} sons",
   "seq.genSampleFilterEmpty":
     "Aucun son ne correspond à ce filtre. Élargis le filtre ou ajoute des sons.",
+  "seq.genTagFilter": "Étiquettes",
+  "seq.allTags": "Toutes les étiquettes",
   "seq.genDensity": "Densité",
   "seq.genEnergy": "Énergie",
   "seq.genDrumsTextures": "Drums ↔ textures",
@@ -361,6 +367,9 @@ const fr = {
   "seq.genFormAmbient": "Ambiant",
   "seq.genHumanize": "Humanisation",
   "seq.genVariation": "Variation",
+  "seq.genSampleVariety": "Variété des sons",
+  "seq.genSampleVarietyHint":
+    "À 0, les mêmes sons reviennent souvent même avec une autre seed (favoris / meilleur fit). Plus haut, chaque seed explore davantage la bibliothèque.",
   "seq.genBpmSync": "Sync BPM",
   "seq.genLockTempoPow2": "Tempo ×2ⁿ",
   "seq.genLockTempoPow2Hint":
@@ -368,6 +377,10 @@ const fr = {
   "seq.genForbidPitchStretch": "Sans stretch pitch",
   "seq.genForbidPitchStretchHint":
     "Interdit le mode stretch « pitch » (preserve-pitch). Remplacé par copy (pitch fixe) ou resample.",
+  "seq.genStretchUp": "Allonger max (×)",
+  "seq.genStretchDown": "Raccourcir max (×)",
+  "seq.genStretchRatioHint":
+    "Limite le stretch à un ratio de la durée du clip (vs sample). Au-delà : copie (allonger) ou lecture native (raccourcir). Auto = pas de limite.",
   "seq.genLockPitch": "Pitch fixe",
   "seq.genLockPitchHint":
     "Hauteur native : pas de transposition, mélodie ni accords. Idéal pour boucles / repeats.",
@@ -386,6 +399,12 @@ const fr = {
   "seq.bars": "Durée",
   "seq.barsTitle": "Durée de la séquence",
   "seq.barsUnit": "mesures",
+  "seq.masterVu": "Master",
+  "seq.masterVolume": "Volume",
+  "seq.masterVolumeHint": "Volume de sortie (après le mix)",
+  "seq.preamp": "Préamp",
+  "seq.preampHint":
+    "Gain / atténuation globale en préamp de chaque piste (avec le gain local)",
   "seq.apply": "Valider",
   "seq.library": "Sons",
   "seq.libraryOpen": "Ouvrir la bibliothèque",
@@ -441,7 +460,15 @@ const fr = {
   "export.reelShare": "Partager…",
   "export.reelDownload": "Télécharger le clip",
   "export.reelHint":
-    "Clip vertical 9:16 (max 30 s) — ouvre Instagram → Reel → importer depuis la galerie.",
+    "Clip vertical 9:16 (max 30 s) — ouvre Instagram → Reel → importer depuis la galerie. Les scènes cochées s’enchaînent au hasard ; chaque génération est unique.",
+  "export.reelScenes": "Effets visuels",
+  "export.reelScenesHint": "Coche ceux à inclure — enchaînement aléatoire pendant le clip.",
+  "export.reelScene.particles": "Particules",
+  "export.reelScene.geo": "Géométrie",
+  "export.reelScene.tunnel": "Tunnel",
+  "export.reelScene.field": "Champ",
+  "export.reelBg": "Fond",
+  "export.reelAccent": "Accent",
   "export.reelEncoding": "Encodage du clip…",
   "export.reelEncodingPct": "Encodage du clip… {pct} %",
   "export.reelReady": "Clip prêt",
@@ -622,6 +649,10 @@ const en: Record<keyof typeof fr, string> = {
   "library.batchSeparate": "Separate (stems)",
   "library.batchAutoCrop": "Auto-crop",
   "library.batchAutoCropDone": "Auto-crop: {cropped} updated, {skipped} unchanged.",
+  "library.batchAnalyze": "Analyze / process",
+  "library.analyze": "Analyze / process",
+  "library.analyzeConfirm":
+    "Run processing and analysis (tags, loudness…) on {n} sound(s)? Existing tags will be recomputed. Already-polished audio is not recropped.",
   "library.separate": "Separate (stems)",
   "library.separateConfirm": "Downloads ~166 MB the first time. Prefer Chrome + WebGPU, ~1–2 GB free. Max ~60 s. Continue?",
   "library.separateBatchConfirm": "Queue {n} sounds for separation (sequential, ~166 MB first time)? Already-separated stems are skipped.",
@@ -793,6 +824,8 @@ const en: Record<keyof typeof fr, string> = {
   "seq.genSampleFilterCount": "{n} sounds",
   "seq.genSampleFilterEmpty":
     "No sounds match this filter. Widen the filter or add sounds.",
+  "seq.genTagFilter": "Tags",
+  "seq.allTags": "All tags",
   "seq.genDensity": "Density",
   "seq.genEnergy": "Energy",
   "seq.genDrumsTextures": "Drums ↔ textures",
@@ -844,6 +877,9 @@ const en: Record<keyof typeof fr, string> = {
   "seq.genFormAmbient": "Ambient",
   "seq.genHumanize": "Humanize",
   "seq.genVariation": "Variation",
+  "seq.genSampleVariety": "Sound variety",
+  "seq.genSampleVarietyHint":
+    "At 0, the same sounds come back even with a new seed (favorites / best fit). Higher values let each seed explore more of the library.",
   "seq.genBpmSync": "BPM sync",
   "seq.genLockTempoPow2": "Tempo ×2ⁿ",
   "seq.genLockTempoPow2Hint":
@@ -851,6 +887,10 @@ const en: Record<keyof typeof fr, string> = {
   "seq.genForbidPitchStretch": "No pitch stretch",
   "seq.genForbidPitchStretchHint":
     "Disallow stretch mode “pitch” (preserve-pitch). Falls back to copy (fixed pitch) or resample.",
+  "seq.genStretchUp": "Lengthen max (×)",
+  "seq.genStretchDown": "Shorten max (×)",
+  "seq.genStretchRatioHint":
+    "Cap time-stretch to a ratio of clip duration (vs sample). Beyond: copy (lengthen) or native playback (shorten). Auto = no cap.",
   "seq.genLockPitch": "Fixed pitch",
   "seq.genLockPitchHint":
     "Native pitch: no transpose, melody, or chords. Best for loops / repeats.",
@@ -869,6 +909,12 @@ const en: Record<keyof typeof fr, string> = {
   "seq.bars": "Length",
   "seq.barsTitle": "Sequence length",
   "seq.barsUnit": "bars",
+  "seq.masterVu": "Master",
+  "seq.masterVolume": "Volume",
+  "seq.masterVolumeHint": "Output volume (after the mix)",
+  "seq.preamp": "Preamp",
+  "seq.preampHint":
+    "Global gain / attenuation as a preamp on every track (with local gain)",
   "seq.apply": "Apply",
   "seq.library": "Sounds",
   "seq.libraryOpen": "Open library",
@@ -924,7 +970,15 @@ const en: Record<keyof typeof fr, string> = {
   "export.reelShare": "Share…",
   "export.reelDownload": "Download clip",
   "export.reelHint":
-    "Vertical 9:16 clip (max 30 s) — open Instagram → Reel → import from gallery.",
+    "Vertical 9:16 clip (max 30 s) — open Instagram → Reel → import from gallery. Checked scenes sequence randomly; each generate is unique.",
+  "export.reelScenes": "Visual effects",
+  "export.reelScenesHint": "Tick which to include — random order during the clip.",
+  "export.reelScene.particles": "Particles",
+  "export.reelScene.geo": "Geometry",
+  "export.reelScene.tunnel": "Tunnel",
+  "export.reelScene.field": "Field",
+  "export.reelBg": "Background",
+  "export.reelAccent": "Accent",
   "export.reelEncoding": "Encoding clip…",
   "export.reelEncodingPct": "Encoding clip… {pct} %",
   "export.reelReady": "Clip ready",

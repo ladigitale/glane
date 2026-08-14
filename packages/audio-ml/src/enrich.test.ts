@@ -22,4 +22,13 @@ describe("enrichFromLabels", () => {
     assert.equal(r.subclass, "dog");
     assert.equal(r.classHint, "texture");
   });
+
+  it("keeps Demucs markers when re-enriching", () => {
+    const r = enrichFromLabels(
+      ["ml:demucs", "stem:drums", "processing:done"],
+      [{ label: "Drum", score: 0.7 }],
+    );
+    assert.ok(r.tags.includes("ml:demucs"));
+    assert.ok(r.tags.includes("stem:drums"));
+  });
 });
