@@ -568,41 +568,18 @@ export class GlEditorPage extends LitElement {
     }
     const before = this.master;
     const ch = this.#channelCount;
+    // Loop / selection stays at the same global sample times; only PCM wraps.
     await this.#mutateView((view, sel) => {
       const n = frameCount(view, ch);
       if (n === 0) return null;
       const pcm = mapInterleavedChannels(view, ch, (plane) =>
         rotatePcm(plane, offset),
       );
-      const wrap = (i: number): number => {
-        let x = (i - offset) % n;
-        if (x < 0) x += n;
-        return x;
-      };
-      if (!sel) {
-        return {
-          pcm,
-          status: t("editor.rotateDone"),
-          selStart: 0,
-          selEnd: 0,
-        };
-      }
-      const a = wrap(sel.a);
-      const b = wrap(sel.b);
-      const width = sel.b - sel.a;
-      if (a < b) {
-        return {
-          pcm,
-          status: t("editor.rotateDone"),
-          selStart: a,
-          selEnd: b,
-        };
-      }
       return {
         pcm,
         status: t("editor.rotateDone"),
-        selStart: a,
-        selEnd: Math.min(n, a + width),
+        selStart: sel?.a ?? 0,
+        selEnd: sel?.b ?? 0,
       };
     });
     if (this.master === before) this.#editTimeline()?.clearRotateOffset();

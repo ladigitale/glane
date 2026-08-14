@@ -15,6 +15,11 @@ function peakDbLabel(peak: number): string {
   return `${Math.max(-60, Math.min(6, db)).toFixed(0)}`;
 }
 
+/** Hold new peaks this long before decay starts. */
+const PEAK_HOLD_MS = 420;
+/** Linear decay rate once hold expires (~1.6 s from 1 → 0). */
+const PEAK_DECAY_PER_S = 0.62;
+
 /**
  * Discrete master VU (RMS fill + peak tick). Reads an AnalyserNode tap
  * on its own rAF so the host page does not re-render at 60 fps.
@@ -79,11 +84,6 @@ export class GlVuMeter extends LitElement {
   #peakHold = 0;
   #peakHoldUntil = 0;
   #lastTickMs = 0;
-
-  /** Hold new peaks this long before decay starts. */
-  static readonly #PEAK_HOLD_MS = 420;
-  /** Linear decay rate once hold expires (~1.6 s from 1 → 0). */
-  static readonly #PEAK_DECAY_PER_S = 0.62;
 
   override updated(): void {
     if (this.analyser && (this.active || this.rms > 0.001 || this.peak > 0.001)) {
@@ -157,7 +157,7 @@ export class GlVuMeter extends LitElement {
     }
     this.#peakHold = Math.max(
       0,
-      this.#peakHold - GlVuMeter.#PEAK_DECAY_PER_S * dt,
+      this.#peakHold - PEAK_DECAY_PER_S * dt,
     );
     this.peak = this.#peakHold;
   }
@@ -179,7 +179,7 @@ export class GlVuMeter extends LitElement {
     this.rms = Math.sqrt(sumSq / n);
     if (instant >= this.#peakHold) {
       this.#peakHold = instant;
-      this.#peakHoldUntil = now + GlVuMeter.#PEAK_HOLD_MS;
+      this.#peakHoldUntil = now + PEAK_HOLD_MS;
       this.peak = instant;
     } else {
       this.#decayPeak(now, dt);
