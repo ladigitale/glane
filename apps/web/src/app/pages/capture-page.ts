@@ -32,6 +32,20 @@ import {
   type FileProcessMode,
 } from "../db.js";
 import {
+  clampClapLimit,
+  clampClapMinScore,
+  clampYamnetMaxLabels,
+  clampYamnetMinScore,
+  ML_DEFAULTS,
+  resolveDemucsStems,
+} from "../ml/ml-prefs.js";
+import {
+  CLAP_STATUS_EVENT,
+  backfillClapEmbeddings,
+  type ClapStatusDetail,
+} from "../ml/clap-queue.js";
+import { DEMUCS_STEMS, type DemucsStemName } from "@glane/audio-ml";
+import {
   CAPTURE_RATE,
   clampTargetPerMin,
   nextSensitivity,
@@ -231,6 +245,15 @@ export class GlCapturePage extends LitElement {
   @state() private autoGain = false;
   @state() private mlYamnet = true;
   @state() private mlClap = false;
+  @state() private mlYamnetMinScore: number = ML_DEFAULTS.yamnetMinScore;
+  @state() private mlYamnetMaxLabels: number = ML_DEFAULTS.yamnetMaxLabels;
+  @state() private mlYamnetAutoClass = true;
+  @state() private mlClapMinScore: number = ML_DEFAULTS.clapMinScore;
+  @state() private mlClapLimit: number = ML_DEFAULTS.clapLimit;
+  @state() private clapStatus = "";
+  @state() private mlDemucsStems: DemucsStemName[] = [
+    ...ML_DEFAULTS.demucsStems,
+  ];
   /** Internal 0–100; auto-tuned toward targetCapturesPerMin. */
   @state() private attackSensitivity = DEFAULT_ATTACK_SENSITIVITY;
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
@@ -310,6 +333,7 @@ export class GlCapturePage extends LitElement {
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.addEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
+    window.addEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
     navigator.mediaDevices?.addEventListener?.(
       "devicechange",
       this.#onDeviceChange,
@@ -325,6 +349,7 @@ export class GlCapturePage extends LitElement {
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.removeEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
+    window.removeEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
     navigator.mediaDevices?.removeEventListener?.(
       "devicechange",
       this.#onDeviceChange,
@@ -423,6 +448,12 @@ export class GlCapturePage extends LitElement {
     this.autoGain = prefs.captureAutoGain ?? false;
     this.mlYamnet = prefs.mlYamnet !== false;
     this.mlClap = prefs.mlClap === true;
+    this.mlYamnetMinScore = clampYamnetMinScore(prefs.mlYamnetMinScore);
+    this.mlYamnetMaxLabels = clampYamnetMaxLabels(prefs.mlYamnetMaxLabels);
+    this.mlYamnetAutoClass = prefs.mlYamnetAutoClass !== false;
+    this.mlClapMinScore = clampClapMinScore(prefs.mlClapMinScore);
+    this.mlClapLimit = clampClapLimit(prefs.mlClapLimit);
+    this.mlDemucsStems = resolveDemucsStems(prefs.mlDemucsStems);
     this.attackSensitivity =
       prefs.attackSensitivity ?? DEFAULT_ATTACK_SENSITIVITY;
     this.targetCapturesPerMin = clampTargetPerMin(
@@ -440,6 +471,12 @@ export class GlCapturePage extends LitElement {
       captureAutoGain: this.autoGain,
       mlYamnet: this.mlYamnet,
       mlClap: this.mlClap,
+      mlYamnetMinScore: this.mlYamnetMinScore,
+      mlYamnetMaxLabels: this.mlYamnetMaxLabels,
+      mlYamnetAutoClass: this.mlYamnetAutoClass,
+      mlClapMinScore: this.mlClapMinScore,
+      mlClapLimit: this.mlClapLimit,
+      mlDemucsStems: [...this.mlDemucsStems],
       attackSensitivity: this.attackSensitivity,
       targetCapturesPerMin: this.targetCapturesPerMin,
       fileProcessMode: this.fileProcessMode,
@@ -937,6 +974,58 @@ export class GlCapturePage extends LitElement {
                 >
               </span>
             </label>
+            ${this.mlYamnet
+              ? html`
+                  <div class="ml-6 flex flex-col gap-2 border-l border-neutral-200 pl-3">
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs text-neutral-500"
+                        >${t("capture.mlYamnetMinScore")}
+                        (${this.mlYamnetMinScore.toFixed(2)})</span
+                      >
+                      <input
+                        type="range"
+                        min="0.02"
+                        max="0.4"
+                        step="0.01"
+                        .value=${String(this.mlYamnetMinScore)}
+                        @input=${this.#onYamnetMinScoreInput}
+                        @change=${this.#onYamnetMinScoreChange}
+                      />
+                    </label>
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs text-neutral-500"
+                        >${t("capture.mlYamnetMaxLabels")}
+                        (${this.mlYamnetMaxLabels})</span
+                      >
+                      <input
+                        type="range"
+                        min="1"
+                        max="12"
+                        step="1"
+                        .value=${String(this.mlYamnetMaxLabels)}
+                        @input=${this.#onYamnetMaxLabelsInput}
+                        @change=${this.#onYamnetMaxLabelsChange}
+                      />
+                    </label>
+                    <label class="flex cursor-pointer items-start gap-2.5">
+                      <input
+                        type="checkbox"
+                        class="mt-0.5"
+                        .checked=${this.mlYamnetAutoClass}
+                        @change=${this.#onYamnetAutoClassChange}
+                      />
+                      <span class="flex flex-col gap-0.5">
+                        <span class="text-sm text-content"
+                          >${t("capture.mlYamnetAutoClass")}</span
+                        >
+                        <span class="text-xs leading-snug text-neutral-500"
+                          >${t("capture.mlYamnetAutoClassHint")}</span
+                        >
+                      </span>
+                    </label>
+                  </div>
+                `
+              : nothing}
             <label class="flex cursor-pointer items-start gap-2.5">
               <input
                 type="checkbox"
@@ -949,8 +1038,71 @@ export class GlCapturePage extends LitElement {
                 <span class="text-xs leading-snug text-neutral-500"
                   >${t("capture.mlClapHint")}</span
                 >
+                ${this.clapStatus
+                  ? html`<span class="font-mono text-[0.7rem] text-neutral-500"
+                      >${this.clapStatus}</span
+                    >`
+                  : nothing}
               </span>
             </label>
+            ${this.mlClap
+              ? html`
+                  <div class="ml-6 flex flex-col gap-2 border-l border-neutral-200 pl-3">
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs text-neutral-500"
+                        >${t("capture.mlClapMinScore")}
+                        (${this.mlClapMinScore.toFixed(2)})</span
+                      >
+                      <input
+                        type="range"
+                        min="0.02"
+                        max="0.5"
+                        step="0.01"
+                        .value=${String(this.mlClapMinScore)}
+                        @input=${this.#onClapMinScoreInput}
+                        @change=${this.#onClapMinScoreChange}
+                      />
+                    </label>
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs text-neutral-500"
+                        >${t("capture.mlClapLimit")} (${this.mlClapLimit})</span
+                      >
+                      <input
+                        type="range"
+                        min="3"
+                        max="40"
+                        step="1"
+                        .value=${String(this.mlClapLimit)}
+                        @input=${this.#onClapLimitInput}
+                        @change=${this.#onClapLimitChange}
+                      />
+                    </label>
+                  </div>
+                `
+              : nothing}
+            <div class="flex flex-col gap-1.5">
+              <span class="text-[0.7rem] text-neutral-500"
+                >${t("capture.mlDemucsStems")}</span
+              >
+              <p class="m-0 text-xs leading-snug text-neutral-500">
+                ${t("capture.mlDemucsStemsHint")}
+              </p>
+              <div class="flex flex-wrap gap-x-3 gap-y-1.5">
+                ${DEMUCS_STEMS.map(
+                  (stem) => html`
+                    <label class="flex cursor-pointer items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        .checked=${this.mlDemucsStems.includes(stem)}
+                        @change=${(e: Event) =>
+                          this.#onDemucsStemToggle(stem, e)}
+                      />
+                      <span class="text-sm text-content">${stem}</span>
+                    </label>
+                  `,
+                )}
+              </div>
+            </div>
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
@@ -1030,6 +1182,85 @@ export class GlCapturePage extends LitElement {
   #onMlClapChange = (e: Event): void => {
     const on = (e.target as HTMLInputElement).checked;
     this.mlClap = on;
+    void this.#persistCapturePrefs().then(() => {
+      if (on) void backfillClapEmbeddings().catch(() => undefined);
+    });
+  };
+
+  #onClapStatus = (ev: Event): void => {
+    const d = (ev as CustomEvent<ClapStatusDetail>).detail;
+    if (!d) return;
+    if (d.phase === "idle") {
+      this.clapStatus = "";
+      return;
+    }
+    const pct = d.ratio != null ? ` ${Math.round(d.ratio * 100)}%` : "";
+    const extra = d.message ? ` · ${d.message}` : "";
+    if (d.phase === "loading-model") {
+      this.clapStatus = `${t("library.clapLoadingModel")}${pct}${extra}`;
+    } else if (d.phase === "embedding") {
+      this.clapStatus = `${t("library.clapEmbedding")}${pct}${extra}`;
+    } else if (d.phase === "error") {
+      this.clapStatus = d.message ?? t("library.similarFailed");
+    }
+  };
+
+  #onYamnetMinScoreInput = (e: Event): void => {
+    this.mlYamnetMinScore = clampYamnetMinScore(
+      Number((e.target as HTMLInputElement).value),
+    );
+  };
+
+  #onYamnetMinScoreChange = (e: Event): void => {
+    this.#onYamnetMinScoreInput(e);
+    void this.#persistCapturePrefs();
+  };
+
+  #onYamnetMaxLabelsInput = (e: Event): void => {
+    this.mlYamnetMaxLabels = clampYamnetMaxLabels(
+      Number((e.target as HTMLInputElement).value),
+    );
+  };
+
+  #onYamnetMaxLabelsChange = (e: Event): void => {
+    this.#onYamnetMaxLabelsInput(e);
+    void this.#persistCapturePrefs();
+  };
+
+  #onYamnetAutoClassChange = (e: Event): void => {
+    this.mlYamnetAutoClass = (e.target as HTMLInputElement).checked;
+    void this.#persistCapturePrefs();
+  };
+
+  #onClapMinScoreInput = (e: Event): void => {
+    this.mlClapMinScore = clampClapMinScore(
+      Number((e.target as HTMLInputElement).value),
+    );
+  };
+
+  #onClapMinScoreChange = (e: Event): void => {
+    this.#onClapMinScoreInput(e);
+    void this.#persistCapturePrefs();
+  };
+
+  #onClapLimitInput = (e: Event): void => {
+    this.mlClapLimit = clampClapLimit(
+      Number((e.target as HTMLInputElement).value),
+    );
+  };
+
+  #onClapLimitChange = (e: Event): void => {
+    this.#onClapLimitInput(e);
+    void this.#persistCapturePrefs();
+  };
+
+  #onDemucsStemToggle = (stem: DemucsStemName, e: Event): void => {
+    const on = (e.target as HTMLInputElement).checked;
+    const next = on
+      ? [...new Set([...this.mlDemucsStems, stem])]
+      : this.mlDemucsStems.filter((s) => s !== stem);
+    this.mlDemucsStems =
+      next.length > 0 ? resolveDemucsStems(next) : [...ML_DEFAULTS.demucsStems];
     void this.#persistCapturePrefs();
   };
 

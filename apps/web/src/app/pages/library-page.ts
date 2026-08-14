@@ -30,7 +30,7 @@ import {
   rankSimilarSamples,
   type ClapStatusDetail,
 } from "../ml/clap-queue.js";
-import { clapFeatureFromAnalysis } from "../ml/clap-runtime.js";
+import { isClapAudioReady } from "../ml/clap-runtime.js";
 import {
   DEMUCS_QUEUE_EVENT,
   SAMPLE_STEMS_EVENT,
@@ -63,6 +63,7 @@ import { glIcon } from "../icon.js";
 import type { MoreMenuItem } from "../more-menu.js";
 import { renderMoreMenu } from "../more-menu.js";
 import "../pop-select.js";
+import "../sample-info.js";
 
 const ROW_H = 56;
 
@@ -135,7 +136,10 @@ export class GlLibraryPage extends LitElement {
   @state() private clapScores: Map<string, number> | null = null;
   @state() private clapBusy = false;
   @state() private clapStatus = "";
+  @state() private infoId: string | null = null;
   #clapTimer: number | null = null;
+  /** Keep status visible while similar / backfill owns the run. */
+  #clapOp = false;
 
   #pointerStartX = 0;
   #pointerStartY = 0;
@@ -247,19 +251,22 @@ export class GlLibraryPage extends LitElement {
     const d = (ev as CustomEvent<ClapStatusDetail>).detail;
     if (!d) return;
     if (d.phase === "idle") {
-      this.clapStatus = "";
-      this.clapBusy = false;
+      if (!this.#clapOp) {
+        this.clapStatus = "";
+        this.clapBusy = false;
+      }
       return;
     }
     this.clapBusy = true;
     const pct =
       d.ratio != null ? ` ${Math.round(d.ratio * 100)}%` : "";
+    const extra = d.message ? ` · ${d.message}` : "";
     if (d.phase === "loading-model") {
-      this.clapStatus = `${t("library.clapLoadingModel")}${pct}`;
+      this.clapStatus = `${t("library.clapLoadingModel")}${pct}${extra}`;
     } else if (d.phase === "embedding") {
-      this.clapStatus = `${t("library.clapEmbedding")}${pct}`;
+      this.clapStatus = `${t("library.clapEmbedding")}${pct}${extra}`;
     } else if (d.phase === "searching") {
-      this.clapStatus = `${t("library.clapSearching")}${pct}`;
+      this.clapStatus = `${t("library.clapSearching")}${pct}${extra}`;
     } else if (d.phase === "error") {
       this.clapStatus = d.message ?? t("library.similarNone");
       this.clapBusy = false;
@@ -339,7 +346,6 @@ export class GlLibraryPage extends LitElement {
       const ranked = await rankLibraryByText(
         q,
         this.samples.filter((s) => !s.deletedAt).map((s) => s.id),
-        { minScore: 0.12, limit: 40 },
       );
       this.clapScores =
         ranked.length > 0
@@ -658,6 +664,13 @@ export class GlLibraryPage extends LitElement {
                           icon: "horizontal",
                           items: [
                             {
+                              label: t("sample.info"),
+                              icon: "info",
+                              onClick: () => {
+                                this.infoId = s.id;
+                              },
+                            },
+                            {
                               label: s.favorite
                                 ? t("library.unfav")
                                 : t("library.fav"),
@@ -737,6 +750,13 @@ export class GlLibraryPage extends LitElement {
       ${this.sieve && filtered[this.sieveIndex]
         ? this.#renderSieve(filtered)
         : nothing}
+      <gl-sample-info
+        .sampleId=${this.infoId ?? ""}
+        .visible=${this.infoId != null}
+        @hide=${() => {
+          this.infoId = null;
+        }}
+      ></gl-sample-info>
     `;
   }
 
@@ -1041,44 +1061,51 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #similar(s: Sample): Promise<void> {
-    const analysis = await db.analyses.get(s.id);
-    const hasEmbed = !!clapFeatureFromAnalysis(
-      analysis?.features as Record<string, unknown>,
-    );
-    if (!hasEmbed) {
-      const ok = await glDialog.confirm({
-        title: t("library.similar"),
-        message: t("library.similarConfirm"),
-      });
-      if (!ok) return;
+    if (!isClapAudioReady()) {
+      const prefs = await ensurePrefs();
+      if (prefs.mlClap !== true) {
+        const ok = await glDialog.confirm({
+          title: t("library.similar"),
+          message: t("library.similarConfirm"),
+        });
+        if (!ok) return;
+      }
     }
+    this.#clapOp = true;
     this.clapBusy = true;
+    this.clapStatus = t("library.clapLoadingModel");
     try {
       const ranked = await rankSimilarSamples(
         s.id,
         this.samples.filter((x) => !x.deletedAt).map((x) => x.id),
-        { minScore: 0.18, limit: 12 },
       );
       if (ranked.length === 0) {
-        await glDialog.alert(t("library.similarNone"));
+        await glDialog.alert(t("library.similarEmpty"));
         return;
       }
+      this.clapBusy = false;
+      this.clapStatus = "";
       const byId = new Map(this.samples.map((x) => [x.id, x]));
-      const lines = ranked.map((r) => {
-        const row = byId.get(r.id);
-        const name = row?.userName ?? row?.name ?? r.id.slice(0, 8);
-        return `${Math.round(r.score * 100)}% — ${name}`;
-      });
-      await glDialog.alert({
+      const picked = await glDialog.chooseMany({
         title: t("library.similarTitle"),
-        message: lines.join("\n"),
+        message: t("library.similarPickHint"),
+        confirmLabel: t("library.similarSelect"),
+        options: ranked.map((r) => {
+          const row = byId.get(r.id);
+          const name = row?.userName ?? row?.name ?? r.id.slice(0, 8);
+          return {
+            value: r.id,
+            label: `${Math.round(r.score * 100)}% — ${name}`,
+          };
+        }),
       });
-      this.selected = new Set(ranked.map((r) => r.id));
+      if (picked == null) return;
+      this.selected = new Set(picked);
     } catch (e) {
-      await glDialog.alert(
-        `${t("library.similarNone")}: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      const detail = e instanceof Error ? e.message : String(e);
+      await glDialog.alert(`${t("library.similarFailed")}: ${detail}`);
     } finally {
+      this.#clapOp = false;
       this.clapBusy = false;
       this.clapStatus = "";
     }

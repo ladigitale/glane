@@ -1,13 +1,12 @@
 /// <reference lib="webworker" />
 /**
- * Demucs stem separation off the UI thread (WebGPU when available).
+ * Demucs FT bag stem separation off the UI thread (WebGPU when available).
+ * Loads one specialist at a time to keep peak RAM down.
  */
-import { DEMUCS_STEMS } from "@glane/audio-ml";
+import { DEMUCS_STEMS, type DemucsStemName } from "@glane/audio-ml";
 import {
-  createDemucsSession,
-  DEMUCS_MODEL_URL,
-  fetchDemucsModel,
   formatOrtError,
+  preloadDemucsModels,
   runDemucsSeparate,
 } from "./demucs-runtime.js";
 import type {
@@ -18,7 +17,6 @@ import type {
 const ctx: DedicatedWorkerGlobalScope =
   self as unknown as DedicatedWorkerGlobalScope;
 
-let modelBytes: Uint8Array | null = null;
 let busy = false;
 
 function post(msg: DemucsWorkerResponse, transfer?: Transferable[]): void {
@@ -26,33 +24,30 @@ function post(msg: DemucsWorkerResponse, transfer?: Transferable[]): void {
   else ctx.postMessage(msg);
 }
 
-async function ensureModel(
+function normalizeStems(
+  stems: DemucsStemName[] | undefined,
+): DemucsStemName[] {
+  if (!stems?.length) return [...DEMUCS_STEMS];
+  return stems.filter((s) => DEMUCS_STEMS.includes(s));
+}
+
+async function handlePreload(
   jobId: string,
-): Promise<Uint8Array> {
-  if (modelBytes && modelBytes.byteLength > 0) {
-    post({
-      type: "download",
-      jobId,
-      loaded: modelBytes.byteLength,
-      total: modelBytes.byteLength,
-    });
-    return modelBytes;
-  }
-  const buf = await fetchDemucsModel(DEMUCS_MODEL_URL, (loaded, total) => {
+  stems: DemucsStemName[],
+): Promise<void> {
+  const n = stems.length;
+  await preloadDemucsModels(stems, (loaded, total, stem) => {
+    const idx = stems.indexOf(stem);
+    const base = Math.max(0, idx) / n;
+    const chunk = total > 0 ? loaded / total / n : 0;
     post({ type: "download", jobId, loaded, total });
     post({
       type: "progress",
       jobId,
       phase: "loading",
-      ratio: total > 0 ? loaded / total : 0,
+      ratio: Math.min(1, base + chunk),
     });
   });
-  modelBytes = new Uint8Array(buf);
-  return modelBytes;
-}
-
-async function handlePreload(jobId: string): Promise<void> {
-  await ensureModel(jobId);
   post({ type: "preloaded", jobId });
 }
 
@@ -61,35 +56,40 @@ async function handleSeparate(
   pcm: Float32Array,
   sampleRate: number,
   channelCount = 1,
+  stems?: DemucsStemName[],
 ): Promise<void> {
+  const stemNames = normalizeStems(stems);
   post({ type: "progress", jobId, phase: "loading", ratio: 0 });
-  const bytes = await ensureModel(jobId);
+  await preloadDemucsModels(stemNames, (loaded, total, stem) => {
+    const idx = stemNames.indexOf(stem);
+    const base = Math.max(0, idx) / stemNames.length;
+    const chunk = total > 0 ? loaded / total / stemNames.length : 0;
+    post({ type: "download", jobId, loaded, total });
+    post({
+      type: "progress",
+      jobId,
+      phase: "loading",
+      ratio: Math.min(1, base + chunk),
+    });
+  });
   post({ type: "progress", jobId, phase: "running", ratio: 0 });
-  const handle = await createDemucsSession(bytes);
-  try {
-    const result = await runDemucsSeparate(
-      handle,
-      pcm,
-      sampleRate,
-      channelCount,
-      (ratio) => {
-        post({ type: "progress", jobId, phase: "running", ratio });
-      },
-    );
-    const transfer = DEMUCS_STEMS.map((name) => result.stems[name].buffer);
-    post(
-      {
-        type: "done",
-        jobId,
-        sampleRate: result.sampleRate,
-        stems: result.stems,
-        backend: result.backend,
-      },
-      transfer,
-    );
-  } finally {
-    await handle.release();
-  }
+  const result = await runDemucsSeparate(pcm, sampleRate, channelCount, {
+    stems: stemNames,
+    onProgress: (ratio) => {
+      post({ type: "progress", jobId, phase: "running", ratio });
+    },
+  });
+  const transfer = DEMUCS_STEMS.map((name) => result.stems[name].buffer);
+  post(
+    {
+      type: "done",
+      jobId,
+      sampleRate: result.sampleRate,
+      stems: result.stems,
+      backend: result.backend,
+    },
+    transfer,
+  );
 }
 
 ctx.onmessage = (ev: MessageEvent<DemucsWorkerRequest>) => {
@@ -107,9 +107,15 @@ ctx.onmessage = (ev: MessageEvent<DemucsWorkerRequest>) => {
   void (async () => {
     try {
       if (msg.type === "preload") {
-        await handlePreload(msg.jobId);
+        await handlePreload(msg.jobId, normalizeStems(msg.stems));
       } else if (msg.type === "separate") {
-        await handleSeparate(msg.jobId, msg.pcm, msg.sampleRate, msg.channelCount ?? 1);
+        await handleSeparate(
+          msg.jobId,
+          msg.pcm,
+          msg.sampleRate,
+          msg.channelCount ?? 1,
+          msg.stems,
+        );
       }
     } catch (e) {
       post({

@@ -52,7 +52,23 @@ export type GlChooseOpts = {
   cancelLabel?: string;
 };
 
-type DialogKind = "confirm" | "prompt" | "alert" | "unsaved" | "choose";
+export type GlChooseManyOpts = {
+  title?: string;
+  message?: string;
+  options: GlChooseOption[];
+  /** Pre-checked values (defaults to all). */
+  values?: string[];
+  confirmLabel?: string;
+  cancelLabel?: string;
+};
+
+type DialogKind =
+  | "confirm"
+  | "prompt"
+  | "alert"
+  | "unsaved"
+  | "choose"
+  | "chooseMany";
 
 type Pending = {
   kind: DialogKind;
@@ -65,6 +81,7 @@ type Pending = {
   danger: boolean;
   initial: string;
   options: GlChooseOption[];
+  values: string[];
   resolve: (value: unknown) => void;
 };
 
@@ -85,6 +102,7 @@ export const glDialog = {
       danger: o.danger ?? false,
       initial: "",
       options: [],
+      values: [],
     }) as Promise<boolean>;
   },
 
@@ -102,6 +120,7 @@ export const glDialog = {
       danger: false,
       initial: "",
       options: [],
+      values: [],
     }) as Promise<GlUnsavedChoice>;
   },
 
@@ -118,6 +137,7 @@ export const glDialog = {
       danger: false,
       initial: o.value ?? "",
       options: [],
+      values: [],
     }) as Promise<string | null>;
   },
 
@@ -140,7 +160,31 @@ export const glDialog = {
       danger: false,
       initial,
       options,
+      values: [],
     }) as Promise<string | null>;
+  },
+
+  /** Pick several options — returns checked values, or null if cancelled. */
+  chooseMany(opts: GlChooseManyOpts): Promise<string[] | null> {
+    const options = opts.options.filter((o) => o.value && o.label);
+    if (options.length === 0) return Promise.resolve([]);
+    const allowed = new Set(options.map((o) => o.value));
+    const values = (opts.values ?? options.map((o) => o.value)).filter((v) =>
+      allowed.has(v),
+    );
+    return openDialog({
+      kind: "chooseMany",
+      title: opts.title ?? t("dialog.chooseTitle"),
+      message: opts.message ?? "",
+      label: "",
+      confirmLabel: opts.confirmLabel ?? t("dialog.ok"),
+      cancelLabel: opts.cancelLabel ?? t("dialog.cancel"),
+      discardLabel: "",
+      danger: false,
+      initial: "",
+      options,
+      values,
+    }) as Promise<string[] | null>;
   },
 
   alert(opts: GlAlertOpts | string): Promise<void> {
@@ -156,6 +200,7 @@ export const glDialog = {
       danger: false,
       initial: "",
       options: [],
+      values: [],
     }).then(() => undefined);
   },
 } as const;
@@ -189,6 +234,7 @@ export class GlDialogHost extends LitElement {
 
   @state() private open = false;
   @state() private draft = "";
+  @state() private picked: string[] = [];
 
   #settled = false;
 
@@ -197,6 +243,7 @@ export class GlDialogHost extends LitElement {
     const p = this.pending;
     if (p) {
       this.draft = p.initial;
+      this.picked = [...p.values];
       // Open after mount so sonic-modal picks up visible transition.
       queueMicrotask(() => {
         this.open = true;
@@ -210,7 +257,7 @@ export class GlDialogHost extends LitElement {
     return html`
       <sonic-modal
         align="left"
-        maxWidth="24rem"
+        maxWidth=${p.kind === "chooseMany" ? "28rem" : "24rem"}
         .visible=${this.open}
         @hide=${this.#onHide}
       >
@@ -259,6 +306,7 @@ export class GlDialogHost extends LitElement {
                   </select>
                 `
               : nothing}
+            ${p.kind === "chooseMany" ? this.#renderChooseMany(p) : nothing}
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
@@ -295,6 +343,61 @@ export class GlDialogHost extends LitElement {
     `;
   }
 
+  #renderChooseMany(p: Pending) {
+    const picked = new Set(this.picked);
+    const allOn =
+      p.options.length > 0 && p.options.every((o) => picked.has(o.value));
+    const someOn = p.options.some((o) => picked.has(o.value));
+    return html`
+      <label
+        class="inline-flex cursor-pointer select-none items-center gap-1.5 font-mono text-xs text-neutral-500"
+      >
+        <input
+          type="checkbox"
+          class="h-[18px] w-[18px] cursor-pointer accent-primary"
+          .checked=${allOn}
+          .indeterminate=${someOn && !allOn}
+          @change=${() => {
+            this.picked = allOn ? [] : p.options.map((o) => o.value);
+          }}
+        />
+        ${t("dialog.selectAll")}
+      </label>
+      <div
+        class="flex max-h-[min(50vh,22rem)] flex-col gap-1 overflow-y-auto"
+        role="group"
+        aria-label=${p.title}
+      >
+        ${p.options.map(
+          (o) => html`
+            <label
+              class="inline-flex cursor-pointer select-none items-center gap-2 rounded-md px-1 py-1 text-sm leading-[1.35]"
+            >
+              <input
+                type="checkbox"
+                class="h-[18px] w-[18px] shrink-0 cursor-pointer accent-primary"
+                .checked=${picked.has(o.value)}
+                @change=${(e: Event) => {
+                  const on = (e.target as HTMLInputElement).checked;
+                  const next = new Set(this.picked);
+                  if (on) next.add(o.value);
+                  else next.delete(o.value);
+                  this.picked = [...next];
+                }}
+              />
+              <span>${o.label}</span>
+            </label>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  #chosenValues(p: Pending): string[] {
+    const picked = new Set(this.picked);
+    return p.options.map((o) => o.value).filter((v) => picked.has(v));
+  }
+
   #accept = (): void => {
     const p = this.pending;
     if (!p || this.#settled) return;
@@ -302,6 +405,7 @@ export class GlDialogHost extends LitElement {
     if (p.kind === "confirm") p.resolve(true);
     else if (p.kind === "unsaved") p.resolve("save" satisfies GlUnsavedChoice);
     else if (p.kind === "prompt" || p.kind === "choose") p.resolve(this.draft);
+    else if (p.kind === "chooseMany") p.resolve(this.#chosenValues(p));
     else p.resolve(undefined);
     this.open = false;
   };
@@ -320,8 +424,13 @@ export class GlDialogHost extends LitElement {
     this.#settled = true;
     if (p.kind === "confirm") p.resolve(false);
     else if (p.kind === "unsaved") p.resolve("cancel" satisfies GlUnsavedChoice);
-    else if (p.kind === "prompt" || p.kind === "choose") p.resolve(null);
-    else p.resolve(undefined);
+    else if (
+      p.kind === "prompt" ||
+      p.kind === "choose" ||
+      p.kind === "chooseMany"
+    ) {
+      p.resolve(null);
+    } else p.resolve(undefined);
     this.open = false;
   };
 
@@ -331,8 +440,13 @@ export class GlDialogHost extends LitElement {
       const p = this.pending;
       if (p?.kind === "confirm") p.resolve(false);
       else if (p?.kind === "unsaved") p.resolve("cancel" satisfies GlUnsavedChoice);
-      else if (p?.kind === "prompt" || p?.kind === "choose") p.resolve(null);
-      else p?.resolve(undefined);
+      else if (
+        p?.kind === "prompt" ||
+        p?.kind === "choose" ||
+        p?.kind === "chooseMany"
+      ) {
+        p.resolve(null);
+      } else p?.resolve(undefined);
     }
     this.remove();
   };

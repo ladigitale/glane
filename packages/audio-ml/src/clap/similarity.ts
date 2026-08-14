@@ -21,7 +21,7 @@ export function cosineSimilarity(
 }
 
 export type ClapEmbeddingFeatures = {
-  /** Model id, e.g. Xenova/clap-htsat-unfused */
+  /** Model id, e.g. Xenova/larger_clap_music_and_speech */
   model: string;
   dims: number;
   /** Float embedding; stored in SampleAnalysis.features.clap */

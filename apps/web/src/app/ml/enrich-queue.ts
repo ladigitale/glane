@@ -8,6 +8,7 @@ import {
 import type { SampleClass } from "@glane/core-model";
 import { nowIso } from "@glane/core-model";
 import { db, ensurePrefs } from "../db.js";
+import { mlOptsFromPrefs } from "./ml-prefs.js";
 import { getYamnetClassifier } from "./yamnet-mediapipe.js";
 
 export const SAMPLE_ML_EVENT = "glane:sample-ml";
@@ -23,6 +24,7 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
   try {
     const prefs = await ensurePrefs();
     if (prefs.mlYamnet === false) return;
+    const ml = mlOptsFromPrefs(prefs);
 
     const sample = await db.samples.get(sampleId);
     if (!sample || sample.deletedAt) return;
@@ -48,6 +50,7 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
         toMonoPcm(audio.pcm, audio.channelCount ?? 1),
         audio.sampleRate,
         classifier,
+        { minScore: ml.yamnetMinScore, maxLabels: ml.yamnetMaxLabels },
       );
 
       const fresh = await db.samples.get(sampleId);
@@ -74,8 +77,8 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
       if (result.subclass && !fresh.subclass) {
         patch.subclass = result.subclass;
       }
-      // Soft reclass only when still unclassified / low confidence.
       if (
+        ml.yamnetAutoClass &&
         result.classHint &&
         result.classHintConfidence != null &&
         result.classHintConfidence >= 0.35 &&
@@ -104,10 +107,7 @@ export async function enqueueYamnetEnrich(sampleId: string): Promise<void> {
 async function markSkipped(sampleId: string): Promise<void> {
   const sample = await db.samples.get(sampleId);
   if (!sample) return;
-  const tags = [
-    ...stripMlTags(sample.tags ?? []),
-    ML_TAG.skipped,
-  ];
+  const tags = [...stripMlTags(sample.tags ?? []), ML_TAG.skipped];
   await db.samples.update(sampleId, {
     tags,
     updatedAt: nowIso(),

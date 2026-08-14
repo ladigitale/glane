@@ -7,14 +7,16 @@ Heuristic classification (ADR-0006) covers realtime capture. Users want **stem s
 ## Decision
 
 1. Keep T1 DSP / heuristics on the capture critical path.
-2. **Demucs** stem separation (library + editor) — Dedicated Worker + WebGPU preferred, session released after each job.
-3. **YAMNet** tags after polish when `mlYamnet` is on.
-4. **CLAP** (`Xenova/clap-htsat-unfused`, q8) — opt-in `mlClap` (default off). On-demand via “similar sounds” with confirm. Embeddings in `SampleAnalysis.features.clap`; serialized embed queue + status events for UI.
+2. **Demucs** — HT-Demucs **FT bag** (4 StemSplit ONNX specialists, fp16weights). Dedicated Worker + WebGPU preferred; **one specialist session at a time** then release (peak RAM ≈ single model). Output tensor dims asserted `(1,4,2,N)`; only the matching stem row is kept per specialist. Optional stem subset via `mlDemucsStems`.
+3. **YAMNet** tags after polish when `mlYamnet` is on. Tunables: `mlYamnetMinScore`, `mlYamnetMaxLabels`, `mlYamnetAutoClass`.
+4. **CLAP** (`Xenova/larger_clap_music_and_speech`, q8) — opt-in `mlClap` (default off). On-demand via “similar sounds” with confirm. Embeddings in `SampleAnalysis.features.clap` keyed by model id (stale checkpoints ignored). Tunables: `mlClapMinScore`, `mlClapLimit`.
 5. Package `@glane/audio-ml` owns math / tags / ranking; app owns ORT / MediaPipe / Transformers.js.
 6. Fail soft everywhere.
 
 ## Consequences
 
-- Demucs / CLAP first downloads are large (~166 MB / ~160 MB) and cached in the browser.
+- Demucs first download ≈ **4×166 MB** cached; inference ~4× slower than single `htdemucs` but better vocals SDR (MUSDB FT).
+- CLAP first download is larger than `clap-htsat-unfused`; better music/speech retrieval for field libraries.
+- Field speech often lands in Demucs **`other`**, not `vocals` (model is music-trained).
 - Client cosine similarity until ADR-0009 pgvector.
 - Stem children: `parentSampleId` + `stem:{name}` + `ml:demucs`.

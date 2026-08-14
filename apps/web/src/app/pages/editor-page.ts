@@ -62,6 +62,7 @@ import "../track-fx-control.js";
 import type { GlEditTimeline } from "../timeline/edit-timeline.js";
 import "../timeline/edit-timeline.js";
 import "../transport-bar.js";
+import "../sample-info.js";
 
 type EditCheckpoint = {
   master: Float32Array;
@@ -161,6 +162,7 @@ export class GlEditorPage extends LitElement {
   @state() private historyLen = 0;
   /** Lane tool: circular-shift waveform in the file. */
   @state() private rotateTool = false;
+  @state() private infoOpen = false;
 
   #engine: TransportEngine | null = null;
   /** Working PCM — @state so `.pcm` reaches the timeline after async load. */
@@ -258,6 +260,19 @@ export class GlEditorPage extends LitElement {
           type="text"
           placeholder="Nom du son"
         ></sonic-input>
+        <sonic-button
+          shape="circle"
+          variant="ghost"
+          type="neutral"
+          size="sm"
+          icon
+          data-aria-label=${t("sample.info")}
+          @click=${() => {
+            this.infoOpen = true;
+          }}
+        >
+          ${glIcon("info", { size: "sm" })}
+        </sonic-button>
         ${renderMoreMenu({
           ariaLabel: t("editor.more"),
           items: this.#editMenuItems(hasSel),
@@ -346,6 +361,13 @@ export class GlEditorPage extends LitElement {
       ${this.#renderDynamicsModal()}
       ${this.#renderForceRoleModal()}
       ${this.#renderDocsModal()}
+      <gl-sample-info
+        .sampleId=${this.sampleId}
+        .visible=${this.infoOpen}
+        @hide=${() => {
+          this.infoOpen = false;
+        }}
+      ></gl-sample-info>
       <div class="max-h-24 overflow-auto font-mono text-[0.7rem] text-neutral-500">
         ops: ${this.ops.length === 0 ? "(aucune)" : this.ops.map((o) => o.op).join(" → ")}
         ${this.historyLen > 0 ? ` · undo×${this.historyLen}` : ""}
@@ -841,6 +863,13 @@ export class GlEditorPage extends LitElement {
         },
       },
       { section: t("editor.sectionSample") },
+      {
+        label: t("sample.info"),
+        icon: "info",
+        onClick: () => {
+          this.infoOpen = true;
+        },
+      },
       {
         label: this.sample?.favorite ? t("editor.unfav") : t("editor.fav"),
         icon: "star",

@@ -10,7 +10,7 @@ export type SeparateJobResult = {
   backend?: string;
 };
 
-export { DEMUCS_MODEL_URL } from "./demucs-runtime.js";
+export { DEMUCS_MODEL_URL, DEMUCS_FT_MODEL_URLS } from "./demucs-runtime.js";
 
 type Pending = {
   resolve: (v: unknown) => void;
@@ -21,8 +21,8 @@ type Pending = {
 };
 
 /**
- * Demucs client via Dedicated Worker (WebGPU-first inside the worker).
- * Session is created per job and released afterward to avoid holding ~1 GB.
+ * Demucs FT bag client via Dedicated Worker (WebGPU-first inside the worker).
+ * One specialist session at a time; released after each stem.
  */
 export const demucsClient = (() => {
   let worker: Worker | null = null;
@@ -96,8 +96,9 @@ export const demucsClient = (() => {
   }
 
   return {
-    /** Prefetch model weights into worker memory / Cache Storage. */
+    /** Prefetch FT specialist weights into Cache Storage. */
     async preload(opts?: {
+      stems?: readonly DemucsStemName[];
       onDownload?: (loaded: number, total: number) => void;
     }): Promise<void> {
       const run = (): Promise<void> =>
@@ -109,7 +110,11 @@ export const demucsClient = (() => {
             reject,
             onDownload: opts?.onDownload,
           });
-          post({ type: "preload", jobId: id });
+          post({
+            type: "preload",
+            jobId: id,
+            stems: opts?.stems ? [...opts.stems] : undefined,
+          });
         });
       const next = chain.then(run, run);
       chain = next.then(
@@ -124,6 +129,7 @@ export const demucsClient = (() => {
       sampleRate: number,
       opts?: {
         channelCount?: number;
+        stems?: readonly DemucsStemName[];
         onProgress?: (ratio: number) => void;
         onDownload?: (loaded: number, total: number) => void;
       },
@@ -146,6 +152,7 @@ export const demucsClient = (() => {
               pcm: copy,
               sampleRate,
               channelCount: opts?.channelCount ?? 1,
+              stems: opts?.stems ? [...opts.stems] : undefined,
             },
             [copy.buffer],
           );

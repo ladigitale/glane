@@ -55,12 +55,24 @@ export type UserPrefs = {
    * Set false to skip model download / inference.
    */
   mlYamnet?: boolean;
+  /** YAMNet label floor (default 0.12). */
+  mlYamnetMinScore?: number;
+  /** Max `yamnet:` tags kept (default 5). */
+  mlYamnetMaxLabels?: number;
+  /** Soft reclass from YAMNet when sample is unclassified / low confidence. */
+  mlYamnetAutoClass?: boolean;
   /**
    * T2 CLAP embeddings after polish (search / similar). Default **off**
    * (large first download); enable in capture settings. Similar/search can
    * still load on demand.
    */
   mlClap?: boolean;
+  /** Cosine floor for CLAP search / similar (default 0.12). */
+  mlClapMinScore?: number;
+  /** Max similar results (default 12); text search uses max(40, limit). */
+  mlClapLimit?: number;
+  /** Demucs FT stems to materialize (default all four). */
+  mlDemucsStems?: string[];
 };
 
 export type ProcessJobStatus = "pending" | "running" | "done" | "error";
@@ -235,6 +247,33 @@ export async function ensurePrefs(): Promise<UserPrefs> {
     prefs = { ...prefs, mlClap: false };
     dirty = true;
   }
+  if (prefs.mlYamnetMinScore === undefined) {
+    prefs = { ...prefs, mlYamnetMinScore: 0.12 };
+    dirty = true;
+  }
+  if (prefs.mlYamnetMaxLabels === undefined) {
+    prefs = { ...prefs, mlYamnetMaxLabels: 5 };
+    dirty = true;
+  }
+  if (prefs.mlYamnetAutoClass === undefined) {
+    prefs = { ...prefs, mlYamnetAutoClass: true };
+    dirty = true;
+  }
+  if (prefs.mlClapMinScore === undefined) {
+    prefs = { ...prefs, mlClapMinScore: 0.12 };
+    dirty = true;
+  }
+  if (prefs.mlClapLimit === undefined) {
+    prefs = { ...prefs, mlClapLimit: 12 };
+    dirty = true;
+  }
+  if (prefs.mlDemucsStems === undefined) {
+    prefs = {
+      ...prefs,
+      mlDemucsStems: ["drums", "bass", "other", "vocals"],
+    };
+    dirty = true;
+  }
   if (prefs.fileProcessMode === undefined) {
     prefs = { ...prefs, fileProcessMode: "hunt" };
     dirty = true;
@@ -268,7 +307,13 @@ async function createDefaultPrefs(): Promise<UserPrefs> {
     targetCapturesPerMin: DEFAULT_TARGET_CAPTURES_PER_MIN,
     fileProcessMode: "hunt",
     mlYamnet: true,
+    mlYamnetMinScore: 0.12,
+    mlYamnetMaxLabels: 5,
+    mlYamnetAutoClass: true,
     mlClap: false,
+    mlClapMinScore: 0.12,
+    mlClapLimit: 12,
+    mlDemucsStems: ["drums", "bass", "other", "vocals"],
   };
   await db.prefs.put(prefs);
   return prefs;

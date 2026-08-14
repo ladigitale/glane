@@ -24,12 +24,16 @@ function copyDirFiles(src: string, dest: string, filter?: (name: string) => bool
   }
 }
 
+function copyFile(src: string, dest: string): void {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(src, dest);
+}
+
 /**
  * Same-origin ML WASM under COEP (ADR-0015).
- * - MediaPipe → YAMNet
- * - transformers dist ORT → CLAP (must match the ORT version bundled in transformers)
- * - onnxruntime-web → Demucs (app dependency)
- * Unhashed public paths avoid Vite hash / SPA-fallback 404s that break ORT locateFile.
+ * - MediaPipe → public/ml/mediapipe-wasm
+ * - Transformers ORT → src/app/ml/vendor/ort-tf (Vite `?url`, not /public)
+ * Demucs ORT: package exports `onnxruntime-web/…?url`.
  */
 function copyMlWasm(): Plugin {
   const sync = () => {
@@ -39,19 +43,14 @@ function copyMlWasm(): Plugin {
     }
     const tfOrt = resolvePkgDir("@huggingface", "transformers", "dist");
     if (tfOrt) {
-      copyDirFiles(
-        tfOrt,
-        path.join(rootDir, "public/ml/transformers-ort"),
-        (name) => name.startsWith("ort-wasm-simd-threaded.jsep."),
-      );
-    }
-    const ort = resolvePkgDir("onnxruntime-web", "dist");
-    if (ort) {
-      copyDirFiles(
-        ort,
-        path.join(rootDir, "public/ml/ort"),
-        (name) => name.startsWith("ort-wasm-simd-threaded.jsep."),
-      );
+      const dest = path.join(rootDir, "src/app/ml/vendor/ort-tf");
+      for (const name of [
+        "ort-wasm-simd-threaded.jsep.mjs",
+        "ort-wasm-simd-threaded.jsep.wasm",
+      ]) {
+        const from = path.join(tfOrt, name);
+        if (fs.existsSync(from)) copyFile(from, path.join(dest, name));
+      }
     }
   };
 
@@ -86,6 +85,7 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,ico,svg,png,woff2,webp}"],
         globIgnores: [
           "**/ml/**",
+          "**/vendor/ort-tf/**",
           "**/*ort-wasm*",
           "**/*.wasm",
           "**/*.onnx",

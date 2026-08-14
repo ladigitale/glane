@@ -1,12 +1,22 @@
 import { html, nothing, type TemplateResult } from "lit";
 
+/**
+ * Concorde's lucide CDN is pinned to lucide-static@0.16.29.
+ * Icons added later (e.g. audio-lines in 0.294.0) 404 there; newer lucide-static
+ * SVGs also start with an HTML license comment, which sonic-icon rejects
+ * (`/^\s*<svg/`). Serve those from same-origin `/icons/$name.svg`.
+ */
+const LUCIDE_LOCAL = new Set(["audio-lines"]);
+
 /** Lucide via Concorde CDN — short helper for icon-heavy UI. */
 export function glIcon(
   name: string,
   opts?: { size?: string; slot?: "prefix" | "suffix" },
 ): TemplateResult {
+  const local = LUCIDE_LOCAL.has(name);
   return html`<sonic-icon
-    library="lucide"
+    library=${local ? "custom" : "lucide"}
+    customIconLibraryPath=${local ? "/icons/$name.svg" : nothing}
     name=${name}
     size=${opts?.size ?? "sm"}
     slot=${opts?.slot ?? nothing}

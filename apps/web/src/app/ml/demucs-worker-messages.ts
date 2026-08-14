@@ -1,13 +1,14 @@
 import type { DemucsStemName } from "@glane/audio-ml";
 
 export type DemucsWorkerRequest =
-  | { type: "preload"; jobId: string }
+  | { type: "preload"; jobId: string; stems?: DemucsStemName[] }
   | {
       type: "separate";
       jobId: string;
       pcm: Float32Array;
       sampleRate: number;
       channelCount?: number;
+      stems?: DemucsStemName[];
     };
 
 export type DemucsWorkerResponse =

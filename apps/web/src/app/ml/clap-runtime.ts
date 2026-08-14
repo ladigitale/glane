@@ -1,5 +1,5 @@
 /**
- * CLAP embeddings via Transformers.js (Xenova/clap-htsat-unfused).
+ * CLAP embeddings via Transformers.js (Xenova/larger_clap_music_and_speech).
  * Lazy-loaded; WebGPU when available. Fail-soft for library search / similar.
  */
 import {
@@ -8,8 +8,10 @@ import {
   resampleLinear,
   type ClapEmbeddingFeatures,
 } from "@glane/audio-ml";
+import { transformersOrtWasmPaths } from "./ort-wasm-urls.js";
 
-export const CLAP_MODEL_ID = "Xenova/clap-htsat-unfused";
+/** LAION larger CLAP tuned for music + speech (better field / library fit). */
+export const CLAP_MODEL_ID = "Xenova/larger_clap_music_and_speech";
 export const CLAP_STATUS_EVENT = "glane:clap-status";
 
 const CLAP_SR = 48_000;
@@ -43,21 +45,16 @@ function emitStatus(detail: ClapStatusDetail): void {
   window.dispatchEvent(new CustomEvent(CLAP_STATUS_EVENT, { detail }));
 }
 
-/** Same-origin ORT files copied by Vite from @huggingface/transformers/dist (ORT version match). */
-function transformersOrtWasmRoot(): string {
-  return `${import.meta.env.BASE_URL}ml/transformers-ort`.replace(/\/?$/, "");
-}
-
 async function loadTransformers(): Promise<Transformers> {
   if (!tfPromise) {
     tfPromise = import("@huggingface/transformers").then((tf) => {
       // Do NOT point at onnxruntime-web: transformers bundles its own ORT (≠ app dep).
-      // CDN default breaks under COEP; public/ml/transformers-ort is same-origin.
+      // CDN breaks under COEP; Vite `?url` assets (not /public .mjs).
       try {
         const wasm = tf.env.backends?.onnx?.wasm;
         if (wasm) {
           wasm.numThreads = 1;
-          wasm.wasmPaths = `${transformersOrtWasmRoot()}/`;
+          wasm.wasmPaths = transformersOrtWasmPaths;
         }
       } catch {
         /* older env shape */
@@ -84,18 +81,35 @@ async function preferDevice(): Promise<"webgpu" | "wasm"> {
   return "wasm";
 }
 
+function hfProgress(info: {
+  status?: string;
+  progress?: number;
+  loaded?: number;
+  total?: number;
+}): void {
+  let ratio: number | undefined;
+  if (typeof info.progress === "number") {
+    ratio = info.progress > 1 ? info.progress / 100 : info.progress;
+  } else if (info.total && info.loaded) {
+    ratio = info.loaded / info.total;
+  }
+  emitStatus({ phase: "loading-model", ratio, message: info.status });
+}
+
 async function ensureAudioModels(): Promise<void> {
   if (audioReady) return audioReady;
   audioReady = (async () => {
-    emitStatus({ phase: "loading-model", ratio: 0.1, message: "audio" });
+    emitStatus({ phase: "loading-model", ratio: 0.05, message: "audio" });
     const tf = await loadTransformers();
     const device = await preferDevice();
-    emitStatus({ phase: "loading-model", ratio: 0.4, message: "audio" });
-    processor = await tf.AutoProcessor.from_pretrained(CLAP_MODEL_ID);
-    emitStatus({ phase: "loading-model", ratio: 0.7, message: "audio" });
+    emitStatus({ phase: "loading-model", ratio: 0.15, message: "audio" });
+    processor = await tf.AutoProcessor.from_pretrained(CLAP_MODEL_ID, {
+      progress_callback: hfProgress,
+    });
+    emitStatus({ phase: "loading-model", ratio: 0.35, message: "audio" });
     audioModel = await tf.ClapAudioModelWithProjection.from_pretrained(
       CLAP_MODEL_ID,
-      { dtype: "q8", device },
+      { dtype: "q8", device, progress_callback: hfProgress },
     );
     emitStatus({ phase: "idle" });
   })().catch((e) => {
@@ -116,11 +130,13 @@ async function ensureTextModels(): Promise<void> {
     const tf = await loadTransformers();
     const device = await preferDevice();
     emitStatus({ phase: "loading-model", ratio: 0.5, message: "text" });
-    tokenizer = await tf.AutoTokenizer.from_pretrained(CLAP_MODEL_ID);
+    tokenizer = await tf.AutoTokenizer.from_pretrained(CLAP_MODEL_ID, {
+      progress_callback: hfProgress,
+    });
     emitStatus({ phase: "loading-model", ratio: 0.8, message: "text" });
     textModel = await tf.ClapTextModelWithProjection.from_pretrained(
       CLAP_MODEL_ID,
-      { dtype: "q8", device },
+      { dtype: "q8", device, progress_callback: hfProgress },
     );
     emitStatus({ phase: "idle" });
   })().catch((e) => {
@@ -143,6 +159,15 @@ function tensorToVector(embeds: {
   const out = new Array<number>(n);
   for (let i = 0; i < n; i++) out[i] = data[i] ?? 0;
   return out;
+}
+
+export function isClapAudioReady(): boolean {
+  return processor != null && audioModel != null;
+}
+
+/** Download / init audio CLAP weights (opt-in or similar-sounds). */
+export function preloadClapAudio(): Promise<void> {
+  return ensureAudioModels();
 }
 
 /** Embed mono PCM → 512-d CLAP vector. */
@@ -191,8 +216,10 @@ export function clapFeatureFromAnalysis(
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Partial<ClapEmbeddingFeatures>;
   if (!Array.isArray(o.vector) || o.vector.length === 0) return null;
+  // Stale embeddings from a previous checkpoint are not comparable.
+  if (o.model !== CLAP_MODEL_ID) return null;
   return {
-    model: typeof o.model === "string" ? o.model : CLAP_MODEL_ID,
+    model: CLAP_MODEL_ID,
     dims: o.dims ?? o.vector.length,
     vector: o.vector.map((x) => Number(x)),
   };

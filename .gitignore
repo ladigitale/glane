@@ -23,7 +23,9 @@ apps/api/.env.local
 packages/*/dist/
 apps/web/dist/
 apps/web/public/ml/mediapipe-wasm/
-# Copied by Vite plugin copy-ml-wasm (same-origin under COEP).
+# Copied by Vite plugin copy-ml-wasm (Transformers ORT for CLAP ?url imports).
+apps/web/src/app/ml/vendor/ort-tf/
+# Legacy ORT copies under public (safe to delete locally).
 apps/web/public/ml/ort/
 apps/web/public/ml/transformers-ort/
 coverage/

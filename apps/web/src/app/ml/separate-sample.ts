@@ -1,5 +1,4 @@
 import {
-  DEMUCS_STEMS,
   ML_TAG,
   stemTag,
   type DemucsStemName,
@@ -12,9 +11,10 @@ import {
 } from "@glane/core-model";
 import { sampleOpfs } from "@glane/audio-io";
 import { normalizePeak } from "@glane/audio-dsp";
-import { db } from "../db.js";
+import { db, ensurePrefs } from "../db.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { demucsClient } from "./demucs-client.js";
+import { mlOptsFromPrefs } from "./ml-prefs.js";
 
 export const SAMPLE_STEMS_EVENT = "glane:sample-stems";
 
@@ -61,20 +61,21 @@ export async function separateSampleIntoStems(
   });
 
   try {
+    const prefs = await ensurePrefs();
+    const stemNames = mlOptsFromPrefs(prefs).demucsStems;
+
     opts?.onProgress?.({ phase: "loading", ratio: 0 });
-    await demucsClient.preload({
-      onDownload: (loaded, total) => {
-        const ratio = total > 0 ? loaded / total : 0;
-        opts?.onProgress?.({ phase: "loading", ratio });
-      },
-    });
-    opts?.onProgress?.({ phase: "running", ratio: 0 });
 
     const { stems, sampleRate } = await demucsClient.separate(
       audio.pcm,
       audio.sampleRate,
       {
         channelCount: audio.channelCount,
+        stems: stemNames,
+        onDownload: (loaded, total) => {
+          const ratio = total > 0 ? loaded / total : 0;
+          opts?.onProgress?.({ phase: "loading", ratio });
+        },
         onProgress: (ratio) =>
           opts?.onProgress?.({ phase: "running", ratio }),
       },
@@ -84,7 +85,7 @@ export async function separateSampleIntoStems(
     const now = nowIso();
     const baseLabel = source.userName ?? source.name;
 
-    for (const name of DEMUCS_STEMS) {
+    for (const name of stemNames) {
       const id = createEntityId();
       const pcm = normalizePeak(stems[name]);
       await sampleOpfs.savePcm(id, pcm, sampleRate, 1);
