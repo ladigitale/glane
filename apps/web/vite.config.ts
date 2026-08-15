@@ -80,13 +80,16 @@ export default defineConfig({
     copyMlWasm(),
     VitePWA({
       registerType: "autoUpdate",
-      // ML WASM/ORT are fetched on demand (Cache Storage / HF); do not SW-precache.
+      // ML WASM/ORT/RNNoise are fetched on demand (Cache Storage / HF); do not SW-precache.
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,svg,png,woff2,webp}"],
         globIgnores: [
           "**/ml/**",
           "**/vendor/ort-tf/**",
           "**/*ort-wasm*",
+          // Bundled ML workers exceed Workbox's 2 MiB precache cap (denoise ~5 MB).
+          "**/denoise-worker*",
+          "**/demucs-worker*",
           "**/*.wasm",
           "**/*.onnx",
         ],
