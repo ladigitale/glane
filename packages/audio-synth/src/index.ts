@@ -80,7 +80,12 @@ import {
   bakeMachine,
   clampMachineParams,
   defaultMachineParams,
+  filterTypeFromNorm,
+  filterTypeToNorm,
+  isMachineFilterKnob,
   machineSpecFor,
+  MACHINE_FILTER_KNOBS,
+  MACHINE_FILTER_TYPES,
   MACHINE_SPECS_LIST,
 } from "./machines.js";
 import {
@@ -168,6 +173,7 @@ export type { RenderSubtractiveResult } from "./render-subtractive.js";
 export type { RenderVoiceResult } from "./render-voice.js";
 export type { SynthRoleCard } from "./roles.js";
 export type {
+  MachineFilterType,
   MachineKnobId,
   MachineKnobSpec,
   MachineParams,
@@ -297,6 +303,11 @@ export const audioSynth = {
     defaults: defaultMachineParams,
     clamp: clampMachineParams,
     bake: bakeMachine,
+    filterTypes: MACHINE_FILTER_TYPES,
+    filterKnobs: MACHINE_FILTER_KNOBS,
+    isFilterKnob: isMachineFilterKnob,
+    filterTypeFromNorm,
+    filterTypeToNorm,
   },
   song: {
     proposeSongCards,

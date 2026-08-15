@@ -20,6 +20,7 @@ import {
   type VariationBatchItem,
   type VoiceKey,
   type MachineKnobId,
+  type MachineFilterType,
 } from "@glane/audio-synth";
 import type { Sample } from "@glane/core-model";
 import tailwind from "../../css/tailwind";
@@ -817,11 +818,23 @@ export class GlSynthPage extends LitElement {
 
   #onMachineKnob(cardId: string, knob: MachineKnobId, e: Event): void {
     const v = Number((e.target as HTMLInputElement).value) / 100;
+    this.#setMachineKnob(cardId, knob, v);
+  }
+
+  #setMachineKnob(cardId: string, knob: MachineKnobId, v: number): void {
     this.#updateCard(cardId, (c) =>
       audioSynth.roles.applyCardMachine({
         ...c,
-        machine: { ...c.machine, [knob]: v },
+        machine: { ...c.machine, [knob]: Math.max(0, Math.min(1, v)) },
       }),
+    );
+  }
+
+  #onMachineFilterType(cardId: string, type: MachineFilterType): void {
+    this.#setMachineKnob(
+      cardId,
+      "filtType",
+      audioSynth.machines.filterTypeToNorm(type),
     );
   }
 
@@ -1679,21 +1692,72 @@ export class GlSynthPage extends LitElement {
                 <sonic-divider></sonic-divider>
                 <span class="form-label">${t("synth.machine")}</span>
                 <sonic-form-layout>
-                  ${machineSpec.knobs.map((knob) => {
-                    const val = card.machine[knob.id] ?? knob.default;
-                    return this.#rangeField(
-                      t(`synth.machine.${knob.id}` as "synth.machine.body"),
-                      Math.round(val * 100),
-                      0,
-                      100,
-                      (n) => {
-                        this.#onMachineKnob(card.id, knob.id, {
-                          target: { value: String(n) },
-                        } as unknown as Event);
-                      },
-                    );
-                  })}
+                  ${machineSpec.knobs
+                    .filter((knob) => !audioSynth.machines.isFilterKnob(knob.id))
+                    .map((knob) => {
+                      const val = card.machine[knob.id] ?? knob.default;
+                      return this.#rangeField(
+                        t(`synth.machine.${knob.id}` as "synth.machine.body"),
+                        Math.round(val * 100),
+                        0,
+                        100,
+                        (n) => {
+                          this.#onMachineKnob(card.id, knob.id, {
+                            target: { value: String(n) },
+                          } as unknown as Event);
+                        },
+                      );
+                    })}
                 </sonic-form-layout>
+                ${roleOwnsDsp
+                  ? html`
+                      <sonic-divider></sonic-divider>
+                      <span class="form-label">${t("synth.machine.filter")}</span>
+                      <div class="mb-3 flex flex-wrap gap-2">
+                        ${audioSynth.machines.filterTypes.map((type) => {
+                          const current = audioSynth.machines.filterTypeFromNorm(
+                            card.machine.filtType ?? 0.1,
+                          );
+                          const active = current === type;
+                          return html`
+                            <sonic-button
+                              type="primary"
+                              variant="outline"
+                              size="sm"
+                              @click=${() =>
+                                this.#onMachineFilterType(card.id, type)}
+                            >
+                              ${active ? this.#checkIcon() : nothing}
+                              ${t(
+                                `synth.machine.filter.${type}` as "synth.machine.filter.lowpass",
+                              )}
+                            </sonic-button>
+                          `;
+                        })}
+                      </div>
+                      <sonic-form-layout>
+                        ${machineSpec.knobs
+                          .filter(
+                            (knob) =>
+                              audioSynth.machines.isFilterKnob(knob.id) &&
+                              knob.id !== "filtType",
+                          )
+                          .map((knob) => {
+                            const val = card.machine[knob.id] ?? knob.default;
+                            return this.#rangeField(
+                              t(
+                                `synth.machine.${knob.id}` as "synth.machine.filtEnv",
+                              ),
+                              Math.round(val * 100),
+                              0,
+                              100,
+                              (n) =>
+                                this.#setMachineKnob(card.id, knob.id, n / 100),
+                            );
+                          })}
+                      </sonic-form-layout>
+                    `
+                  : nothing}
                 ${roleOwnsDsp
                   ? nothing
                   : html`

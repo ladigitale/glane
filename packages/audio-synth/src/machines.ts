@@ -36,7 +36,15 @@ export type MachineKnobId =
   | "breath"
   | "grain"
   | "vowel"
-  | "gender";
+  | "gender"
+  /** Classic biquad type (0–1 → discrete). */
+  | "filtType"
+  | "filtAtk"
+  | "filtDec"
+  | "filtSus"
+  | "filtRel"
+  /** Filter envelope amount (0 = bypass). */
+  | "filtEnv";
 
 export type MachineParams = Partial<Record<MachineKnobId, Norm01>>;
 
@@ -51,6 +59,53 @@ export type MachineSpec = {
   knobs: readonly MachineKnobSpec[];
 };
 
+/** Classic Web Audio biquad types offered on every role machine. */
+export const MACHINE_FILTER_TYPES = [
+  "lowpass",
+  "highpass",
+  "bandpass",
+  "notch",
+  "peaking",
+] as const;
+export type MachineFilterType = (typeof MACHINE_FILTER_TYPES)[number];
+
+/** Shared filter + ADSR knobs appended to every Family role. */
+export const MACHINE_FILTER_KNOBS: readonly MachineKnobSpec[] = [
+  { id: "filtType", default: 0.1 },
+  { id: "filtAtk", default: 0.12 },
+  { id: "filtDec", default: 0.35 },
+  { id: "filtSus", default: 0.45 },
+  { id: "filtRel", default: 0.4 },
+  { id: "filtEnv", default: 0.55 },
+] as const;
+
+export const MACHINE_FILTER_KNOB_IDS: readonly MachineKnobId[] =
+  MACHINE_FILTER_KNOBS.map((k) => k.id);
+
+export function isMachineFilterKnob(id: MachineKnobId): boolean {
+  return (MACHINE_FILTER_KNOB_IDS as readonly string[]).includes(id);
+}
+
+export function filterTypeFromNorm(n: Norm01): MachineFilterType {
+  const i = Math.min(
+    MACHINE_FILTER_TYPES.length - 1,
+    Math.floor(clamp01(n) * MACHINE_FILTER_TYPES.length),
+  );
+  return MACHINE_FILTER_TYPES[i] ?? "lowpass";
+}
+
+export function filterTypeToNorm(type: MachineFilterType): Norm01 {
+  const i = MACHINE_FILTER_TYPES.indexOf(type);
+  if (i < 0) return 0.1;
+  return (i + 0.5) / MACHINE_FILTER_TYPES.length;
+}
+
+function withFilterKnobs(
+  knobs: readonly MachineKnobSpec[],
+): readonly MachineKnobSpec[] {
+  return [...knobs, ...MACHINE_FILTER_KNOBS];
+}
+
 export type RolePivots = {
   pivot: SubtractiveNorm;
   pivotFm: FmNorm;
@@ -64,93 +119,93 @@ export type RolePivots = {
 const MACHINE_SPECS: Record<Exclude<SynthRoleId, "pivot">, MachineSpec> = {
   kick: {
     role: "kick",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "body", default: 0.5 },
       { id: "punch", default: 0.5 },
       { id: "click", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   snare: {
     role: "snare",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "body", default: 0.5 },
       { id: "snare", default: 0.5 },
       { id: "tone", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   hat: {
     role: "hat",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "brightness", default: 0.5 },
       { id: "open", default: 0.5 },
       { id: "metal", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   perc: {
     role: "perc",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "tone", default: 0.5 },
       { id: "click", default: 0.5 },
       { id: "decay", default: 0.5 },
       { id: "pitch", default: 0.5 },
-    ],
+    ]),
   },
   bass: {
     role: "bass",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "tone", default: 0.5 },
       { id: "growl", default: 0.5 },
       { id: "warmth", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   pad: {
     role: "pad",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "brightness", default: 0.5 },
       { id: "space", default: 0.5 },
       { id: "attack", default: 0.5 },
       { id: "warmth", default: 0.5 },
-    ],
+    ]),
   },
   lead: {
     role: "lead",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "bite", default: 0.5 },
       { id: "brightness", default: 0.5 },
       { id: "glide", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   arp: {
     role: "arp",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "brightness", default: 0.5 },
       { id: "gate", default: 0.5 },
       { id: "sparkle", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   fx: {
     role: "fx",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "chaos", default: 0.5 },
       { id: "brightness", default: 0.5 },
       { id: "space", default: 0.5 },
       { id: "length", default: 0.5 },
-    ],
+    ]),
   },
   texture: {
     role: "texture",
-    knobs: [
+    knobs: withFilterKnobs([
       { id: "breath", default: 0.5 },
       { id: "grain", default: 0.5 },
       { id: "space", default: 0.5 },
       { id: "brightness", default: 0.5 },
-    ],
+    ]),
   },
 };
 

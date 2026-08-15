@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  sampleMachineParams,
-  usesRoleSynth,
-} from "./render-role.js";
-import { defaultMachineParams } from "./machines.js";
+  defaultMachineParams,
+  filterTypeFromNorm,
+  filterTypeToNorm,
+} from "./machines.js";
+import { sampleMachineParams, usesRoleSynth } from "./render-role.js";
 
 describe("role synth", () => {
   it("uses dedicated DSP for drums / tonal roles, not pivot or arp", () => {
@@ -23,5 +24,21 @@ describe("role synth", () => {
     assert.ok(sampled.body != null);
     assert.ok(sampled.punch != null);
     assert.notEqual(sampled.body, pivot.body);
+  });
+
+  it("maps filtType norm to classic biquads", () => {
+    assert.equal(filterTypeFromNorm(0), "lowpass");
+    assert.equal(filterTypeFromNorm(0.99), "peaking");
+    assert.equal(filterTypeFromNorm(filterTypeToNorm("bandpass")), "bandpass");
+  });
+
+  it("includes filter ADSR defaults on every role machine", () => {
+    const kick = defaultMachineParams("kick");
+    assert.ok((kick.filtEnv ?? 0) > 0);
+    assert.ok(kick.filtAtk != null);
+    assert.ok(kick.filtDec != null);
+    assert.ok(kick.filtSus != null);
+    assert.ok(kick.filtRel != null);
+    assert.equal(filterTypeFromNorm(kick.filtType ?? 0), "lowpass");
   });
 });

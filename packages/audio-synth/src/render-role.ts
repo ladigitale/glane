@@ -6,10 +6,11 @@
 import { normalizePeak, softClipCurve } from "./audio-util.js";
 import {
   clampMachineParams,
+  filterTypeFromNorm,
   machineSpecFor,
   type MachineParams,
 } from "./machines.js";
-import { clamp01, lerp, logLerp } from "./map.js";
+import { clamp01, lerp, logLerp, timeNormToSec } from "./map.js";
 import type { Norm01, SynthRoleId } from "./types.js";
 
 export type RenderRoleResult = {
@@ -55,9 +56,107 @@ export function sampleMachineParams(
   const out: MachineParams = {};
   for (const k of spec.knobs) {
     const base = pivot[k.id] ?? k.default;
+    if (k.id === "filtType") {
+      // Discrete classic filter — often keep pivot, else pick another type.
+      if (rnd() < 0.35 + clamp01(randomness) * 0.45) {
+        out.filtType = rnd();
+      } else {
+        out.filtType = base;
+      }
+      continue;
+    }
     out[k.id] = clamp01(base + (rnd() * 2 - 1) * span);
   }
   return clampMachineParams(role, out);
+}
+
+/** Linear ADSR on a filter cutoff / centre frequency. */
+function scheduleFilterAdsr(
+  param: AudioParam,
+  t0: number,
+  attack: number,
+  decay: number,
+  sustain: number,
+  release: number,
+  baseHz: number,
+  peakHz: number,
+  endTime: number,
+): void {
+  const a = Math.max(0.001, attack);
+  const d = Math.max(0.001, decay);
+  const r = Math.max(0.001, release);
+  const base = Math.max(40, baseHz);
+  const peak = Math.max(base + 1, peakHz);
+  const sus = base + (peak - base) * clamp01(sustain);
+  const noteEnd = Math.max(t0 + a + d + 0.01, endTime - r);
+  param.cancelScheduledValues(t0);
+  param.setValueAtTime(base, t0);
+  param.linearRampToValueAtTime(peak, t0 + a);
+  param.linearRampToValueAtTime(sus, t0 + a + d);
+  param.setValueAtTime(sus, noteEnd);
+  param.linearRampToValueAtTime(base, noteEnd + r);
+}
+
+/**
+ * Classic biquad + filter ADSR on top of a role bake.
+ * `filtEnv` ≈ 0 bypasses; otherwise amount scales peak cutoff.
+ */
+async function applyMachineFilter(
+  result: RenderRoleResult,
+  machine: MachineParams,
+): Promise<RenderRoleResult> {
+  const envAmt = kn(machine, "filtEnv", 0);
+  if (envAmt < 0.02 || result.pcm.length < 8) return result;
+
+  const type = filterTypeFromNorm(kn(machine, "filtType", 0.1));
+  const atk = timeNormToSec(kn(machine, "filtAtk", 0.12));
+  const dec = timeNormToSec(kn(machine, "filtDec", 0.35));
+  const sus = kn(machine, "filtSus", 0.45);
+  const rel = timeNormToSec(kn(machine, "filtRel", 0.4));
+  const sr = result.sampleRate;
+  const durSec = result.pcm.length / sr;
+  const frames = result.pcm.length;
+
+  const offline = new OfflineAudioContext(1, frames, sr);
+  const buf = offline.createBuffer(1, frames, sr);
+  buf.getChannelData(0).set(result.pcm);
+  const src = offline.createBufferSource();
+  src.buffer = buf;
+
+  const filter = offline.createBiquadFilter();
+  filter.type = type;
+  filter.Q.value =
+    type === "bandpass" || type === "notch" || type === "peaking"
+      ? lerp(0.7, 8, envAmt)
+      : lerp(0.5, 4, envAmt);
+  if (type === "peaking") filter.gain.value = lerp(0, 12, envAmt);
+
+  const baseHz = logLerp(120, 1_800, 0.35);
+  const peakHz = logLerp(baseHz, 14_000, envAmt);
+  scheduleFilterAdsr(
+    filter.frequency,
+    0,
+    atk,
+    dec,
+    sus,
+    rel,
+    baseHz,
+    peakHz,
+    durSec,
+  );
+
+  src.connect(filter);
+  filter.connect(offline.destination);
+  src.start(0);
+
+  const rendered = await offline.startRendering();
+  const pcm = normalizePeak(new Float32Array(rendered.getChannelData(0)));
+  return {
+    ...result,
+    pcm,
+    durationMs: Math.round((pcm.length / sr) * 1000),
+    machine,
+  };
 }
 
 export function usesRoleSynth(
@@ -778,28 +877,39 @@ export async function renderRole(
   const rnd = opts?.rnd ?? Math.random;
   const fundHz = opts?.fundHz;
 
+  let baked: RenderRoleResult;
   switch (role) {
     case "kick":
-      return renderKick(machine, sampleRate, rnd);
+      baked = await renderKick(machine, sampleRate, rnd);
+      break;
     case "snare":
-      return renderSnare(machine, sampleRate, rnd);
+      baked = await renderSnare(machine, sampleRate, rnd);
+      break;
     case "hat":
-      return renderHat(machine, sampleRate, rnd);
+      baked = await renderHat(machine, sampleRate, rnd);
+      break;
     case "perc":
-      return renderPerc(machine, sampleRate, rnd, fundHz);
+      baked = await renderPerc(machine, sampleRate, rnd, fundHz);
+      break;
     case "bass":
-      return renderBass(machine, sampleRate, fundHz);
+      baked = await renderBass(machine, sampleRate, fundHz);
+      break;
     case "pad":
-      return renderPad(machine, sampleRate, fundHz);
+      baked = await renderPad(machine, sampleRate, fundHz);
+      break;
     case "lead":
-      return renderLead(machine, sampleRate, fundHz);
+      baked = await renderLead(machine, sampleRate, fundHz);
+      break;
     case "fx":
-      return renderFx(machine, sampleRate, rnd);
+      baked = await renderFx(machine, sampleRate, rnd);
+      break;
     case "texture":
-      return renderTexture(machine, sampleRate, rnd);
+      baked = await renderTexture(machine, sampleRate, rnd);
+      break;
     default: {
       const _exhaustive: never = role;
       throw new Error(`No role synth for ${String(_exhaustive)}`);
     }
   }
+  return applyMachineFilter(baked, machine);
 }

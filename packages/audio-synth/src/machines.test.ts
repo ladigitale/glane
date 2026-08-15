@@ -9,13 +9,17 @@ import {
 import { applyCardMachine, createRoleCard, rolePresetPivots } from "./roles.js";
 
 describe("machines", () => {
-  it("exposes 4 knobs for kick", () => {
+  it("exposes 4 role knobs + shared filter ADSR for kick", () => {
     const spec = machineSpecFor("kick");
     assert.ok(spec);
-    assert.equal(spec.knobs.length, 4);
+    assert.equal(spec.knobs.length, 10);
     assert.deepEqual(
-      spec.knobs.map((k) => k.id),
+      spec.knobs.slice(0, 4).map((k) => k.id),
       ["body", "punch", "click", "length"],
+    );
+    assert.deepEqual(
+      spec.knobs.slice(4).map((k) => k.id),
+      ["filtType", "filtAtk", "filtDec", "filtSus", "filtRel", "filtEnv"],
     );
   });
 
