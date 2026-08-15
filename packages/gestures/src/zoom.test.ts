@@ -4,6 +4,7 @@ import {
   zoomRatioFromVerticalDelta,
   zoomAroundAnchor,
   applyVerticalZoom,
+  applyPinchZoom,
 } from "./zoom.ts";
 
 describe("zoomRatioFromVerticalDelta", () => {
@@ -43,5 +44,31 @@ describe("applyVerticalZoom", () => {
     );
     assert.ok(v.pxPerTick > 0.05);
     assert.ok(v.pxPerTick <= 2);
+  });
+});
+
+describe("applyPinchZoom", () => {
+  it("zooms in when fingers spread", () => {
+    const origin = 0;
+    const view = { pxPerTick: 0.1, scrollLeft: 50 };
+    const anchor = 120;
+    const tick = (view.scrollLeft + anchor - origin) / view.pxPerTick;
+    const next = applyPinchZoom(view, 100, 150, anchor, origin, 0.01, 2);
+    assert.ok(next.pxPerTick > view.pxPerTick);
+    const tick2 = (next.scrollLeft + anchor - origin) / next.pxPerTick;
+    assert.ok(Math.abs(tick2 - tick) < 1e-6);
+  });
+
+  it("zooms out when fingers pinch", () => {
+    const next = applyPinchZoom(
+      { pxPerTick: 0.2, scrollLeft: 0 },
+      200,
+      100,
+      80,
+      0,
+      0.01,
+      2,
+    );
+    assert.ok(next.pxPerTick < 0.2);
   });
 });

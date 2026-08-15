@@ -1,16 +1,20 @@
-import { asSampleIndex, type SampleIndex } from "@glane/core-model";
+import { asSampleIndex, type SampleIndex, type TrackFx } from "@glane/core-model";
 import {
+  createMasterFxChain,
   createTrackBus,
   disposeTrackBus,
+  fxTailSamples,
   scheduleGainAdsr,
   updateTrackBus,
+  type MasterFxChain,
   type TrackBus,
   type TrackInsertConfig,
 } from "./track-insert";
 
-export type { TrackBus, TrackInsertConfig } from "./track-insert";
+export type { TrackBus, TrackInsertConfig, MasterFxChain } from "./track-insert";
 export {
   bakeTrackFx,
+  createMasterFxChain,
   createTrackBus,
   disposeTrackBus,
   fxTailSamples,
@@ -65,9 +69,11 @@ const VOICE_POOL = 32;
  */
 export class TransportEngine {
   readonly ctx: AudioContext;
+  /** Master volume (after mix + master FX). */
   readonly master: GainNode;
   /** Tap on the master bus for a VU (does not alter the signal). */
   readonly analyser: AnalyserNode;
+  #mix: MasterFxChain;
   #voices: Voice[] = [];
   #clips: ScheduledClip[] = [];
   #buses = new Map<string, TrackBus>();
@@ -89,11 +95,12 @@ export class TransportEngine {
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 512;
     this.analyser.smoothingTimeConstant = 0.35;
+    this.#mix = createMasterFxChain(this.ctx, this.master);
     this.master.connect(this.analyser);
     this.master.connect(this.ctx.destination);
     for (let i = 0; i < VOICE_POOL; i++) {
       const gain = this.ctx.createGain();
-      gain.connect(this.master);
+      gain.connect(this.#mix.input);
       this.#voices.push({ source: null, gain, busy: false, clipId: null });
     }
   }
@@ -117,6 +124,11 @@ export class TransportEngine {
     return base + out;
   }
 
+  /** Two serial wet inserts on the master bus (before volume). */
+  setMasterFx(fx0: TrackFx, fx1: TrackFx, bpm?: number): void {
+    this.#mix.apply(fx0, fx1, bpm);
+  }
+
   /** Create / update per-track buses (gain, pan, light FX insert). */
   syncTrackBuses(configs: TrackInsertConfig[]): void {
     const keep = new Set(configs.map((c) => c.id));
@@ -129,11 +141,11 @@ export class TransportEngine {
     for (const config of configs) {
       const existing = this.#buses.get(config.id);
       if (existing) {
-        updateTrackBus(existing, this.ctx, this.master, config);
+        updateTrackBus(existing, this.ctx, this.#mix.input, config);
       } else {
         this.#buses.set(
           config.id,
-          createTrackBus(this.ctx, this.master, config),
+          createTrackBus(this.ctx, this.#mix.input, config),
         );
       }
     }
@@ -142,10 +154,13 @@ export class TransportEngine {
   setTrackInsert(config: TrackInsertConfig): void {
     const existing = this.#buses.get(config.id);
     if (existing) {
-      updateTrackBus(existing, this.ctx, this.master, config);
+      updateTrackBus(existing, this.ctx, this.#mix.input, config);
       return;
     }
-    this.#buses.set(config.id, createTrackBus(this.ctx, this.master, config));
+    this.#buses.set(
+      config.id,
+      createTrackBus(this.ctx, this.#mix.input, config),
+    );
   }
 
   setClips(clips: ScheduledClip[]): void {
@@ -267,7 +282,7 @@ export class TransportEngine {
       /* */
     }
     const bus = trackId ? this.#buses.get(trackId) : undefined;
-    v.gain.connect(bus ? bus.input : this.master);
+    v.gain.connect(bus ? bus.input : this.#mix.input);
   }
 
   #schedule(): void {
@@ -442,13 +457,28 @@ export class TransportEngine {
     clips: ScheduledClip[],
     durationSamples: number,
     tracks: TrackInsertConfig[] = [],
+    masterFx: [TrackFx, TrackFx] | TrackFx[] = [],
+    bpm = 120,
   ): Promise<AudioBuffer> {
     const sr = this.sampleRate;
-    const length = Math.max(1, Math.floor(durationSamples));
+    const fx0 = masterFx[0];
+    const fx1 = masterFx[1];
+    const tail = Math.max(
+      fx0 ? fxTailSamples(fx0, sr, bpm) : 0,
+      fx1 ? fxTailSamples(fx1, sr, bpm) : 0,
+    );
+    const length = Math.max(1, Math.floor(durationSamples) + tail);
     const offline = new OfflineAudioContext(2, length, sr);
+    const chain = createMasterFxChain(
+      offline,
+      offline.destination,
+      fx0,
+      fx1,
+      bpm,
+    );
     const busIn = new Map<string, GainNode>();
     for (const t of tracks) {
-      busIn.set(t.id, createTrackBus(offline, offline.destination, t).input);
+      busIn.set(t.id, createTrackBus(offline, chain.input, t).input);
     }
 
     for (const clip of clips) {
@@ -466,7 +496,7 @@ export class TransportEngine {
       const g = offline.createGain();
       src.connect(g);
       const dest =
-        (clip.trackId && busIn.get(clip.trackId)) || offline.destination;
+        (clip.trackId && busIn.get(clip.trackId)) || chain.input;
       g.connect(dest);
 
       const t = clip.startSample / sr;

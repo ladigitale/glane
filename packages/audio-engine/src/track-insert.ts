@@ -8,6 +8,7 @@ import {
   adsrGain01,
   echoDelaySec,
   fitTrackAdsr,
+  normalizeMasterFx,
   normalizeTrackFx,
   trackFxAdsr,
   trackFxIsActive,
@@ -444,6 +445,42 @@ function buildVibrato(
   };
 }
 
+function buildCompressor(
+  ctx: BaseAudioContext,
+  input: AudioNode,
+  gain: GainNode,
+  fx: TrackFx,
+): InsertHandles {
+  const comp = ctx.createDynamicsCompressor();
+  const makeup = ctx.createGain();
+
+  const apply = (next: TrackFx) => {
+    comp.threshold.value = clamp(next.thresholdDb, -60, 0);
+    comp.knee.value = 8;
+    comp.ratio.value = clamp(next.ratio, 1, 20);
+    comp.attack.value = 0.008;
+    comp.release.value = 0.18;
+    // mix 0…1 → 0…+12 dB makeup after the compressor
+    const makeupDb = clamp(next.mix, 0, 1) * 12;
+    makeup.gain.value = Math.pow(10, makeupDb / 20);
+  };
+  apply(fx);
+
+  input.connect(comp);
+  comp.connect(makeup);
+  makeup.connect(gain);
+
+  return {
+    type: "compressor",
+    dispose: () => {
+      safeDisconnect(input, comp);
+      safeDisconnect(comp);
+      safeDisconnect(makeup);
+    },
+    apply,
+  };
+}
+
 function buildInsert(
   ctx: BaseAudioContext,
   input: AudioNode,
@@ -464,9 +501,77 @@ function buildInsert(
       return buildTremolo(ctx, input, gain, fx);
     case "vibrato":
       return buildVibrato(ctx, input, gain, fx);
+    case "compressor":
+      return buildCompressor(ctx, input, gain, fx);
     default:
       return buildNone(input, gain);
   }
+}
+
+export type MasterFxChain = {
+  /** Connect track buses / dry voices here. */
+  input: GainNode;
+  dispose: () => void;
+  apply: (fx0: TrackFx, fx1: TrackFx, bpm?: number) => void;
+};
+
+/**
+ * Two serial wet inserts between a unity mix bus and `destination`
+ * (typically the master volume GainNode).
+ */
+export function createMasterFxChain(
+  ctx: BaseAudioContext,
+  destination: AudioNode,
+  fx0: TrackFx = DEFAULT_TRACK_FX,
+  fx1: TrackFx = DEFAULT_TRACK_FX,
+  bpm = 120,
+): MasterFxChain {
+  const input = ctx.createGain();
+  const mid = ctx.createGain();
+  const out = ctx.createGain();
+  let a = normalizeMasterFx(fx0);
+  let b = normalizeMasterFx(fx1);
+  let tempo = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  let insert0 = buildInsert(ctx, input, mid, a, tempo);
+  let insert1 = buildInsert(ctx, mid, out, b, tempo);
+  out.connect(destination);
+
+  const apply = (next0: TrackFx, next1: TrackFx, nextBpm = tempo) => {
+    a = normalizeMasterFx(next0);
+    b = normalizeMasterFx(next1);
+    tempo =
+      Number.isFinite(nextBpm) && (nextBpm as number) > 0
+        ? (nextBpm as number)
+        : tempo;
+    if (insert0.type !== a.type) {
+      insert0.dispose();
+      insert0 = buildInsert(ctx, input, mid, a, tempo);
+    } else {
+      insert0.apply(a, tempo);
+    }
+    if (insert1.type !== b.type) {
+      insert1.dispose();
+      insert1 = buildInsert(ctx, mid, out, b, tempo);
+    } else {
+      insert1.apply(b, tempo);
+    }
+  };
+
+  return {
+    input,
+    apply,
+    dispose: () => {
+      insert0.dispose();
+      insert1.dispose();
+      try {
+        input.disconnect();
+        mid.disconnect();
+        out.disconnect();
+      } catch {
+        /* */
+      }
+    },
+  };
 }
 
 function configBpm(config: TrackInsertConfig): number {

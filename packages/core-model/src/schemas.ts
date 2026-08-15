@@ -20,6 +20,7 @@ export const ExprRoleSchema = z.enum([
   "bass",
   "chord",
   "lead",
+  "arp",
   "texture",
   "loop",
   "fx",
@@ -158,35 +159,9 @@ export const FadeCurveSchema = z.enum([
 ]);
 export type FadeCurve = z.infer<typeof FadeCurveSchema>;
 
-export const ProjectSchema = z.object({
-  id: z.string().uuid(),
-  title: z.string(),
-  bpm: z.number().positive(),
-  timeSignature: z.tuple([z.number().int(), z.number().int()]),
-  bars: z.number().int().positive(),
-  masterGainDb: z.number(),
-  /** Global preamp (dB) multiplied with each track's local gain, before FX. */
-  preampGainDb: z.number().optional(),
-  snapConfig: z.string().optional(),
-  revision: z.number().int().nonnegative(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-  deletedAt: z.string().datetime().nullable().optional(),
-});
-export type Project = z.infer<typeof ProjectSchema>;
-
-/** Fill missing mix fields (legacy IDB rows without `preampGainDb`). */
-export function normalizeProject(raw: Project): Project {
-  return {
-    ...raw,
-    masterGainDb: Number.isFinite(raw.masterGainDb) ? raw.masterGainDb : 0,
-    preampGainDb: Number.isFinite(raw.preampGainDb) ? raw.preampGainDb : 0,
-  };
-}
-
 /**
  * One light wet insert per track (ADR-0016), plus optional HP/LP and ADSR.
- * Wet: None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato.
+ * Wet: None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato / Compressor.
  */
 export const TrackFxTypeSchema = z.enum([
   "none",
@@ -196,8 +171,16 @@ export const TrackFxTypeSchema = z.enum([
   "chorus",
   "tremolo",
   "vibrato",
+  "compressor",
 ]);
 export type TrackFxType = z.infer<typeof TrackFxTypeSchema>;
+
+/** Compressor threshold (dBFS). */
+export const COMPRESS_THRESHOLD_DB_MIN = -60;
+export const COMPRESS_THRESHOLD_DB_MAX = 0;
+/** Compressor ratio (≥ 1). */
+export const COMPRESS_RATIO_MIN = 1;
+export const COMPRESS_RATIO_MAX = 20;
 
 /** Echo delay as beat fractions (¼ note = 1). Clamped at apply time by BPM. */
 export const ECHO_DELAY_BEATS_MIN = 0.125;
@@ -264,6 +247,18 @@ export const TrackFxSchema = z.object({
   rateHz: z.number().min(0.1).max(12).default(4),
   /** Modulation depth for chorus / tremolo / vibrato (0–1). */
   depth: z.number().min(0).max(1).default(0.5),
+  /** Compressor threshold (dBFS). */
+  thresholdDb: z
+    .number()
+    .min(COMPRESS_THRESHOLD_DB_MIN)
+    .max(COMPRESS_THRESHOLD_DB_MAX)
+    .default(-24),
+  /** Compressor ratio. */
+  ratio: z
+    .number()
+    .min(COMPRESS_RATIO_MIN)
+    .max(COMPRESS_RATIO_MAX)
+    .default(4),
   /** 3-band EQ linear gains (0–2). */
   low: z.number().min(0).max(2).default(1),
   mid: z.number().min(0).max(2).default(1),
@@ -292,6 +287,8 @@ export const DEFAULT_TRACK_FX: TrackFx = {
   damping: 0.35,
   rateHz: 4,
   depth: 0.5,
+  thresholdDb: -24,
+  ratio: 4,
   low: 1,
   mid: 1,
   high: 1,
@@ -299,6 +296,12 @@ export const DEFAULT_TRACK_FX: TrackFx = {
   lpHz: TRACK_LP_HZ_OPEN,
   ...DEFAULT_TRACK_ADSR,
 };
+
+/** Default pair of master-bus wet inserts. */
+export const DEFAULT_MASTER_FX: [TrackFx, TrackFx] = [
+  { ...DEFAULT_TRACK_FX },
+  { ...DEFAULT_TRACK_FX },
+];
 
 function clampFx(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -337,6 +340,57 @@ export function normalizeTrackFx(raw: unknown): TrackFx {
   delete base.delayMs;
   const parsed = TrackFxSchema.safeParse(base);
   return parsed.success ? parsed.data : { ...DEFAULT_TRACK_FX };
+}
+
+/**
+ * Master-bus FX: same wet types as tracks, but tone / ADSR are track-only
+ * and always cleared so legacy rows stay inert on the bus.
+ */
+export function normalizeMasterFx(raw: unknown): TrackFx {
+  const n = normalizeTrackFx(raw);
+  return {
+    ...n,
+    hpHz: TRACK_HP_HZ_OPEN,
+    lpHz: TRACK_LP_HZ_OPEN,
+    ...DEFAULT_TRACK_ADSR,
+  };
+}
+
+export const ProjectSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  bpm: z.number().positive(),
+  timeSignature: z.tuple([z.number().int(), z.number().int()]),
+  bars: z.number().int().positive(),
+  masterGainDb: z.number(),
+  /** Global preamp (dB) multiplied with each track's local gain, before FX. */
+  preampGainDb: z.number().optional(),
+  /**
+   * Two serial wet inserts on the master bus (same types as track FX).
+   * Tone / ADSR on these rows are ignored (track-only).
+   */
+  masterFx: z.tuple([TrackFxSchema, TrackFxSchema]).optional(),
+  snapConfig: z.string().optional(),
+  revision: z.number().int().nonnegative(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  deletedAt: z.string().datetime().nullable().optional(),
+});
+export type Project = z.infer<typeof ProjectSchema>;
+
+/** Fill missing mix fields (legacy IDB rows without `preampGainDb` / `masterFx`). */
+export function normalizeProject(raw: Project): Project {
+  const masterFxRaw = raw.masterFx;
+  const masterFx: [TrackFx, TrackFx] = [
+    normalizeMasterFx(masterFxRaw?.[0]),
+    normalizeMasterFx(masterFxRaw?.[1]),
+  ];
+  return {
+    ...raw,
+    masterGainDb: Number.isFinite(raw.masterGainDb) ? raw.masterGainDb : 0,
+    preampGainDb: Number.isFinite(raw.preampGainDb) ? raw.preampGainDb : 0,
+    masterFx,
+  };
 }
 
 /** Wet insert selected (not none). */

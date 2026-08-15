@@ -14,13 +14,15 @@ const base = {
 };
 
 describe("normalizeProject", () => {
-  it("fills missing preamp and non-finite master", () => {
+  it("fills missing preamp, masterFx and non-finite master", () => {
     const n = normalizeProject({
       ...base,
       masterGainDb: Number.NaN,
     } as Project);
     assert.equal(n.masterGainDb, 0);
     assert.equal(n.preampGainDb, 0);
+    assert.equal(n.masterFx?.[0]?.type, "none");
+    assert.equal(n.masterFx?.[1]?.type, "none");
   });
 
   it("keeps finite mix values", () => {
@@ -28,8 +30,15 @@ describe("normalizeProject", () => {
       ...base,
       masterGainDb: -3,
       preampGainDb: 2,
-    });
+      masterFx: [
+        { type: "compressor", thresholdDb: -18, ratio: 6, mix: 0.2 },
+        { type: "reverb", mix: 0.4 },
+      ],
+    } as Project);
     assert.equal(n.masterGainDb, -3);
     assert.equal(n.preampGainDb, 2);
+    assert.equal(n.masterFx?.[0]?.type, "compressor");
+    assert.equal(n.masterFx?.[0]?.thresholdDb, -18);
+    assert.equal(n.masterFx?.[1]?.type, "reverb");
   });
 });

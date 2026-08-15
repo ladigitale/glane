@@ -73,9 +73,33 @@ export function applyVerticalZoom(
   return zoomAroundAnchor(view, next, anchorXInView, contentOriginPx);
 }
 
+/**
+ * Incremental pinch: ratio = distance1 / distance0 (update baseline after each step).
+ * Anchor is typically the midpoint between the two fingers.
+ */
+export function applyPinchZoom(
+  view: TimelineZoomView,
+  distance0: number,
+  distance1: number,
+  anchorXInView: number,
+  contentOriginPx: number,
+  minPxPerTick: number,
+  maxPxPerTick: number,
+): TimelineZoomView {
+  if (!(distance0 > 1e-6) || !(distance1 > 0) || !Number.isFinite(distance1)) {
+    return view;
+  }
+  const ratio = distance1 / distance0;
+  if (!Number.isFinite(ratio) || Math.abs(ratio - 1) < 1e-6) return view;
+  const next = clampPxPerTick(view.pxPerTick * ratio, minPxPerTick, maxPxPerTick);
+  if (next === view.pxPerTick) return view;
+  return zoomAroundAnchor(view, next, anchorXInView, contentOriginPx);
+}
+
 export const timelineZoom = {
   zoomRatioFromVerticalDelta,
   clampPxPerTick,
   zoomAroundAnchor,
   applyVerticalZoom,
+  applyPinchZoom,
 } as const;

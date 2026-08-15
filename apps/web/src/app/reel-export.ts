@@ -10,7 +10,9 @@ import {
   createReelViz,
   createRng,
   drawBrandMark,
+  drawReelFilmGrain,
   energyAt,
+  paintReelScene2d,
   planScenes,
   scenesAt,
   type ReelPalette,
@@ -207,35 +209,33 @@ function drawWaveform(
   },
 ): void {
   const { w, h, peaks, progress, rms, palette } = opts;
-  const waveTop = h * 0.34;
-  const waveH = h * 0.3;
-  const midY = waveTop + waveH / 2;
-  const padX = w * 0.08;
-  const drawW = w - padX * 2;
+  // Ambient full-bleed silhouette — background wash, not a UI widget.
+  const midY = h * 0.5;
+  const waveH = h * 0.72;
   const cols = peaks.length;
-  const barW = drawW / cols;
+  const barW = w / cols;
   const playCol = Math.floor(progress * cols);
-  const liveBoost = 1 + rms * 0.35;
 
+  ctx.save();
   for (let i = 0; i < cols; i++) {
     const mag = peaks[i] ?? 0;
-    const near = 1 - Math.min(1, Math.abs(i - playCol) / 18);
-    const boost = i === playCol ? liveBoost : 1 + near * rms * 0.15;
-    const barH = Math.max(2, mag * waveH * 0.92 * boost);
-    const x = padX + i * barW;
-    ctx.fillStyle = i <= playCol ? palette.wave : palette.waveDim;
-    ctx.globalAlpha = i <= playCol ? 0.92 : 0.45;
-    ctx.fillRect(x, midY - barH / 2, Math.max(1, barW * 0.72), barH);
+    const played = i <= playCol;
+    const barH = Math.max(1, mag * waveH * (0.55 + rms * 0.2));
+    const x = i * barW;
+    ctx.fillStyle = played ? palette.wave : palette.waveDim;
+    ctx.globalAlpha = played ? 0.07 + rms * 0.05 : 0.03;
+    ctx.fillRect(x, midY - barH / 2, Math.max(1, barW * 0.9), barH);
   }
-  ctx.globalAlpha = 1;
-
-  const px = padX + progress * drawW;
-  ctx.strokeStyle = palette.accent;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(px, waveTop - 20);
-  ctx.lineTo(px, waveTop + waveH + 20);
-  ctx.stroke();
+  // Soft playhead veil (no hard needle).
+  const px = progress * w;
+  const veil = ctx.createLinearGradient(px - 40, 0, px + 40, 0);
+  veil.addColorStop(0, "transparent");
+  veil.addColorStop(0.5, palette.accent);
+  veil.addColorStop(1, "transparent");
+  ctx.globalAlpha = 0.06 + rms * 0.05;
+  ctx.fillStyle = veil;
+  ctx.fillRect(px - 40, 0, 80, h);
+  ctx.restore();
 }
 
 function drawOverlay(
@@ -247,32 +247,40 @@ function drawOverlay(
     palette: ReelPalette;
     peaks: Float32Array;
     progress: number;
-    rms: number;
+    timeS: number;
+    energy: { rms: number; bass: number; mid: number; high: number };
   },
 ): void {
-  const { w, h, title, palette, peaks, progress, rms } = opts;
+  const { w, h, title, palette, peaks, progress, timeS, energy: e } = opts;
 
-  drawWaveform(ctx, { w, h, peaks, progress, rms, palette });
+  // Wave first — sits behind brand/title as quiet atmosphere.
+  drawWaveform(ctx, { w, h, peaks, progress, rms: e.rms, palette });
 
-  const brandY = h * 0.12;
-  const markSize = 72;
-  const gap = 20;
-  ctx.font = "600 52px system-ui, sans-serif";
+  const brandY = h * 0.075;
+  const markSize = 44;
+  const gap = 14;
+  ctx.save();
+  ctx.font = "600 34px ui-monospace, SFMono-Regular, Menlo, monospace";
   const nameW = ctx.measureText(APP_NAME).width;
   const totalW = markSize + gap + nameW;
   const left = (w - totalW) / 2;
+  ctx.globalAlpha = 0.55 + e.rms * 0.15;
   drawBrandMark(ctx, left + markSize / 2, brandY, markSize, palette.accent);
   ctx.fillStyle = palette.accent;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.fillText(APP_NAME, left + markSize + gap, brandY);
+  ctx.restore();
 
+  ctx.save();
+  const titleY = h * 0.93;
+  ctx.translate(w / 2, titleY);
   ctx.fillStyle = palette.text;
-  ctx.font = "500 48px system-ui, sans-serif";
+  ctx.font = "500 32px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
   const label = title.trim() || APP_NAME;
-  const maxTitleW = w * 0.84;
+  const maxTitleW = w * 0.78;
   let display = label;
   if (ctx.measureText(display).width > maxTitleW) {
     while (
@@ -283,52 +291,15 @@ function drawOverlay(
     }
     display = `${display}…`;
   }
-  ctx.fillText(display, w / 2, h * 0.88);
-}
-
-/** Canvas2D fallback when WebGL is unavailable. */
-function drawFallbackFrame(
-  ctx: CanvasRenderingContext2D,
-  opts: {
-    w: number;
-    h: number;
-    progress: number;
-    timeS: number;
-    rms: number;
-    bass: number;
-    title: string;
-    palette: ReelPalette;
-    peaks: Float32Array;
-  },
-): void {
-  const { w, h, progress, timeS, rms, bass, title, palette, peaks } = opts;
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, palette.top);
-  grad.addColorStop(1, palette.bottom);
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
-
-  const cx = w / 2;
-  const cy = h * 0.45;
-  ctx.strokeStyle = palette.wave;
-  ctx.lineWidth = 3;
-  for (let i = 0; i < 5; i++) {
-    const r = (80 + i * 70) * (1 + bass * 0.25 * Math.sin(timeS * 6 + i));
-    ctx.globalAlpha = 0.35 + rms * 0.4;
-    ctx.beginPath();
-    const sides = 3 + ((i * 2) % 5);
-    for (let s = 0; s <= sides; s++) {
-      const a = (s / sides) * Math.PI * 2 + timeS * (0.2 + i * 0.05);
-      const x = cx + Math.cos(a) * r;
-      const y = cy + Math.sin(a) * r * 1.1;
-      if (s === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
+  ctx.globalAlpha = 0.55 + e.mid * 0.15;
+  ctx.fillText(display, 0, 0);
+  ctx.globalAlpha = 0.12 + e.high * 0.1;
+  ctx.fillStyle = palette.accent;
+  for (let i = 0; i < 10; i++) {
+    const sx = (Math.sin(timeS * 7 + i * 2.1) * 0.5) * maxTitleW * 0.6;
+    ctx.fillRect(sx, 6 + (i % 3), 1, 1);
   }
-  ctx.globalAlpha = 1;
-
-  drawOverlay(ctx, { w, h, title, palette, peaks, progress, rms });
+  ctx.restore();
 }
 
 function normalizeScenes(
@@ -361,7 +332,7 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
   );
   const scenes = planScenes(durationS, rng, normalizeScenes(opts.scenes));
   const energy = buildEnergySeries(clipped, REEL_FPS);
-  const peaks = buildPeaks(clipped, 240);
+  const peaks = buildPeaks(clipped, 360);
 
   const canvas = document.createElement("canvas");
   canvas.width = REEL_WIDTH;
@@ -384,30 +355,39 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
         sceneB: sc.b,
         mix: sc.mix,
         palette,
+        peaks,
       });
       ctx.drawImage(viz.canvas, 0, 0);
-      drawOverlay(ctx, {
-        w: REEL_WIDTH,
-        h: REEL_HEIGHT,
-        title: opts.title,
-        palette,
-        peaks,
-        progress,
-        rms: e.rms,
-      });
     } else {
-      drawFallbackFrame(ctx, {
+      paintReelScene2d(ctx, {
         w: REEL_WIDTH,
         h: REEL_HEIGHT,
-        progress,
         timeS: elapsed,
-        rms: e.rms,
-        bass: e.bass,
-        title: opts.title,
+        energy: e,
+        sceneA: sc.a,
+        sceneB: sc.b,
+        mix: sc.mix,
         palette,
         peaks,
       });
     }
+    drawOverlay(ctx, {
+      w: REEL_WIDTH,
+      h: REEL_HEIGHT,
+      title: opts.title,
+      palette,
+      peaks,
+      progress,
+      timeS: elapsed,
+      energy: e,
+    });
+    drawReelFilmGrain(ctx, {
+      w: REEL_WIDTH,
+      h: REEL_HEIGHT,
+      timeS: elapsed,
+      energy: e,
+      palette,
+    });
   };
 
   paint(0);

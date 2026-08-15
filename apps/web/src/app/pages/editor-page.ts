@@ -37,12 +37,18 @@ import { loadSampleAudio } from "../load-sample-audio.js";
 import { SAMPLE_PROCESSED_EVENT, processQueue, isProcessingBusy, isProcessingError } from "../process-queue.js";
 import { navigate } from "../router.js";
 import {
+  peekEditorHandoff,
+  takeEditorHandoff,
+  clearEditorHandoff,
+} from "../editor-handoff.js";
+import {
   deleteSample,
   renameSample,
   toggleFavorite,
 } from "../sample-actions.js";
 import { demucsQueue } from "../ml/demucs-queue.js";
-import { ML_TAG } from "@glane/audio-ml";
+import { denoiseQueue } from "../ml/denoise-queue.js";
+import { DENOISED_STEM, ML_TAG, stemTag } from "@glane/audio-ml";
 import {
   applyOps,
   emptyEditorState,
@@ -254,6 +260,20 @@ export class GlEditorPage extends LitElement {
         class="flex flex-wrap items-center gap-2"
         formDataProvider=${editorFormKey.path}
       >
+        ${peekEditorHandoff()
+          ? html`<sonic-button
+              shape="circle"
+              variant="ghost"
+              type="neutral"
+              size="sm"
+              icon
+              data-aria-label=${t("editor.backToProject")}
+              title=${t("editor.backToProject")}
+              @click=${() => void this.#backToProject()}
+            >
+              ${glIcon("arrow-left", { size: "sm" })}
+            </sonic-button>`
+          : nothing}
         <sonic-input
           class="rename min-w-0 max-w-full flex-[1_1_10rem]"
           name="name"
@@ -867,6 +887,26 @@ export class GlEditorPage extends LitElement {
         onClick: () => void this.#separate(),
       },
       {
+        label: t("library.removeVocals"),
+        icon: "mic-off",
+        disabled:
+          busy ||
+          isStem ||
+          !this.sampleId ||
+          (this.sample?.tags ?? []).includes(ML_TAG.novocals),
+        onClick: () => void this.#removeVocals(),
+      },
+      {
+        label: t("library.denoise"),
+        icon: "audio-lines",
+        disabled:
+          busy ||
+          !this.sampleId ||
+          (this.sample?.tags ?? []).includes(stemTag(DENOISED_STEM)) ||
+          (this.sample?.tags ?? []).includes(ML_TAG.denoise),
+        onClick: () => void this.#denoise(),
+      },
+      {
         label: t("library.analyze"),
         icon: "refresh-cw",
         disabled: busy || !this.sampleId,
@@ -1251,7 +1291,7 @@ export class GlEditorPage extends LitElement {
           <ul
             class="m-0 flex list-disc flex-col gap-1.5 pl-[1.1rem] text-[0.85rem] text-neutral-500"
           >
-            <li>Fond : ↕ zoom · ↔ pan</li>
+            <li>Fond : pincer = zoom · ↕ zoom · ↔ pan</li>
             <li>Règle = région de boucle</li>
             <li>Poignées = trim / in-out / tête de lecture</li>
             <li>Poignée timeline = déplacer la boucle</li>
@@ -1781,6 +1821,17 @@ export class GlEditorPage extends LitElement {
     return true;
   }
 
+  #backToProject = async (): Promise<void> => {
+    const ok = await this.confirmLeave();
+    if (!ok) return;
+    const handoff = takeEditorHandoff();
+    if (handoff?.from === "project") {
+      navigate({ name: "project", id: handoff.projectId });
+      return;
+    }
+    navigate({ name: "project" });
+  };
+
   #fav = async (): Promise<void> => {
     if (!this.sampleId) return;
     const updated = await toggleFavorite(this.sampleId);
@@ -1834,12 +1885,15 @@ export class GlEditorPage extends LitElement {
           : label;
     });
     try {
-      const snap = await demucsQueue.enqueueAndWait(this.sampleId);
+      const snap = await demucsQueue.enqueueAndWait(this.sampleId, {
+        mode: "stems",
+      });
       const fresh = await db.samples.get(this.sampleId);
       if (fresh?.tags?.includes(ML_TAG.demucs)) {
         toast(t("library.separateDone"), "success");
         this.#skipLeaveGuard = true;
         this.dirty = false;
+        clearEditorHandoff();
         navigate({ name: "library" });
         return;
       }
@@ -1850,6 +1904,154 @@ export class GlEditorPage extends LitElement {
     } catch (e) {
       await glDialog.alert(
         `${t("library.separateFailed")}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      unsub();
+      this.separating = false;
+      this.separateProgress = "";
+    }
+  };
+
+  #removeVocals = async (): Promise<void> => {
+    if (!this.sampleId || !this.sample || this.separating) return;
+    const tags = this.sample.tags ?? [];
+    if (tags.some((tag) => tag.startsWith("stem:"))) {
+      await glDialog.alert(t("library.separateSkipStem"));
+      return;
+    }
+    if (tags.includes(ML_TAG.novocals) || tags.includes(ML_TAG.demucsRunning)) {
+      await glDialog.alert(t("library.removeVocalsAlready"));
+      return;
+    }
+    if (this.dirty) {
+      const leave = await this.confirmLeave();
+      if (!leave) return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.removeVocals"),
+      message: t("library.removeVocalsConfirm"),
+    });
+    if (!ok) return;
+    this.#haltPlay();
+    this.separating = true;
+    this.separateProgress = t("library.separateLoading");
+    const unsub = demucsQueue.subscribe((s) => {
+      if (s.currentSampleId !== this.sampleId && s.remaining > 0) {
+        this.separateProgress = tf("library.separateBatchProgress", {
+          i: Math.min(s.waveDone + 1, Math.max(1, s.waveTotal)),
+          n: s.waveTotal,
+          label: t("library.removeVocalsWorking"),
+        });
+        return;
+      }
+      const pct = Math.round(s.ratio * 100);
+      const label =
+        s.phase === "loading"
+          ? `${t("library.separateLoading")} ${pct}%`
+          : `${t("library.removeVocalsWorking")} ${pct}%`;
+      this.separateProgress =
+        s.waveTotal > 1
+          ? tf("library.separateBatchProgress", {
+              i: Math.min(s.waveDone + 1, s.waveTotal),
+              n: s.waveTotal,
+              label,
+            })
+          : label;
+    });
+    try {
+      const snap = await demucsQueue.enqueueAndWait(this.sampleId, {
+        mode: "novocals",
+      });
+      const childId = snap.lastChildIds?.[0];
+      const fresh = await db.samples.get(this.sampleId);
+      if (fresh?.tags?.includes(ML_TAG.novocals) && childId) {
+        toast(t("library.removeVocalsDone"), "success");
+        this.#skipLeaveGuard = true;
+        this.dirty = false;
+        clearEditorHandoff();
+        navigate({ name: "sample", id: childId });
+        return;
+      }
+      if (snap.lastError) {
+        throw new Error(snap.lastError);
+      }
+      await glDialog.alert(t("library.removeVocalsAlready"));
+    } catch (e) {
+      await glDialog.alert(
+        `${t("library.separateFailed")}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      unsub();
+      this.separating = false;
+      this.separateProgress = "";
+    }
+  };
+
+  #denoise = async (): Promise<void> => {
+    if (!this.sampleId || !this.sample || this.separating) return;
+    const tags = this.sample.tags ?? [];
+    if (tags.includes(stemTag(DENOISED_STEM))) {
+      await glDialog.alert(t("library.denoiseSkipChild"));
+      return;
+    }
+    if (tags.includes(ML_TAG.denoise) || tags.includes(ML_TAG.denoiseRunning)) {
+      await glDialog.alert(t("library.denoiseAlready"));
+      return;
+    }
+    if (this.dirty) {
+      const leave = await this.confirmLeave();
+      if (!leave) return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.denoise"),
+      message: t("library.denoiseConfirm"),
+    });
+    if (!ok) return;
+    this.#haltPlay();
+    this.separating = true;
+    this.separateProgress = t("library.denoiseLoading");
+    const unsub = denoiseQueue.subscribe((s) => {
+      if (s.currentSampleId !== this.sampleId && s.remaining > 0) {
+        this.separateProgress = tf("library.separateBatchProgress", {
+          i: Math.min(s.waveDone + 1, Math.max(1, s.waveTotal)),
+          n: s.waveTotal,
+          label: t("library.denoiseWorking"),
+        });
+        return;
+      }
+      const pct = Math.round(s.ratio * 100);
+      const label =
+        s.phase === "loading"
+          ? `${t("library.denoiseLoading")} ${pct}%`
+          : `${t("library.denoiseWorking")} ${pct}%`;
+      this.separateProgress =
+        s.waveTotal > 1
+          ? tf("library.separateBatchProgress", {
+              i: Math.min(s.waveDone + 1, s.waveTotal),
+              n: s.waveTotal,
+              label,
+            })
+          : label;
+    });
+    try {
+      const snap = await denoiseQueue.enqueueAndWait(this.sampleId);
+      const childId = snap.lastChildIds?.[0];
+      const fresh = await db.samples.get(this.sampleId);
+      if (fresh?.tags?.includes(ML_TAG.denoise) && childId) {
+        toast(t("library.denoiseDone"), "success");
+        this.#skipLeaveGuard = true;
+        this.dirty = false;
+        clearEditorHandoff();
+        navigate({ name: "sample", id: childId });
+        return;
+      }
+      if (snap.lastError) {
+        throw new Error(snap.lastError);
+      }
+      await glDialog.alert(t("library.denoiseAlready"));
+    } catch (e) {
+      await glDialog.alert(
+        `${t("library.denoiseFailed")}: ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
       unsub();
@@ -1871,6 +2073,7 @@ export class GlEditorPage extends LitElement {
     this.#skipLeaveGuard = true;
     this.dirty = false;
     await deleteSample(this.sampleId);
+    clearEditorHandoff();
     navigate({ name: "library" });
   };
 

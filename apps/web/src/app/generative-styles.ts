@@ -1013,7 +1013,7 @@ function fallbackMotif(
       .filter((o) => o < beatsPerBar && rnd() < 0.75)
       .map((o) => push(o, (rnd() * 2 - 1) * 1.5, o === 0));
   }
-  if (role === "chord") return [push(0, 0, true)];
+  if (role === "chord" || role === "arp") return [push(0, 0, true)];
   if (role === "bass") {
     const hits = [push(0, 0.5, true)];
     if (beatsPerBar >= 3 && rnd() < 0.7) hits.push(push(2, -0.5, false));
@@ -1057,6 +1057,9 @@ export function buildStyleMotif(
       break;
     case "lead":
       specs = bank.lead;
+      break;
+    case "arp":
+      specs = bank.chord;
       break;
     default:
       specs = undefined;

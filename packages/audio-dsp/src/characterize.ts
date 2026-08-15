@@ -38,7 +38,8 @@ const PITCH_MIN_CORR = 0.55;
 const DESCRIPTOR_FRAMES = 16;
 const PITCH_WINDOW = 4096;
 
-function hzToNoteName(hz: number): string {
+/** MIDI-style note label from Hz (e.g. `A4`). */
+export function hzToNoteName(hz: number): string {
   const midi = Math.round(69 + 12 * Math.log2(hz / 440));
   const pc = ((midi % 12) + 12) % 12;
   const oct = Math.floor(midi / 12) - 1;

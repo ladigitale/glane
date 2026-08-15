@@ -16,6 +16,7 @@ import {
   PROJECT_CHANGE_EVENT,
   projectWorkspace,
 } from "./project-workspace.js";
+import { peekEditorHandoff } from "./editor-handoff.js";
 import { paletteKey, prefsFormKey, projectPickKey } from "./dp-keys.js";
 import type { PrefsForm } from "./dp-keys.js";
 import "./locale-switch.js";
@@ -32,6 +33,7 @@ import "./pages/capture-page.js";
 import "./pages/library-page.js";
 import "./pages/editor-page.js";
 import type { GlEditorPage } from "./pages/editor-page.js";
+import "./pages/synth-page.js";
 import "./pages/sequencer-page.js";
 import "./pages/privacy-page.js";
 import "./pages/diagnostic-page.js";
@@ -274,6 +276,12 @@ export class GlApp extends LitElement {
         route: { name: "library" },
       },
       {
+        href: pathFor({ name: "synth" }),
+        label: t("nav.synth"),
+        icon: "sliders",
+        route: { name: "synth" },
+      },
+      {
         href: pathFor({
           name: "project",
           id: this.currentProjectId || undefined,
@@ -315,8 +323,18 @@ export class GlApp extends LitElement {
   /** Selected nav item from app route (SPA + /project/:id). */
   #navActive(link: { route: Route }): boolean {
     const name = link.route.name;
+    if (this.route.name === "sample") {
+      // Clip → editor from arrangement keeps "Arrangement" highlighted.
+      const fromProject = peekEditorHandoff()?.from === "project";
+      if (name === "project") return fromProject;
+      if (name === "library") return !fromProject;
+      return false;
+    }
     if (name === "library") {
-      return this.route.name === "library" || this.route.name === "sample";
+      return this.route.name === "library";
+    }
+    if (name === "synth") {
+      return this.route.name === "synth";
     }
     return this.route.name === name;
   }
@@ -608,6 +626,10 @@ export class GlApp extends LitElement {
         return html`<gl-library-page></gl-library-page>`;
       case "sample":
         return html`<gl-editor-page .sampleId=${this.route.id}></gl-editor-page>`;
+      case "synth":
+        return html`<gl-synth-page
+          .sampleId=${this.route.id ?? ""}
+        ></gl-synth-page>`;
       case "project":
         return html`<gl-sequencer-page
           .projectId=${this.route.id ?? this.currentProjectId}

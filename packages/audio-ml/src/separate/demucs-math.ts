@@ -8,10 +8,23 @@ export const DEMUCS_STRIDE = DEMUCS_N_SAMPLES - DEMUCS_OVERLAP;
 export const DEMUCS_STEMS = ["drums", "bass", "other", "vocals"] as const;
 export type DemucsStemName = (typeof DEMUCS_STEMS)[number];
 
+/** Stems mixed for “remove vocals” (skip vocals specialist). */
+export const DEMUCS_INSTRUMENTAL_STEMS = [
+  "drums",
+  "bass",
+  "other",
+] as const satisfies readonly DemucsStemName[];
+
+export const INSTRUMENTAL_STEM = "instrumental" as const;
+/** Child from RNNoise denoise (library / editor). */
+export const DENOISED_STEM = "denoised" as const;
+
 export const STEM_TAG_PREFIX = "stem:";
 export const ML_DEMUCS_TAG = "ml:demucs";
 
-export function stemTag(name: DemucsStemName): string {
+export function stemTag(
+  name: DemucsStemName | typeof INSTRUMENTAL_STEM | typeof DENOISED_STEM,
+): string {
   return `${STEM_TAG_PREFIX}${name}`;
 }
 

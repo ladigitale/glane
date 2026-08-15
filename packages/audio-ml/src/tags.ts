@@ -7,6 +7,11 @@ export const ML_TAG = {
   clap: "ml:clap",
   demucs: "ml:demucs",
   demucsRunning: "ml:demucs-running",
+  /** Parent had vocals removed (instrumental child exists). */
+  novocals: "ml:novocals",
+  /** Parent has an RNNoise-denoised child. */
+  denoise: "ml:denoise",
+  denoiseRunning: "ml:denoise-running",
 } as const;
 
 export const YAMNET_TAG_PREFIX = "yamnet:";
@@ -21,7 +26,10 @@ export function isMlStatusTag(tag: string): boolean {
     tag === ML_TAG.yamnet ||
     tag === ML_TAG.clap ||
     tag === ML_TAG.demucs ||
-    tag === ML_TAG.demucsRunning
+    tag === ML_TAG.demucsRunning ||
+    tag === ML_TAG.novocals ||
+    tag === ML_TAG.denoise ||
+    tag === ML_TAG.denoiseRunning
   );
 }
 

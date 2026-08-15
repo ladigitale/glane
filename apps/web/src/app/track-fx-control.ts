@@ -1,4 +1,8 @@
 import {
+  COMPRESS_RATIO_MAX,
+  COMPRESS_RATIO_MIN,
+  COMPRESS_THRESHOLD_DB_MAX,
+  COMPRESS_THRESHOLD_DB_MIN,
   DEFAULT_TRACK_FX,
   TRACK_ATTACK_MS_MAX,
   TRACK_DECAY_MS_MAX,
@@ -31,6 +35,7 @@ const FX_LABEL: Record<TrackFxType, string> = {
   chorus: "Chorus",
   tremolo: "Tremolo",
   vibrato: "Vibrato",
+  compressor: "Compresseur",
 };
 
 const FX_TYPES = Object.keys(FX_LABEL) as TrackFxType[];
@@ -88,6 +93,9 @@ function wetHint(fx: TrackFx): string {
   }
   if (fx.type === "tremolo" || fx.type === "vibrato") {
     return `${fx.rateHz.toFixed(1)} Hz · depth ${fx.depth.toFixed(2)}`;
+  }
+  if (fx.type === "compressor") {
+    return `${Math.round(fx.thresholdDb)} dB · ${fx.ratio.toFixed(1)}:1`;
   }
   return "";
 }
@@ -147,19 +155,29 @@ export class GlTrackFxControl extends LitElement {
   @property() size: "2xs" | "xs" | "sm" | "md" = "2xs";
   /** Sequencer gutter — type only, hint stays on the title. */
   @property({ type: Boolean }) compact = false;
+  /**
+   * Master bus / wet-only: hide HP / LP / ADSR (tone + envelope stay track-only).
+   */
+  @property({ type: Boolean }) wetOnly = false;
+  /** Accessible name for the trigger button. */
+  @property() fxAriaLabel = "Effet piste";
 
   @state() private settingsOpen = false;
 
   override render() {
     const fx = normalizeTrackFx(this.fx);
     const hasWet = fx.type !== "none";
-    const hasHp = trackFxHasHp(fx);
-    const hasLp = trackFxHasLp(fx);
-    const hasEnv = trackFxHasEnvelope(fx);
+    const hasHp = !this.wetOnly && trackFxHasHp(fx);
+    const hasLp = !this.wetOnly && trackFxHasLp(fx);
+    const hasEnv = !this.wetOnly && trackFxHasEnvelope(fx);
     const hasFilters = hasHp || hasLp || hasEnv;
-    const active = trackFxIsActive(fx);
-    const hint = fxHint(fx);
-    const trigger = triggerLabel(fx, hasWet);
+    const active = this.wetOnly
+      ? hasWet
+      : trackFxIsActive(fx);
+    const hint = this.wetOnly ? wetHint(fx) : fxHint(fx);
+    const trigger = this.wetOnly
+      ? FX_LABEL[fx.type]
+      : triggerLabel(fx, hasWet);
     const canEdit = hasWet || hasFilters;
     const showActions =
       (this.showSettings && canEdit) || (this.showApply && (hasWet || active));
@@ -174,8 +192,8 @@ export class GlTrackFxControl extends LitElement {
           size=${this.size}
           variant=${active ? "default" : "outline"}
           type=${active ? "primary" : "neutral"}
-          data-aria-label="Effet piste"
-          title=${hint ? `${trigger} · ${hint}` : "Effet piste"}
+          data-aria-label=${this.fxAriaLabel}
+          title=${hint ? `${trigger} · ${hint}` : this.fxAriaLabel}
           ?active=${active}
         >
           ${this.compact
@@ -200,27 +218,31 @@ export class GlTrackFxControl extends LitElement {
               `,
             )}
           </sonic-menu>
-          <sonic-divider></sonic-divider>
-          <sonic-menu direction="column" align="left" size="sm">
-            <sonic-menu-item
-              ?active=${hasHp}
-              @click=${() => this.#toggle(trackFxToggleHp)}
-            >
-              Passe-haut
-            </sonic-menu-item>
-            <sonic-menu-item
-              ?active=${hasLp}
-              @click=${() => this.#toggle(trackFxToggleLp)}
-            >
-              Passe-bas
-            </sonic-menu-item>
-            <sonic-menu-item
-              ?active=${hasEnv}
-              @click=${() => this.#toggle(trackFxToggleAdsr)}
-            >
-              ADSR
-            </sonic-menu-item>
-          </sonic-menu>
+          ${this.wetOnly
+            ? nothing
+            : html`
+                <sonic-divider></sonic-divider>
+                <sonic-menu direction="column" align="left" size="sm">
+                  <sonic-menu-item
+                    ?active=${hasHp}
+                    @click=${() => this.#toggle(trackFxToggleHp)}
+                  >
+                    Passe-haut
+                  </sonic-menu-item>
+                  <sonic-menu-item
+                    ?active=${hasLp}
+                    @click=${() => this.#toggle(trackFxToggleLp)}
+                  >
+                    Passe-bas
+                  </sonic-menu-item>
+                  <sonic-menu-item
+                    ?active=${hasEnv}
+                    @click=${() => this.#toggle(trackFxToggleAdsr)}
+                  >
+                    ADSR
+                  </sonic-menu-item>
+                </sonic-menu>
+              `}
           ${showActions
             ? html`
                 <sonic-divider></sonic-divider>
@@ -325,7 +347,7 @@ export class GlTrackFxControl extends LitElement {
     return html`
       <div class="flex flex-col gap-3 text-content">
         ${this.#wetParams(fx)}
-        ${this.#filterParams(fx)}
+        ${this.wetOnly ? nothing : this.#filterParams(fx)}
       </div>
     `;
   }
@@ -422,6 +444,39 @@ export class GlTrackFxControl extends LitElement {
           )}
           ${this.#slider("Profondeur", fx.depth, 0, 1, 0.01, (v) =>
             this.#patch({ depth: v }, false),
+          )}
+        </div>
+      `;
+    }
+    if (fx.type === "compressor") {
+      return html`
+        <div class="flex flex-col gap-2">
+          ${this.#slider(
+            "Seuil (dB)",
+            fx.thresholdDb,
+            COMPRESS_THRESHOLD_DB_MIN,
+            COMPRESS_THRESHOLD_DB_MAX,
+            1,
+            (v) => this.#patch({ thresholdDb: v }, false),
+            `${Math.round(fx.thresholdDb)} dB`,
+          )}
+          ${this.#slider(
+            "Ratio",
+            fx.ratio,
+            COMPRESS_RATIO_MIN,
+            COMPRESS_RATIO_MAX,
+            0.1,
+            (v) => this.#patch({ ratio: v }, false),
+            `${fx.ratio.toFixed(1)}:1`,
+          )}
+          ${this.#slider(
+            "Makeup",
+            fx.mix,
+            0,
+            1,
+            0.01,
+            (v) => this.#patch({ mix: v }, false),
+            `+${(fx.mix * 12).toFixed(1)} dB`,
           )}
         </div>
       `;

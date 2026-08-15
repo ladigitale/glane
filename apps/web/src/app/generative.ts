@@ -18,9 +18,10 @@ import {
   type TrackFx,
 } from "@glane/core-model";
 import {
-  expandChordTimeline,
+  buildSectionHarmonyTimeline,
+  pickArpCell,
   pickMelodyCell,
-  pickProgressionBank,
+  type ArpEvent,
   type ChordTone,
   type HarmonicPalette,
   type MelodyEvent,
@@ -257,6 +258,7 @@ function roleSpectralTarget(role: ExprRole): {
     case "chord":
       return { idealHz: 480, bands: ["low", "mid"] };
     case "lead":
+    case "arp":
       return { idealHz: 1600, bands: ["mid", "high"] };
     case "loop":
       return { idealHz: 650, bands: ["low", "mid"] };
@@ -345,6 +347,7 @@ function roleEqBands(
         high: 0.92 + rnd() * 0.1,
       };
     case "lead":
+    case "arp":
       return {
         low: 0.68 + rnd() * 0.12,
         mid: 1.05 + rnd() * 0.1,
@@ -557,6 +560,7 @@ function sectionAllowsRole(
       if (role === "kick" || role === "perc")
         return progress > 0.15 || rnd() < 0.35 + e * 0.2;
       if (role === "lead") return progress > 0.6 && rnd() < 0.28 + e * 0.22;
+      if (role === "arp") return progress > 0.35 && rnd() < 0.4 + e * 0.25;
       if (role === "chord") return rnd() < 0.4 + e * 0.15;
       if (role === "bass") return progress > 0.1 || rnd() < 0.55;
       // texture / loop: often present but thinned by density + stride
@@ -564,6 +568,7 @@ function sectionAllowsRole(
     }
     case "verse": {
       if (role === "lead") return rnd() < 0.45 + e * 0.3;
+      if (role === "arp") return rnd() < 0.55 + e * 0.25;
       if (role === "fx") return rnd() < 0.3 + e * 0.2;
       if (role === "hat") return rnd() < 0.75 + e * 0.15;
       return true;
@@ -571,6 +576,7 @@ function sectionAllowsRole(
     case "prechorus": {
       // Build: almost full, lead still restrained
       if (role === "lead") return rnd() < 0.55 + e * 0.3;
+      if (role === "arp") return rnd() < 0.7 + e * 0.2;
       if (role === "fx") return rnd() < 0.4 + e * 0.25;
       return true;
     }
@@ -591,6 +597,7 @@ function sectionAllowsRole(
       const keep = 1 - progress * 0.9;
       if (isDrumRole(role)) return rnd() < keep * (0.35 + e * 0.2);
       if (role === "lead") return rnd() < keep * 0.35;
+      if (role === "arp") return rnd() < keep * 0.4;
       if (role === "bass" || role === "chord")
         return rnd() < keep * 0.55 + 0.1;
       if (role === "fx") return rnd() < keep * 0.4;
@@ -601,7 +608,13 @@ function sectionAllowsRole(
   }
 }
 
-type MotifHit = { tickInBar: number; gainDb: number; accent: boolean };
+type MotifHit = {
+  tickInBar: number;
+  gainDb: number;
+  accent: boolean;
+  /** Lead cell degree (chord-relative); survives hit filtering. */
+  melodyDegree?: number;
+};
 
 const ROLE_TRACK_ORDER: ExprRole[] = [
   "kick",
@@ -610,6 +623,7 @@ const ROLE_TRACK_ORDER: ExprRole[] = [
   "bass",
   "chord",
   "lead",
+  "arp",
   "texture",
   "loop",
   "perc",
@@ -623,6 +637,7 @@ const TEXTURE_ROLES: readonly ExprRole[] = [
   "fx",
   "chord",
   "lead",
+  "arp",
   "bass",
 ];
 
@@ -633,7 +648,8 @@ const ROLE_FALLBACKS: Record<ExprRole, ExprRole[]> = {
   perc: ["hat", "snare", "kick"],
   bass: ["chord", "lead", "loop"],
   chord: ["lead", "texture", "bass"],
-  lead: ["chord", "loop", "fx"],
+  lead: ["arp", "chord", "loop", "fx"],
+  arp: ["lead", "chord", "bass"],
   texture: ["fx", "chord", "loop"],
   loop: ["texture", "perc", "chord"],
   fx: ["texture", "perc", "hat"],
@@ -696,6 +712,11 @@ export function sampleSourceMidi(s: SequenceSampleIn): number | null {
   return null;
 }
 
+/** True when we can safely retune from a recorded fundamental. */
+function sampleHasFundamental(s: SequenceSampleIn): boolean {
+  return sampleSourceMidi(s) != null;
+}
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
@@ -751,7 +772,9 @@ function isDrumRole(role: ExprRole): boolean {
 }
 
 function isMelodicRole(role: ExprRole): boolean {
-  return role === "bass" || role === "chord" || role === "lead";
+  return (
+    role === "bass" || role === "chord" || role === "lead" || role === "arp"
+  );
 }
 
 function dominantSampleClass(s: SequenceSampleIn): string {
@@ -1419,10 +1442,41 @@ function melodyCellToHits(
       tickInBar: applyGroove(Math.round(t), groove, beatsPerBar, ppq),
       gainDb: ev.accent ? 0.5 : -1,
       accent: !!ev.accent,
+      melodyDegree: ev.degree,
     });
     t += ev.sixteenths * ticksPer16;
   }
-  return hits.length > 0 ? hits : [{ tickInBar: 0, gainDb: 0, accent: true }];
+  return hits.length > 0
+    ? hits
+    : [{ tickInBar: 0, gainDb: 0, accent: true, melodyDegree: 0 }];
+}
+
+/** Arp cell → hits; skips rests (`degree: null`). Degrees are chord-relative. */
+function arpCellToHits(
+  cell: readonly ArpEvent[],
+  ppq: number,
+  beatsPerBar: number,
+  groove: GrooveKind,
+): MotifHit[] {
+  const tpb = beatsPerBar * ppq;
+  const ticksPer16 = ppq / 4;
+  let t = 0;
+  const hits: MotifHit[] = [];
+  for (const ev of cell) {
+    if (t >= tpb) break;
+    if (ev.degree != null) {
+      hits.push({
+        tickInBar: applyGroove(Math.round(t), groove, beatsPerBar, ppq),
+        gainDb: ev.accent ? 0.5 : -0.5,
+        accent: !!ev.accent,
+        melodyDegree: ev.degree,
+      });
+    }
+    t += ev.sixteenths * ticksPer16;
+  }
+  return hits.length > 0
+    ? hits
+    : [{ tickInBar: 0, gainDb: 0, accent: true, melodyDegree: 0 }];
 }
 
 function evolveMotifHits(
@@ -1652,6 +1706,27 @@ function scoreSampleForRole(
   if (role === "bass" && (sampleSourceMidi(s) ?? 60) < 52) score -= 1;
   if (role === "chord" && (s.harmonicity ?? 0) > 0.35) score -= 1;
   if (role === "lead" && (s.harmonicity ?? 0) > 0.4) score -= 0.6;
+  if (role === "arp") {
+    // Duration irrelevant — long takes are gated + ADSR (preserve dest pitch).
+    if ((s.harmonicity ?? 0) > 0.4) score -= 1;
+    if (sampleSourceMidi(s) != null) score -= 1.2;
+    if (isMelodicClass(s.class, s.harmonicity)) score -= 0.8;
+  }
+  // Melodic placement always retunes from recorded fundamental — require it.
+  if (
+    (role === "arp" ||
+      role === "lead" ||
+      role === "bass" ||
+      role === "chord") &&
+    sampleSourceMidi(s) == null
+  ) {
+    score += 6;
+  } else if (
+    (role === "arp" || role === "lead" || role === "bass" || role === "chord") &&
+    sampleSourceMidi(s) != null
+  ) {
+    score -= 1.5;
+  }
   // Seat the voice in the mix: prefer samples whose centroid matches the role band
   score += spectralFitPenalty(s, role);
   // Loudness / peak: prefer controlled levels for sustained roles
@@ -1674,7 +1749,7 @@ function scoreSampleForRole(
         ? scores.percussive
         : role === "texture" || role === "loop"
           ? Math.max(scores.texture ?? 0, scores.rhythmic ?? 0)
-          : role === "lead" || role === "bass" || role === "chord"
+          : role === "lead" || role === "bass" || role === "chord" || role === "arp"
             ? Math.max(scores.tonal ?? 0, scores.voice ?? 0)
             : undefined;
     if (want != null && want > 0.4) score -= want;
@@ -1709,6 +1784,22 @@ function assignTrackRoles(
   for (const s of pool) {
     const r = resolveExprRole(s);
     available.set(r, (available.get(r) ?? 0) + 1);
+  }
+
+  // Tonal pitched samples can drive an arp track (any length — gated at place time).
+  let melodicOneshots = 0;
+  for (const s of pool) {
+    const r = resolveExprRole(s);
+    if (
+      (r === "lead" || r === "chord" || r === "bass" || r === "arp") &&
+      s.durationMs > 40 &&
+      (isMelodicClass(s.class, s.harmonicity) || sampleSourceMidi(s) != null)
+    ) {
+      melodicOneshots += 1;
+    }
+  }
+  if (melodicOneshots >= 2) {
+    available.set("arp", Math.max(available.get("arp") ?? 0, melodicOneshots));
   }
 
   const preferDrums = drumsVsTexture >= 0.5;
@@ -1790,38 +1881,154 @@ function chordToneSemis(
   return (scale[deg] ?? 0) + oct * 12;
 }
 
-/** True when sounding pitch-class (source + transpose) is on the scale. */
+/** True when sounding pitch-class (source + transpose) is in allowed rels. */
 function isScaleCompatibleTranspose(
   fromMidi: number,
   semis: number,
   rootPc: number,
-  scale: readonly number[],
+  allowedRels: readonly number[],
 ): boolean {
   const pc = (((Math.round(fromMidi) + semis) % 12) + 12) % 12;
   const rel = (pc - rootPc + 12) % 12;
-  return scale.includes(rel);
+  return allowedRels.includes(rel);
 }
 
 /**
- * Transposes in [-maxDown, maxUp] that land on a scale degree (vs tonic).
- * Falls back to `[0]` only when no in-scale pitch fits the window.
+ * True when perceived pitch (transpose + continuous stretch offset) lands on
+ * an allowed degree. Fractional stretch is rounded for PC membership — callers
+ * should avoid large stretch offsets on melodic parts (see pickStretchMode).
  */
-function scaleCompatibleTransposes(
+function isScaleCompatibleSounding(
+  fromMidi: number,
+  semis: number,
+  stretchSemis: number,
+  rootPc: number,
+  allowedRels: readonly number[],
+): boolean {
+  const sounding = Math.round(fromMidi) + semis + stretchSemis;
+  const pc = (((Math.round(sounding) % 12) + 12) % 12);
+  const rel = (pc - rootPc + 12) % 12;
+  return allowedRels.includes(rel);
+}
+
+/**
+ * Transposes in [-maxDown, maxUp] that land on an allowed degree (vs tonic).
+ * `allowedRels` defaults to the full scale; pass chord-tone rels for tighter
+ * harmonic lock. If the window is empty, expands to ±24 — never falls back
+ * to bare `[0]` when unison is off-key (that produced false notes).
+ */
+export function scaleCompatibleTransposes(
   fromMidi: number,
   rootPc: number,
   scale: readonly number[],
   maxUp: number,
   maxDown: number,
+  stretchSemis = 0,
+  allowedRels?: readonly number[],
 ): number[] {
+  const rels = allowedRels && allowedRels.length > 0 ? allowedRels : scale;
   const up = Math.max(0, maxUp);
   const down = Math.max(0, maxDown);
-  const out: number[] = [];
-  for (let semis = -down; semis <= up; semis++) {
-    if (isScaleCompatibleTranspose(fromMidi, semis, rootPc, scale)) {
-      out.push(semis);
+  const collect = (hi: number, lo: number): number[] => {
+    const out: number[] = [];
+    for (let semis = -lo; semis <= hi; semis++) {
+      if (
+        stretchSemis === 0
+          ? isScaleCompatibleTranspose(fromMidi, semis, rootPc, rels)
+          : isScaleCompatibleSounding(
+              fromMidi,
+              semis,
+              stretchSemis,
+              rootPc,
+              rels,
+            )
+      ) {
+        out.push(semis);
+      }
     }
+    return out;
+  };
+  const inWindow = collect(up, down);
+  if (inWindow.length > 0) return inWindow;
+  const expanded = collect(24, 24);
+  if (expanded.length > 0) return expanded;
+  // Pathological (empty scale): keep unison rather than throw.
+  return [0];
+}
+
+/**
+ * Pitch-classes (semitones above tonic) allowed for this hit.
+ * Bass/chord stay on the chord; lead accents too; weak lead beats may pass.
+ */
+function harmonicAllowedRels(
+  role: ExprRole,
+  scale: readonly number[],
+  chordDegree: number,
+  chordTones: readonly ChordTone[],
+  accent: boolean,
+): readonly number[] {
+  const toneRels = (tones: readonly ChordTone[]): number[] => {
+    const out: number[] = [];
+    for (const tone of tones) {
+      const semis = chordToneSemis(scale, chordDegree, tone);
+      const rel = ((semis % 12) + 12) % 12;
+      if (!out.includes(rel)) out.push(rel);
+    }
+    return out.length > 0 ? out : [...scale];
+  };
+
+  if (role === "bass") {
+    // Root on accents; root + fifth on weak beats (no random scale wander).
+    return accent
+      ? toneRels([0])
+      : toneRels([0, 4]);
   }
-  return out.length > 0 ? out : [0];
+  if (role === "chord") {
+    return toneRels(chordTones.length > 0 ? chordTones : [0, 2, 4]);
+  }
+  if (role === "arp") {
+    // Strict chord tones (incl. octave / 7th via cell degree → snap window).
+    return toneRels(chordTones.length > 0 ? chordTones : [0, 2, 4]);
+  }
+  if (role === "lead") {
+    if (accent) {
+      return toneRels(chordTones.length > 0 ? chordTones : [0, 2, 4]);
+    }
+    return scale;
+  }
+  return scale;
+}
+
+/** Roles / samples that must stay on the song scale. */
+function shouldEnforceScale(
+  role: ExprRole,
+  sample: SequenceSampleIn,
+): boolean {
+  if (isMelodicRole(role)) return true;
+  if (role === "chord") return true;
+  if (role === "texture" || role === "loop") {
+    return (
+      isMelodicClass(sample.class, sample.harmonicity) ||
+      sampleSourceMidi(sample) != null
+    );
+  }
+  // Pitched drums / fx still read as notes when analysis found a fundamental.
+  if (
+    (isDrumRole(role) || role === "fx") &&
+    sampleSourceMidi(sample) != null &&
+    isMelodicClass(sample.class, sample.harmonicity)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Resample rate-pitches continuously — kills scale tuning on melodic parts. */
+function forbidsResamplePitch(
+  role: ExprRole,
+  sample: SequenceSampleIn,
+): boolean {
+  return shouldEnforceScale(role, sample);
 }
 
 /** Nearest allowed transpose to `preferred` (ties → prefer smaller |semis|). */
@@ -1854,6 +2061,7 @@ function pickPitchSemitones(opts: {
   chordTones?: readonly ChordTone[];
   toneIndex?: number;
   melodyDegree?: number;
+  accent?: boolean;
   section: SongSection;
   energy: number;
   rnd: () => number;
@@ -1871,6 +2079,7 @@ function pickPitchSemitones(opts: {
     chordTones,
     toneIndex,
     melodyDegree,
+    accent,
     section,
     energy,
     rnd,
@@ -1881,50 +2090,152 @@ function pickPitchSemitones(opts: {
   const down = Math.max(0, maxDown);
   const clampPitch = (semis: number) => clamp(semis, -down, up);
   const source = sampleSourceMidi(sample);
+  // Melodic roles must retune from the recorded fundamental — never assume MIDI 60.
+  if (
+    source == null &&
+    (role === "arp" ||
+      role === "lead" ||
+      role === "bass" ||
+      role === "chord")
+  ) {
+    return 0;
+  }
+  const enforce = shouldEnforceScale(role, sample);
+  const tones = chordTones ?? ([0, 2, 4] as const);
+  const allowedRels = enforce
+    ? harmonicAllowedRels(
+        role,
+        scale,
+        degreeHint,
+        tones,
+        accent ?? true,
+      )
+    : scale;
 
-  if (up <= 0 && down <= 0) return 0;
+  if (up <= 0 && down <= 0) {
+    // No retune budget: if we must stay on-scale, still snap via expanded search.
+    if (!enforce || source == null) return 0;
+    const allowed = scaleCompatibleTransposes(
+      source,
+      rootPc,
+      scale,
+      0,
+      0,
+      0,
+      allowedRels,
+    );
+    return nearestAllowedTranspose(0, allowed);
+  }
 
   if (isDrumRole(role) || role === "fx") {
-    if (rnd() > 0.2 + energy * 0.15) return 0;
+    if (rnd() > 0.2 + energy * 0.15) {
+      if (!enforce || source == null) return 0;
+      return nearestAllowedTranspose(
+        0,
+        scaleCompatibleTransposes(
+          source,
+          rootPc,
+          scale,
+          up,
+          down,
+          0,
+          allowedRels,
+        ),
+      );
+    }
     const lim =
       section.kind === "bridge" || section.kind === "chorus" ? 7 : 4;
     const hi = Math.min(up, lim);
     const lo = Math.min(down, lim);
     if (hi <= 0 && lo <= 0) return 0;
-    return clampPitch(pickInt(rnd, -lo, hi));
+    const raw = clampPitch(pickInt(rnd, -lo, hi));
+    if (!enforce || source == null) return raw;
+    return nearestAllowedTranspose(
+      raw,
+      scaleCompatibleTransposes(
+        source,
+        rootPc,
+        scale,
+        up,
+        down,
+        0,
+        allowedRels,
+      ),
+    );
   }
 
   if (role === "texture" || role === "loop") {
     if (!isMelodicClass(sample.class, sample.harmonicity)) {
-      if (rnd() >= 0.25 + energy * 0.2) return 0;
+      if (rnd() >= 0.25 + energy * 0.2) {
+        if (!enforce || source == null) return 0;
+        return nearestAllowedTranspose(
+          0,
+          scaleCompatibleTransposes(
+            source,
+            rootPc,
+            scale,
+            up,
+            down,
+            0,
+            allowedRels,
+          ),
+        );
+      }
       const hi = Math.min(7, up);
       const lo = Math.min(7, down);
-      return hi > 0 || lo > 0 ? clampPitch(pickInt(rnd, -lo, hi)) : 0;
+      const raw =
+        hi > 0 || lo > 0 ? clampPitch(pickInt(rnd, -lo, hi)) : 0;
+      if (!enforce || source == null) return raw;
+      return nearestAllowedTranspose(
+        raw,
+        scaleCompatibleTransposes(
+          source,
+          rootPc,
+          scale,
+          up,
+          down,
+          0,
+          allowedRels,
+        ),
+      );
     }
   }
 
   let degree = scale[degreeHint % scale.length] ?? 0;
-  if (role === "chord" && chordTones && chordTones.length > 0) {
-    const tone = chordTones[(toneIndex ?? 0) % chordTones.length]!;
+  if (role === "chord" && tones.length > 0) {
+    const tone = tones[(toneIndex ?? 0) % tones.length]!;
     degree = chordToneSemis(scale, degreeHint, tone);
-  } else if (role === "lead" && melodyDegree != null) {
-    const md = melodyDegree;
+  } else if (
+    (role === "lead" || role === "arp") &&
+    melodyDegree != null
+  ) {
+    // Cell degrees are chord-relative: transpose onto current chord root.
+    const md = melodyDegree + degreeHint;
     const oct = Math.floor(md / scale.length);
-    degree = (scale[((md % scale.length) + scale.length) % scale.length] ?? 0) +
+    degree =
+      (scale[((md % scale.length) + scale.length) % scale.length] ?? 0) +
       oct * 12;
   } else if (role === "bass") {
-    degree = scale[degreeHint % scale.length] ?? 0;
+    // Prefer chord root; weak beats may target the fifth via allowedRels snap.
+    const tone: ChordTone = accent === false && rnd() < 0.35 ? 4 : 0;
+    degree = chordToneSemis(scale, degreeHint, tone);
   }
 
   let octave = 0;
   if (role === "bass") octave = pickInt(rnd, -1, 0);
-  else if (role === "lead") {
+  else if (role === "lead" || role === "arp") {
     octave = pickInt(rnd, 0, 1);
-    if (section.kind === "chorus" && rnd() < 0.35 * energy) octave += 1;
+    if (
+      role === "lead" &&
+      section.kind === "chorus" &&
+      rnd() < 0.35 * energy
+    ) {
+      octave += 1;
+    }
   } else if (role === "chord") octave = toneIndex && toneIndex > 1 ? 1 : 0;
 
   // Prefer an octave that keeps the transpose inside the allowed window,
-  // always snapping to a scale-compatible interval (never a hard min/max).
+  // always snapping to a harmony-compatible interval (never a hard min/max).
   const baseOctave =
     source != null
       ? Math.floor(Math.round(source) / 12) - 1
@@ -1938,11 +2249,13 @@ function pickPitchSemitones(opts: {
     scale,
     up,
     down,
+    0,
+    allowedRels,
   );
   const octCandidates = [octave, 0, -1, 1, -2, 2].filter(
     (o, i, a) => a.indexOf(o) === i,
   );
-  let bestSemis = 0;
+  let bestSemis = nearestAllowedTranspose(0, allowed);
   let bestDist = Infinity;
   for (const oct of octCandidates) {
     const targetMidi = (baseOctave + oct + 1) * 12 + rootPc + degree;
@@ -1956,7 +2269,14 @@ function pickPitchSemitones(opts: {
   }
   let semis = bestSemis;
 
-  if (semis === 0 && section.evolve > 0.3 && rnd() < section.evolve * energy) {
+  // Melodic ornament only for lead on weak beats — never wander bass/chord off harmony.
+  if (
+    role === "lead" &&
+    accent === false &&
+    semis === 0 &&
+    section.evolve > 0.3 &&
+    rnd() < section.evolve * energy
+  ) {
     const step = scale[pickInt(rnd, 1, scale.length - 1)] ?? 2;
     const evolved = rnd() < 0.5 ? step : -step;
     semis = nearestAllowedTranspose(evolved, allowed);
@@ -2018,6 +2338,7 @@ function overlappingPitchClasses(
  * Retune within the scale window so the sounding dominant does not clash
  * with other clips that overlap in time (pitched or not). Prefers the
  * original target; falls back to unison with an occupant, then nearest allowed.
+ * Always stays on-scale when `enforceScale` (never returns an off-key preferred).
  */
 function avoidFundamentalClash(opts: {
   sample: SequenceSampleIn;
@@ -2031,6 +2352,9 @@ function avoidFundamentalClash(opts: {
   scale: readonly number[];
   maxUp: number;
   maxDown: number;
+  enforceScale: boolean;
+  /** Tighter than scale (chord tones). */
+  allowedRels?: readonly number[];
 }): number {
   const {
     sample,
@@ -2043,18 +2367,91 @@ function avoidFundamentalClash(opts: {
     scale,
     maxUp,
     maxDown,
+    enforceScale,
+    allowedRels,
   } = opts;
   const fromMidi = sampleDominantMidi(sample);
   if (fromMidi == null) return preferredSemis;
 
+  const allowed = scaleCompatibleTransposes(
+    fromMidi,
+    rootPc,
+    scale,
+    maxUp,
+    maxDown,
+    stretchSemis,
+    allowedRels,
+  );
+  const onScalePreferred = enforceScale
+    ? nearestAllowedTranspose(preferredSemis, allowed)
+    : preferredSemis;
+
   const others = overlappingPitchClasses(occupied, startTick, endTick);
-  if (others.length === 0) return preferredSemis;
+  if (others.length === 0) return onScalePreferred;
 
   const sounding = (semis: number) =>
     pitchClassOf(fromMidi, semis + stretchSemis);
-  const preferredPc = sounding(preferredSemis);
+  const preferredPc = sounding(onScalePreferred);
   if (!others.some((pc) => fundamentalsConflict(preferredPc, pc))) {
-    return preferredSemis;
+    return onScalePreferred;
+  }
+
+  const free = allowed.filter(
+    (semis) => !others.some((pc) => fundamentalsConflict(sounding(semis), pc)),
+  );
+  if (free.length > 0) return nearestAllowedTranspose(onScalePreferred, free);
+
+  // No clash-free degree: land on an already-sounding dominant (unison).
+  const unison = allowed.filter((semis) => others.includes(sounding(semis)));
+  if (unison.length > 0) {
+    return nearestAllowedTranspose(onScalePreferred, unison);
+  }
+
+  return onScalePreferred;
+}
+
+/**
+ * After stretch is final: drop rate-pitch if it breaks the scale, then snap
+ * transpose so perceived pitch stays on an allowed degree.
+ */
+function finalizeScalePitch(opts: {
+  sample: SequenceSampleIn;
+  role: ExprRole;
+  pitchSemitones: number;
+  stretchMode: StretchMode;
+  fitFactor: number;
+  rootPc: number;
+  scale: readonly number[];
+  maxUp: number;
+  maxDown: number;
+  allowedRels?: readonly number[];
+}): { pitchSemitones: number; stretchMode: StretchMode; stretchPitch: number } {
+  const { sample, role, rootPc, scale, maxUp, maxDown, allowedRels } = opts;
+  let { pitchSemitones, stretchMode } = opts;
+  // Melodic / chord: only the recorded fundamental (never spectral centroid guess).
+  const fromMidi =
+    isMelodicRole(role) || role === "chord"
+      ? sampleSourceMidi(sample)
+      : (sampleSourceMidi(sample) ?? sampleDominantMidi(sample));
+  const enforce = shouldEnforceScale(role, sample);
+
+  if (!enforce || fromMidi == null) {
+    const stretchPitch =
+      stretchMode === "resample"
+        ? resampleStretchPitchSemis(opts.fitFactor)
+        : 0;
+    return { pitchSemitones, stretchMode, stretchPitch };
+  }
+
+  let stretchPitch =
+    stretchMode === "resample"
+      ? resampleStretchPitchSemis(opts.fitFactor)
+      : 0;
+
+  // Continuous rate-pitch > ~35¢ reads as out-of-tune even if PC rounds OK.
+  if (stretchMode === "resample" && Math.abs(stretchPitch) >= 0.35) {
+    stretchMode = "preserve-pitch";
+    stretchPitch = 0;
   }
 
   const allowed = scaleCompatibleTransposes(
@@ -2063,17 +2460,34 @@ function avoidFundamentalClash(opts: {
     scale,
     maxUp,
     maxDown,
+    stretchPitch,
+    allowedRels,
   );
-  const free = allowed.filter(
-    (semis) => !others.some((pc) => fundamentalsConflict(sounding(semis), pc)),
-  );
-  if (free.length > 0) return nearestAllowedTranspose(preferredSemis, free);
+  pitchSemitones = nearestAllowedTranspose(pitchSemitones, allowed);
+  return { pitchSemitones, stretchMode, stretchPitch };
+}
 
-  // No clash-free degree: land on an already-sounding dominant (unison).
-  const unison = allowed.filter((semis) => others.includes(sounding(semis)));
-  if (unison.length > 0) return nearestAllowedTranspose(preferredSemis, unison);
-
-  return preferredSemis;
+/**
+ * Two length ratios used by stretch / pitch math (must not be swapped):
+ * - `fitFactor` = clip / natural — playback stretch amount; resample pitch.
+ * - `artisticFactor` = clip / (natural × bpmLengthFactor) — stretch beyond
+ *   tempo sync. Duration caps use this so BPM sync itself is not blocked.
+ */
+export function clipStretchFactors(
+  lengthTick: number,
+  naturalTick: number,
+  bpmLengthFactor = 1,
+): { fitFactor: number; artisticFactor: number } {
+  const natural = Math.max(1, naturalTick);
+  const bpmLf =
+    Number.isFinite(bpmLengthFactor) && bpmLengthFactor > 0
+      ? bpmLengthFactor
+      : 1;
+  const fitFactor = lengthTick / natural;
+  return {
+    fitFactor,
+    artisticFactor: lengthTick / Math.max(1, natural * bpmLf),
+  };
 }
 
 /**
@@ -2083,7 +2497,7 @@ function avoidFundamentalClash(opts: {
  * Must NOT use the bpm-relative length factor (natural × bpmLengthFactor) —
  * that cancels the tempo-sync pitch and lets resample exceed the window.
  */
-function resampleStretchPitchSemis(fitFactor: number): number {
+export function resampleStretchPitchSemis(fitFactor: number): number {
   if (!(fitFactor > 0) || !Number.isFinite(fitFactor)) return 0;
   return -12 * Math.log2(fitFactor);
 }
@@ -2303,19 +2717,21 @@ function nearTempoPow2(ratio: number, tolLog2 = 0.08): boolean {
   return Math.abs(Math.log2(ratio / snapped)) <= tolLog2;
 }
 
-/** Stretch toward project BPM when sample has analysisBpm. */
-function bpmSyncStretch(
+/**
+ * Stretch toward project BPM when sample has `analysisBpm`.
+ * Always `preserve-pitch` — tempo lock must not rate-pitch the sample.
+ */
+export function bpmSyncStretch(
   sample: SequenceSampleIn,
   projectBpm: number,
   role: ExprRole,
   rnd: () => number,
   mode: GenTriState = "auto",
-  lockPitch = false,
   lockTempoPow2 = false,
-  /** When both 0, never pick resample (it rate-pitches). */
-  allowResamplePitch = true,
-): { stretchMode: StretchMode; lengthFactor: number } | null {
+): { stretchMode: "preserve-pitch"; lengthFactor: number } | null {
   if (mode === "off") return null;
+  // Arp gates ignore sample tempo — length is cell-driven, pitch via semis.
+  if (role === "arp") return null;
   const src = sample.analysisBpm;
   if (src == null || src < 40 || src > 240) return null;
   let ratio = projectBpm / src;
@@ -2323,43 +2739,25 @@ function bpmSyncStretch(
     ratio = snapTempoRatioPow2(ratio);
   }
   if (Math.abs(ratio - 1) < 0.04) return null;
-  const mild = Math.abs(ratio - 1) <= 0.12;
-  const pickMode = (preferPreserve: boolean): StretchMode => {
-    if (lockPitch || preferPreserve || !mild || !allowResamplePitch) {
-      return "preserve-pitch";
-    }
-    return "resample";
+  const synced = {
+    stretchMode: "preserve-pitch" as const,
+    lengthFactor: 1 / ratio,
   };
-  if (mode === "on") {
-    return {
-      stretchMode: pickMode(false),
-      lengthFactor: 1 / ratio,
-    };
-  }
+  // Forced sync: every role with usable BPM metadata.
+  if (mode === "on") return synced;
   if (isDrumRole(role) && Math.abs(ratio - 1) > 0.25 && rnd() < 0.5) {
-    // Drums: prefer one-shot at native feel unless close
+    // Drums (auto): prefer one-shot at native feel unless close
     return null;
   }
-  if (role === "loop" || role === "texture" || role === "chord") {
-    return {
-      stretchMode: pickMode(false),
-      lengthFactor: 1 / ratio,
-    };
+  if (
+    role === "loop" ||
+    role === "texture" ||
+    role === "chord" ||
+    isMelodicRole(role)
+  ) {
+    return synced;
   }
-  if (isMelodicRole(role)) {
-    return {
-      stretchMode: "preserve-pitch",
-      lengthFactor: 1 / ratio,
-    };
-  }
-  if (lockPitch || !allowResamplePitch) {
-    return rnd() < 0.4
-      ? { stretchMode: "preserve-pitch", lengthFactor: 1 / ratio }
-      : null;
-  }
-  return rnd() < 0.4
-    ? { stretchMode: "resample", lengthFactor: 1 / ratio }
-    : null;
+  return rnd() < 0.4 ? synced : null;
 }
 
 function pickStretchMode(opts: {
@@ -2387,17 +2785,19 @@ function pickStretchMode(opts: {
     allowResamplePitch,
     rnd,
   } = opts;
+  const noResample =
+    lockPitch || !allowResamplePitch || forbidsResamplePitch(role, sample);
   if (stutter) {
     const mode =
-      rnd() < 0.6 || lockPitch || !allowResamplePitch ? "copy" : "resample";
-    return lockPitch ? stretchWithoutPitchShift(mode) : mode;
+      rnd() < 0.6 || noResample ? "copy" : "resample";
+    return noResample ? stretchWithoutPitchShift(mode) : mode;
   }
+  // Arp: gate/truncate only — destination pitch is pitchSemitones, never
+  // rate-pitch or time-stretch from note length vs sample duration.
+  if (role === "arp") return "off";
   if (bpmSync) {
-    let mode = lockPitch
-      ? stretchWithoutPitchShift(bpmSync.stretchMode)
-      : bpmSync.stretchMode;
-    if (!allowResamplePitch && mode === "resample") mode = "preserve-pitch";
-    return mode;
+    // Tempo lock is always preserve-pitch (never resample / rate-pitch).
+    return "preserve-pitch";
   }
 
   const loopish = (sample.loopScore ?? 0) > 0.45;
@@ -2409,8 +2809,7 @@ function pickStretchMode(opts: {
   }
   if (isDrumRole(role)) {
     if (
-      allowResamplePitch &&
-      !lockPitch &&
+      !noResample &&
       rnd() < 0.08 + energy * 0.1 &&
       lengthFactor < 0.85
     ) {
@@ -2425,10 +2824,10 @@ function pickStretchMode(opts: {
     if (role === "texture" || role === "loop") {
       return rnd() < 0.7 ? "preserve-pitch" : "copy";
     }
-    if (lockPitch || !allowResamplePitch) return "preserve-pitch";
+    if (noResample) return "preserve-pitch";
     return rnd() < 0.35 + energy * 0.15 ? "resample" : "preserve-pitch";
   }
-  if (allowResamplePitch && !lockPitch && rnd() < 0.08 + energy * 0.06) {
+  if (!noResample && rnd() < 0.08 + energy * 0.06) {
     return "resample";
   }
   return "off";
@@ -2501,6 +2900,15 @@ function pickLengthTick(opts: {
     const barsHold = section.kind === "chorus" ? 2 : 1;
     lengthTick = Math.max(ticksPerBar, barsHold * ticksPerBar);
     if (nextTick != null) lengthTick = Math.min(lengthTick, nextTick - startTick);
+  } else if (role === "arp") {
+    // Gate to the next cell step — sample length must not drive the note.
+    // Longer takes are truncated (`stretchMode: off`) + track ADSR.
+    const gap = Math.floor(ppq / 32);
+    const untilNext =
+      nextTick != null
+        ? Math.max(minLen, nextTick - startTick - gap)
+        : Math.max(minLen, Math.floor(ppq / 2));
+    lengthTick = untilNext;
   } else if (role === "lead") {
     lengthTick = Math.max(
       minLen,
@@ -2568,6 +2976,12 @@ function pickFades(opts: {
     inHi = accent ? 28 : 55;
     outLo = 18;
     outHi = 40 + energy * 80;
+  } else if (role === "arp") {
+    // Snappy gate — track ADSR does the body; clip fades stay short.
+    inLo = accent ? 0 : 1;
+    inHi = accent ? 4 : 10;
+    outLo = 8;
+    outHi = 22 + energy * 18;
   } else if (role === "texture" || role === "loop" || sample.class === "noise") {
     inLo = 30 + (1 - energy) * 40;
     inHi = 80 + (1 - energy) * 100;
@@ -2834,6 +3248,7 @@ function pickRoleTone(
       maybeLp(0.28 + muffPush * 0.35, 5_000, 14_000);
       break;
     case "lead":
+    case "arp":
       maybeHp(0.3 + brightPush * 0.12, 100, 380);
       maybeLp(0.18 + muffPush * 0.28, 6_000, 16_000);
       break;
@@ -2934,6 +3349,10 @@ function pickRoleEnvelope(
     case "lead":
       p = 0.35 + bias.modBias * 0.15;
       break;
+    case "arp":
+      // Always on — gates long samples into plucked notes.
+      p = 1;
+      break;
     case "loop":
       p = 0.4 + linger * 0.1;
       break;
@@ -2944,7 +3363,7 @@ function pickRoleEnvelope(
       p = 0.5;
       break;
   }
-  if (rnd() >= clamp(p, 0.08, 0.9)) {
+  if (rnd() >= clamp(p, 0.08, 0.9) && role !== "arp") {
     return { ...DEFAULT_TRACK_ADSR };
   }
 
@@ -2990,6 +3409,14 @@ function pickRoleEnvelope(
         scaleMs(50, 220),
         0.75 + rnd() * 0.24,
         scaleMs(90, 420),
+      );
+    case "arp":
+      // Pluck gate: short A/D, low sustain, release fits note tails.
+      return envelope(
+        scaleMs(1, 10) * (1 - snap * 0.55),
+        scaleMs(18, 75),
+        0.18 + rnd() * 0.28,
+        scaleMs(28, 110),
       );
     case "lead":
       return envelope(
@@ -3210,7 +3637,8 @@ function pickRoleFx(
         return fxEq(b.low, b.mid, b.high);
       }
     }
-    case "lead": {
+    case "lead":
+    case "arp": {
       const r = rnd();
       if (r < wetP * bias.echoBias * 0.85) {
         return fxEcho(
@@ -3385,6 +3813,7 @@ function pickTrackMix(
         fx,
       };
     case "lead":
+    case "arp":
       return {
         gainDb: -1 + rnd() * 2 + eGain * 0.4,
         pan: clamp(pan, -0.6, 0.6),
@@ -3644,27 +4073,30 @@ export function planSequence(opts: {
   const scale = lockPitch
     ? MAJOR_SCALE
     : pickScale(pool, rootPc, rnd, scaleMode);
-  const chordTimeline = lockPitch
-    ? []
-    : expandChordTimeline(
-        pickProgressionBank(
-          paletteFromMix(
-            drumsVsTexture,
-            rnd,
-            opts.palette,
-            styleProfile.palette,
-          ),
-          scale === MINOR_SCALE,
-          rnd,
-        ),
-        bars,
-      );
   const sections = planSongForm(bars, rnd, {
     drumsVsTexture,
     energy,
     formStyle,
     formLean: styleProfile.formLean,
   });
+  const chordTimeline = lockPitch
+    ? []
+    : buildSectionHarmonyTimeline(
+        bars,
+        sections.map((s) => ({
+          kind: s.kind,
+          startBar: s.startBar,
+          bars: s.bars,
+        })),
+        paletteFromMix(
+          drumsVsTexture,
+          rnd,
+          opts.palette,
+          styleProfile.palette,
+        ),
+        scale === MINOR_SCALE,
+        rnd,
+      );
 
   const sortedTracks = [...tracks].sort((a, b) => a.index - b.index);
   const roles = assignTrackRoles(
@@ -3771,11 +4203,19 @@ export function planSequence(opts: {
       !lockPitch && role === "lead"
         ? pickMelodyCell(rnd, drumsVsTexture < 0.4)
         : null;
+    const arpCell =
+      !lockPitch && role === "arp"
+        ? pickArpCell(rnd, drumsVsTexture < 0.4 || energy < 0.4)
+        : null;
+    const arpCellAlt =
+      !lockPitch && role === "arp"
+        ? pickArpCell(rnd, true)
+        : null;
 
     const humanizeMs =
       (isDrumRole(role)
         ? 6 + energy * 6
-        : role === "lead"
+        : role === "lead" || role === "arp"
           ? 18 + energy * 10
           : 14) * humanize;
 
@@ -3899,7 +4339,19 @@ export function planSequence(opts: {
         }
 
         let hits: MotifHit[];
-        if (role === "lead" && (leadCell || leadCellAlt)) {
+        if (role === "arp" && (arpCell || arpCellAlt)) {
+          // Library tonal oneshots sequenced on chord tones from the harmony timeline.
+          const cell =
+            section.kind === "bridge" || section.kind === "outro"
+              ? (arpCellAlt ?? arpCell!)
+              : arpCell!;
+          hits = arpCellToHits(cell, ppq, beatsPerBar, groove);
+          if (section.kind === "intro" || section.kind === "outro") {
+            hits = hits.filter((h) => h.accent || rnd() < 0.35);
+          } else if (section.kind === "verse") {
+            hits = hits.filter((h) => h.accent || rnd() < 0.7 + energy * 0.2);
+          }
+        } else if (role === "lead" && (leadCell || leadCellAlt)) {
           const cell =
             section.kind === "bridge" || section.kind === "outro"
               ? (leadCellAlt ?? leadCell!)
@@ -3911,6 +4363,10 @@ export function planSequence(opts: {
             hits = hits.filter((h) => h.accent || rnd() < 0.5);
           } else if (section.kind === "verse") {
             hits = hits.filter((h) => h.accent || rnd() < 0.55 + energy * 0.2);
+          }
+          // Soft mutual gate vs arp ostinato on the same arrangement.
+          if (roles.includes("arp") && rnd() < 0.45) {
+            hits = hits.filter((h) => h.accent || rnd() < 0.35);
           }
         } else {
           hits = evolveMotifHits(baseMotif, {
@@ -3951,6 +4407,18 @@ export function planSequence(opts: {
           const hit = absHits[hi]!;
           const next = absHits[hi + 1]?.tick ?? null;
 
+          // Harmony retune needs the recorded fundamental (pitchHz / noteName).
+          if (
+            !lockPitch &&
+            (role === "arp" ||
+              role === "lead" ||
+              role === "bass" ||
+              role === "chord") &&
+            !sampleHasFundamental(sample)
+          ) {
+            continue;
+          }
+
           const stutter =
             stutterBaseChance > 0 &&
             (role === "lead" || role === "perc" || role === "hat") &&
@@ -3967,9 +4435,7 @@ export function planSequence(opts: {
             role,
             rnd,
             bpmSyncMode,
-            lockPitch,
             lockTempoPow2,
-            allowResamplePitch,
           );
           const bpmLengthFactor = bpmSync?.lengthFactor ?? 1;
 
@@ -3994,7 +4460,8 @@ export function planSequence(opts: {
           const naturalTick = msToLengthTick(sample.durationMs, bpm, ppq);
           // When pow2 lock is on, snap free duration changes to ×¼…×8 of the
           // natural (BPM-synced) length — no arbitrary tempo warps.
-          if (lockTempoPow2 && !stutter) {
+          // Arp gates are harmony-cell driven — never snap to sample duration.
+          if (lockTempoPow2 && !stutter && role !== "arp") {
             const base = Math.max(1, naturalTick * bpmLengthFactor);
             const rawFactor = lengthTick / base;
             const snapped = snapTempoRatioPow2(rawFactor);
@@ -4009,9 +4476,13 @@ export function planSequence(opts: {
               if (lengthTick < Math.floor(ppq / 4)) continue;
             }
           }
-          const factor =
-            lengthTick / Math.max(1, naturalTick * bpmLengthFactor);
+          const { fitFactor, artisticFactor: factor } = clipStretchFactors(
+            lengthTick,
+            naturalTick,
+            bpmLengthFactor,
+          );
 
+          // Library arp / lead: pitch each hit onto the current chord tone.
           let pitchSemitones = lockPitch
             ? 0
             : pickPitchSemitones({
@@ -4020,18 +4491,30 @@ export function planSequence(opts: {
                 rootPc,
                 scale,
                 degreeHint,
-                chordTones: role === "chord" ? chord.tones : undefined,
+                chordTones: chord.tones,
                 toneIndex: role === "chord" ? hi : undefined,
                 melodyDegree:
-                  role === "lead" && leadCell
-                    ? (leadCell[hi % leadCell.length]?.degree ?? degreeHint)
+                  role === "lead" || role === "arp"
+                    ? (hit.melodyDegree ?? degreeHint)
                     : undefined,
+                accent: hit.accent,
                 section,
                 energy,
                 rnd,
                 maxUp: pitchUpSemitones,
                 maxDown: pitchDownSemitones,
               });
+
+          const pitchAllowedRels =
+            !lockPitch && shouldEnforceScale(role, sample)
+              ? harmonicAllowedRels(
+                  role,
+                  scale,
+                  degreeHint,
+                  chord.tones,
+                  hit.accent,
+                )
+              : undefined;
 
           let stretchMode = pickStretchMode({
             sample,
@@ -4045,12 +4528,11 @@ export function planSequence(opts: {
             allowResamplePitch,
             rnd,
           });
-          if (forbidPitchStretch) {
+          // BPM sync needs preserve-pitch; do not replace it with resample.
+          if (forbidPitchStretch && !bpmSync) {
             stretchMode = withoutPreservePitchStretch(stretchMode, lockPitch);
           }
-          // Pitch from resample follows clip/natural duration, not the
-          // bpm-relative `factor` (lengthTick / (natural × bpmLengthFactor)).
-          const fitFactor = lengthTick / Math.max(1, naturalTick);
+          // Resample pitch uses fitFactor (clip/natural), never artisticFactor.
           stretchMode = constrainStretchToPitchBounds(
             stretchMode,
             pitchSemitones,
@@ -4064,9 +4546,11 @@ export function planSequence(opts: {
           );
 
           // Pow2 tempo lock: avoid non-grid resample/stretch; tile or leave native.
+          // Keep BPM sync preserve-pitch (length already snapped when pow2 is on).
           if (
             lockTempoPow2 &&
             !stutter &&
+            !bpmSync &&
             stretchMode !== "off" &&
             stretchMode !== "copy" &&
             !nearTempoPow2(factor) &&
@@ -4079,9 +4563,11 @@ export function planSequence(opts: {
           }
 
           // Tempo-matched loops: prefer a musical sub-window + loop over
-          // stretching the whole take to fill the clip.
+          // stretching the whole take to fill the clip — but not when BPM sync
+          // still needs preserve-pitch to match project tempo.
           if (
             !stutter &&
+            !bpmSync &&
             stretchMode !== "copy" &&
             tempoAlignedForLoop(sample, bpm) &&
             ((sample.loopScore ?? 0) > 0.4 ||
@@ -4096,20 +4582,42 @@ export function planSequence(opts: {
           }
 
           if (!stutter) {
-            stretchMode = constrainStretchToDurationRatio(
+            // Cap artistic stretch (vs tempo-matched length), not raw fitFactor —
+            // otherwise BPM sync itself trips stretchUp/Down and loses tempo lock.
+            const capped = constrainStretchToDurationRatio(
               stretchMode,
-              fitFactor,
+              factor,
               stretchUpRatio,
               stretchDownRatio,
               (sample.loopScore ?? 0) > 0.45,
             );
+            const keepBpmPreserve =
+              bpmSync &&
+              stretchMode === "preserve-pitch" &&
+              capped !== "preserve-pitch";
+            if (!keepBpmPreserve) stretchMode = capped;
           }
 
-          const stretchPitch =
+          let stretchPitch =
             stretchMode === "resample"
               ? resampleStretchPitchSemis(fitFactor)
               : 0;
           if (!lockPitch) {
+            const finalized = finalizeScalePitch({
+              sample,
+              role,
+              pitchSemitones,
+              stretchMode,
+              fitFactor,
+              rootPc,
+              scale,
+              maxUp: pitchUpSemitones,
+              maxDown: pitchDownSemitones,
+              allowedRels: pitchAllowedRels,
+            });
+            pitchSemitones = finalized.pitchSemitones;
+            stretchMode = finalized.stretchMode;
+            stretchPitch = finalized.stretchPitch;
             pitchSemitones = avoidFundamentalClash({
               sample,
               preferredSemis: pitchSemitones,
@@ -4121,7 +4629,11 @@ export function planSequence(opts: {
               scale,
               maxUp: pitchUpSemitones,
               maxDown: pitchDownSemitones,
+              enforceScale: shouldEnforceScale(role, sample),
+              allowedRels: pitchAllowedRels,
             });
+          } else {
+            stretchPitch = 0;
           }
 
           const lengthMs = lengthTickToMs(lengthTick, bpm, ppq);

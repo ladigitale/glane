@@ -20,7 +20,7 @@ ADR-0014 covers sequencer drag/snap. AudioRoom also defines the reference UX for
 |---------|-----------|
 | Mute | Dedicated control (not volume=0); horizontal switch / tap OK |
 | Volume | Compact **rotary** (not a long fader); range ≈ **0…2×** linear gain with magnetic snaps at **0 / 1 / 2**; finer curve below unity |
-| FX | One light **wet** insert per track (None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato); selector + optional param popup — live in the mix. **Always-on** beside it: HP/LP tone + A/R envelope (raises one-shot clip fades; not a second wet rack) |
+| FX | One light **wet** insert per track (None / EQ / Echo / Reverb / Chorus / Tremolo / Vibrato / Compressor); selector + optional param popup — live in the mix. **Always-on** beside it: HP/LP tone + A/R envelope (raises one-shot clip fades; not a second wet rack) |
 
 Rail stays a **column of track controls**, not a floating inspector. Hit targets ≥ 44 px. Solo stays model-backed; UI can stay minimal until needed.
 
@@ -38,6 +38,10 @@ Waveform remains the interaction surface (trim/selection/fades on-canvas). Share
 - AudioRoom visual skin (colors, rotary LED art as literal assets)
 - Deep FX graph, send buses, per-clip inserts beyond fade/gain already on `Clip`
 - Marketplace / sync of FX presets (P5+)
+
+### Master bus (light)
+
+Two serial **wet** inserts (`project.masterFx`), same type palette as tracks (no HP/LP/ADSR on the bus). Live + bounce/export.
 
 ## Consequences
 

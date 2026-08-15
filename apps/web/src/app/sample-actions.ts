@@ -1,13 +1,31 @@
 import {
   createEntityId,
+  EXPR_ROLE_TAG_PREFIX,
   nowIso,
+  type ExprRole,
   type Sample,
   type Session,
 } from "@glane/core-model";
-import { autoCropPcm, audioBufferToInterleaved, durationMsFromPcm, sliceFrames, toMonoPcm } from "@glane/audio-dsp";
+import {
+  autoCropPcm,
+  audioBufferToInterleaved,
+  durationMsFromPcm,
+  hzToNoteName,
+  sliceFrames,
+  toMonoPcm,
+} from "@glane/audio-dsp";
 import { sampleOpfs } from "@glane/audio-io";
+import type { SynthMeta, SynthRoleId } from "@glane/audio-synth";
 import { db } from "./db.js";
 import { loadSampleAudio } from "./load-sample-audio.js";
+import { processQueue } from "./process-queue.js";
+
+/** Map synth card role → core ExprRole (pad → chord). */
+function synthRoleToExpr(role: SynthRoleId | undefined): ExprRole | null {
+  if (!role || role === "pivot") return null;
+  if (role === "pad") return "chord";
+  return role as ExprRole;
+}
 
 /** Marker on stub sessions that hold samples shared into a project. */
 const IMPORT_SESSION_NOTES = "glane:import";
@@ -16,6 +34,12 @@ const IMPORT_SESSION_TITLE = "Importés";
 /** Marker on stub sessions that hold sequencer mix bounces. */
 const EXPORT_SESSION_NOTES = "glane:export";
 const EXPORT_SESSION_TITLE = "Exports";
+
+/** Marker on stub sessions that hold generated synth batches. */
+const SYNTH_SESSION_NOTES = "glane:synth";
+const SYNTH_SESSION_TITLE = "Synthèse";
+const SYNTH_TAG = "synth";
+const SYNTH_ORIGIN = "audio-synth";
 
 /** Soft-delete sample, drop OPFS clip, detach/remove clips that reference it. */
 export async function deleteSample(sampleId: string): Promise<void> {
@@ -172,6 +196,19 @@ export async function ensureExportSession(
     projectId,
     EXPORT_SESSION_NOTES,
     EXPORT_SESSION_TITLE,
+    sampleRate,
+  );
+}
+
+/** Stub session for generative synth batches. */
+export async function ensureSynthSession(
+  projectId: string,
+  sampleRate = 48_000,
+): Promise<Session> {
+  return ensureStubSession(
+    projectId,
+    SYNTH_SESSION_NOTES,
+    SYNTH_SESSION_TITLE,
     sampleRate,
   );
 }
@@ -438,6 +475,113 @@ export async function saveBounceToLibrary(
   };
   await db.samples.put(sample);
   return sample;
+}
+
+export type SynthBatchItem = {
+  pcm: Float32Array;
+  sampleRate: number;
+  channelCount: number;
+  durationMs: number;
+  name: string;
+  meta: SynthMeta;
+};
+
+/** Persist validated synth renders into the project library + polish queue. */
+export async function saveSynthBatch(
+  projectId: string,
+  items: SynthBatchItem[],
+): Promise<number> {
+  if (items.length === 0) return 0;
+  const sampleRate = items[0]?.sampleRate ?? 48_000;
+  const session = await ensureSynthSession(projectId, sampleRate);
+  let n = 0;
+  for (const item of items) {
+    if (item.pcm.length === 0) continue;
+    const id = createEntityId();
+    const now = nowIso();
+    const label = item.name.trim() || "Synth";
+    const durationMs = Math.max(
+      1,
+      item.durationMs ||
+        durationMsFromPcm(item.pcm, item.sampleRate, item.channelCount),
+    );
+    await sampleOpfs.savePcm(
+      id,
+      item.pcm,
+      item.sampleRate,
+      item.channelCount,
+    );
+    const tags = [
+      SYNTH_TAG,
+      `synth:mode:${item.meta.mode}`,
+      ...(item.meta.roleSynth
+        ? [`synth:role-synth`]
+        : item.meta.engines.map((e) => `synth:${e}`)),
+    ];
+    if (
+      !item.meta.roleSynth &&
+      !item.meta.engines.includes(item.meta.engine)
+    ) {
+      tags.push(`synth:${item.meta.engine}`);
+    }
+    if (item.meta.referentId) {
+      tags.push(`synth:ref:${item.meta.referentId}`);
+    }
+    const exprRole = synthRoleToExpr(item.meta.role);
+    if (exprRole) {
+      tags.push(`${EXPR_ROLE_TAG_PREFIX}${exprRole}`);
+    }
+    const sampleClass =
+      item.meta.role === "kick" ||
+      item.meta.role === "snare" ||
+      item.meta.role === "hat" ||
+      item.meta.role === "perc" ||
+      durationMs < 600
+        ? ("percussive" as const)
+        : item.meta.role === "bass" ||
+            item.meta.role === "lead" ||
+            item.meta.role === "arp"
+          ? ("tonal" as const)
+          : ("texture" as const);
+    const sample: Sample = {
+      id,
+      sessionId: session.id,
+      projectId,
+      captureName: SYNTH_SESSION_TITLE,
+      sourceOffsetMs: 0,
+      durationMs,
+      class: sampleClass,
+      tags,
+      confidence: 1,
+      name: label,
+      userName: label,
+      favorite: false,
+      forceRole: exprRole ?? undefined,
+      parentSampleId: item.meta.referentId,
+      originVersion: SYNTH_ORIGIN,
+      createdAt: now,
+      updatedAt: now,
+      revision: 0,
+    };
+    await db.samples.put(sample);
+    await db.analyses.put({
+      sampleId: id,
+      pitchHz: item.meta.fundHz,
+      noteName:
+        item.meta.fundHz != null && item.meta.fundHz > 20
+          ? hzToNoteName(item.meta.fundHz)
+          : undefined,
+      centroidHz: item.meta.cutoffHz,
+      bpm: item.meta.bpm,
+      features: { synth: item.meta },
+    });
+    void processQueue.enqueue(
+      id,
+      item.meta.role === "arp" || durationMs >= 800 ? "texture" : "oneshot",
+    );
+    n++;
+  }
+  return n;
 }
 
 export type AutoCropSamplesResult = {

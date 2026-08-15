@@ -14,6 +14,7 @@ import { set } from "@supersoniks/concorde/utils";
 import { db, ensurePrefs } from "../db.js";
 import { t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
+import { clearEditorHandoff } from "../editor-handoff.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import {
   isProcessingBusy,
@@ -35,10 +36,18 @@ import {
   DEMUCS_QUEUE_EVENT,
   SAMPLE_STEMS_EVENT,
   demucsQueue,
+  enqueueDemucsRemoveVocals,
   enqueueDemucsSeparate,
   type DemucsQueueSnapshot,
 } from "../ml/demucs-queue.js";
-import { ML_TAG } from "@glane/audio-ml";
+import {
+  DENOISE_QUEUE_EVENT,
+  SAMPLE_DENOISE_EVENT,
+  denoiseQueue,
+  enqueueDenoise,
+  type DenoiseQueueSnapshot,
+} from "../ml/denoise-queue.js";
+import { DENOISED_STEM, ML_TAG, stemTag } from "@glane/audio-ml";
 import {
   copySampleToProject,
   copySamplesToProject,
@@ -148,9 +157,11 @@ export class GlLibraryPage extends LitElement {
   #lastTapId: string | null = null;
   #unsubProc: (() => void) | null = null;
   #unsubDemucs: (() => void) | null = null;
+  #unsubDenoise: (() => void) | null = null;
   #lastProcRemaining = -1;
   #lastProcError = -1;
   #demucsWaveActive = false;
+  #denoiseWaveActive = false;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -163,9 +174,11 @@ export class GlLibraryPage extends LitElement {
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.addEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
     window.addEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
+    window.addEventListener(SAMPLE_DENOISE_EVENT, this.#onMlDone);
     window.addEventListener(SAMPLE_CLAP_EVENT, this.#onMlDone);
     window.addEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
     window.addEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
+    window.addEventListener(DENOISE_QUEUE_EVENT, this.#onDenoiseQueue);
     void this.#reload();
     this.#unsubProc = processQueue.subscribe((s) => {
       if (
@@ -178,18 +191,22 @@ export class GlLibraryPage extends LitElement {
       }
     });
     this.#unsubDemucs = demucsQueue.subscribe((s) => this.#applyDemucsSnap(s));
+    this.#unsubDenoise = denoiseQueue.subscribe((s) => this.#applyDenoiseSnap(s));
   }
 
   override disconnectedCallback(): void {
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.removeEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
     window.removeEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
+    window.removeEventListener(SAMPLE_DENOISE_EVENT, this.#onMlDone);
     window.removeEventListener(SAMPLE_CLAP_EVENT, this.#onMlDone);
     window.removeEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
     window.removeEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
+    window.removeEventListener(DENOISE_QUEUE_EVENT, this.#onDenoiseQueue);
     if (this.#clapTimer != null) window.clearTimeout(this.#clapTimer);
     this.#unsubProc?.();
     this.#unsubDemucs?.();
+    this.#unsubDenoise?.();
     this.#engine?.stop();
     super.disconnectedCallback();
   }
@@ -215,6 +232,11 @@ export class GlLibraryPage extends LitElement {
     if (d) this.#applyDemucsSnap(d);
   };
 
+  #onDenoiseQueue = (ev: Event): void => {
+    const d = (ev as CustomEvent<DenoiseQueueSnapshot>).detail;
+    if (d) this.#applyDenoiseSnap(d);
+  };
+
   #applyDemucsSnap(s: DemucsQueueSnapshot): void {
     const active = s.remaining > 0 || s.phase !== "idle";
     if (active) this.#demucsWaveActive = true;
@@ -231,7 +253,7 @@ export class GlLibraryPage extends LitElement {
         );
         void this.#reload();
       }
-      this.separateProgress = "";
+      if (!this.#denoiseWaveActive) this.separateProgress = "";
       return;
     }
     const i = Math.min(s.waveDone + 1, Math.max(1, s.waveTotal));
@@ -239,7 +261,43 @@ export class GlLibraryPage extends LitElement {
     const label =
       s.phase === "loading"
         ? `${t("library.separateLoading")} ${pct}%`
-        : `${t("library.separating")} ${pct}%`;
+        : `${t(
+            s.currentMode === "novocals"
+              ? "library.removeVocalsWorking"
+              : "library.separating",
+          )} ${pct}%`;
+    this.separateProgress = tf("library.separateBatchProgress", {
+      i,
+      n: s.waveTotal,
+      label,
+    });
+  }
+
+  #applyDenoiseSnap(s: DenoiseQueueSnapshot): void {
+    const active = s.remaining > 0 || s.phase !== "idle";
+    if (active) this.#denoiseWaveActive = true;
+    if (active) this.separatingId = s.currentSampleId;
+    if (!active) {
+      if (this.#denoiseWaveActive && s.waveTotal > 0) {
+        this.#denoiseWaveActive = false;
+        void glDialog.alert(
+          tf("library.denoiseBatchDone", {
+            ok: s.ok,
+            skipped: s.skipped,
+            failed: s.failed,
+          }),
+        );
+        void this.#reload();
+      }
+      if (!this.#demucsWaveActive) this.separateProgress = "";
+      return;
+    }
+    const i = Math.min(s.waveDone + 1, Math.max(1, s.waveTotal));
+    const pct = Math.round(s.ratio * 100);
+    const label =
+      s.phase === "loading"
+        ? `${t("library.denoiseLoading")} ${pct}%`
+        : `${t("library.denoiseWorking")} ${pct}%`;
     this.separateProgress = tf("library.separateBatchProgress", {
       i,
       n: s.waveTotal,
@@ -434,6 +492,18 @@ export class GlLibraryPage extends LitElement {
         icon: "layers",
         disabled: noSel,
         onClick: () => void this.#batchSeparate(),
+      },
+      {
+        label: t("library.batchRemoveVocals"),
+        icon: "mic-off",
+        disabled: noSel,
+        onClick: () => void this.#batchRemoveVocals(),
+      },
+      {
+        label: t("library.batchDenoise"),
+        icon: "audio-lines",
+        disabled: noSel,
+        onClick: () => void this.#batchDenoise(),
       },
       {
         label: t("library.batchAutoCrop"),
@@ -694,6 +764,12 @@ export class GlLibraryPage extends LitElement {
                               onClick: () => void this.#duplicate(s),
                             },
                             {
+                              label: t("library.createVariations"),
+                              icon: "sliders",
+                              onClick: () =>
+                                navigate({ name: "synth", id: s.id }),
+                            },
+                            {
                               label: t("library.similar"),
                               icon: "audio-lines",
                               onClick: () => void this.#similar(s),
@@ -702,6 +778,16 @@ export class GlLibraryPage extends LitElement {
                               label: t("library.separate"),
                               icon: "layers",
                               onClick: () => void this.#separate(s),
+                            },
+                            {
+                              label: t("library.removeVocals"),
+                              icon: "mic-off",
+                              onClick: () => void this.#removeVocals(s),
+                            },
+                            {
+                              label: t("library.denoise"),
+                              icon: "audio-lines",
+                              onClick: () => void this.#denoise(s),
                             },
                             {
                               label: t("library.analyze"),
@@ -936,6 +1022,7 @@ export class GlLibraryPage extends LitElement {
   async #onRowClick(s: Sample): Promise<void> {
     const now = performance.now();
     if (this.#lastTapId === s.id && now - this.#lastTapAt < 350) {
+      clearEditorHandoff();
       navigate({ name: "sample", id: s.id });
       return;
     }
@@ -948,6 +1035,7 @@ export class GlLibraryPage extends LitElement {
     this.#engine ??= new TransportEngine();
     const data = await loadSampleAudio(s);
     if (!data) {
+      clearEditorHandoff();
       navigate({ name: "sample", id: s.id });
       return;
     }
@@ -1122,6 +1210,27 @@ export class GlLibraryPage extends LitElement {
     return true;
   }
 
+  #eligibleForRemoveVocals(s: Sample): boolean {
+    const tags = s.tags ?? [];
+    if (tags.some((tag) => tag.startsWith("stem:"))) return false;
+    if (
+      tags.includes(ML_TAG.novocals) ||
+      tags.includes(ML_TAG.demucsRunning)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  #eligibleForDenoise(s: Sample): boolean {
+    const tags = s.tags ?? [];
+    if (tags.includes(stemTag(DENOISED_STEM))) return false;
+    if (tags.includes(ML_TAG.denoise) || tags.includes(ML_TAG.denoiseRunning)) {
+      return false;
+    }
+    return true;
+  }
+
   async #separate(s: Sample): Promise<void> {
     const tags = s.tags ?? [];
     if (tags.some((tag) => tag.startsWith("stem:"))) {
@@ -1138,6 +1247,24 @@ export class GlLibraryPage extends LitElement {
     });
     if (!ok) return;
     enqueueDemucsSeparate(s.id);
+  }
+
+  async #removeVocals(s: Sample): Promise<void> {
+    const tags = s.tags ?? [];
+    if (tags.some((tag) => tag.startsWith("stem:"))) {
+      await glDialog.alert(t("library.separateSkipStem"));
+      return;
+    }
+    if (tags.includes(ML_TAG.novocals) || tags.includes(ML_TAG.demucsRunning)) {
+      await glDialog.alert(t("library.removeVocalsAlready"));
+      return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.removeVocals"),
+      message: t("library.removeVocalsConfirm"),
+    });
+    if (!ok) return;
+    enqueueDemucsRemoveVocals(s.id);
   }
 
   async #batchSeparate(): Promise<void> {
@@ -1158,6 +1285,63 @@ export class GlLibraryPage extends LitElement {
     });
     if (!ok) return;
     enqueueDemucsSeparate(eligible);
+  }
+
+  async #batchRemoveVocals(): Promise<void> {
+    const ids = this.#selectedInView();
+    if (ids.length === 0) return;
+    const byId = new Map(this.samples.map((s) => [s.id, s]));
+    const eligible = ids.filter((id) => {
+      const s = byId.get(id);
+      return s ? this.#eligibleForRemoveVocals(s) : false;
+    });
+    if (eligible.length === 0) {
+      await glDialog.alert(t("library.removeVocalsNoneEligible"));
+      return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.batchRemoveVocals"),
+      message: tf("library.removeVocalsBatchConfirm", { n: eligible.length }),
+    });
+    if (!ok) return;
+    enqueueDemucsRemoveVocals(eligible);
+  }
+
+  async #denoise(s: Sample): Promise<void> {
+    if (!this.#eligibleForDenoise(s)) {
+      await glDialog.alert(
+        (s.tags ?? []).includes(stemTag(DENOISED_STEM))
+          ? t("library.denoiseSkipChild")
+          : t("library.denoiseAlready"),
+      );
+      return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.denoise"),
+      message: t("library.denoiseConfirm"),
+    });
+    if (!ok) return;
+    enqueueDenoise(s.id);
+  }
+
+  async #batchDenoise(): Promise<void> {
+    const ids = this.#selectedInView();
+    if (ids.length === 0) return;
+    const byId = new Map(this.samples.map((s) => [s.id, s]));
+    const eligible = ids.filter((id) => {
+      const s = byId.get(id);
+      return s ? this.#eligibleForDenoise(s) : false;
+    });
+    if (eligible.length === 0) {
+      await glDialog.alert(t("library.denoiseNoneEligible"));
+      return;
+    }
+    const ok = await glDialog.confirm({
+      title: t("library.batchDenoise"),
+      message: tf("library.denoiseBatchConfirm", { n: eligible.length }),
+    });
+    if (!ok) return;
+    enqueueDenoise(eligible);
   }
 
   async #batchAnalyze(): Promise<void> {

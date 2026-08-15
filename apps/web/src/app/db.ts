@@ -178,6 +178,10 @@ export class GlaneDb extends Dexie {
             bars: 16,
             masterGainDb: 0,
             preampGainDb: 0,
+            masterFx: [
+              { ...DEFAULT_TRACK_FX },
+              { ...DEFAULT_TRACK_FX },
+            ],
             revision: 0,
             createdAt: now,
             updatedAt: now,

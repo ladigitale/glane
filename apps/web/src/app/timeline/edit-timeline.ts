@@ -15,7 +15,10 @@ import {
   TRACK_LABEL_PX,
   bindTimelineWheel,
   fitPxPerUnit,
+  lanePointerDistance,
+  lanePointerMidpoint,
   paintViewportWave,
+  pinchZoomAtClientX,
   sampleRulerMarks,
   scrollLeftToCenterUnit,
   timelineChromeCss,
@@ -33,6 +36,8 @@ type DragMode =
   | "scrub"
   | "scroll"
   | "zoom"
+  | "pinch"
+  | "pinch-done"
   | "rotate";
 
 @customElement("gl-edit-timeline")
@@ -170,6 +175,9 @@ export class GlEditTimeline extends LitElement {
   #followPlayhead = true;
   #scrubLastX = 0;
   #rotateOriginX = 0;
+  #lanePtrs = new Map<number, { x: number; y: number }>();
+  #lanePinchDist = 0;
+  #laneLastY = 0;
 
   override firstUpdated(): void {
     const canvas = this.renderRoot.querySelector("canvas.wave");
@@ -621,18 +629,35 @@ export class GlEditTimeline extends LitElement {
 
   #laneDown = (e: PointerEvent): void => {
     if ((e.target as HTMLElement).closest(".handle")) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     const lane = e.currentTarget as HTMLElement;
-    lane.setPointerCapture(e.pointerId);
-    const sample = this.#sampleAtClientX(e.clientX);
-    this.#dragOriginSample = sample;
+    try {
+      lane.setPointerCapture(e.pointerId);
+    } catch {
+      /* already captured */
+    }
 
-    if (this.rotateMode) {
+    this.#lanePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (this.rotateMode && this.#lanePtrs.size === 1) {
       this.#drag = "rotate";
       this.#rotateOriginX = e.clientX;
       this.rotateOffsetSamples = 0;
       this.#setFollowPlayhead(false);
       return;
     }
+
+    if (this.#lanePtrs.size >= 2) {
+      this.#drag = "pinch";
+      this.#fsm.reset();
+      const pts = [...this.#lanePtrs.values()];
+      this.#lanePinchDist = lanePointerDistance(pts[0]!, pts[1]!);
+      this.#setFollowPlayhead(false);
+      return;
+    }
+
+    const sample = this.#sampleAtClientX(e.clientX);
+    this.#dragOriginSample = sample;
 
     this.#fsm.reset();
     this.#fsm.push({
@@ -648,9 +673,50 @@ export class GlEditTimeline extends LitElement {
     this.#drag = "none";
     this.#panOriginX = e.clientX;
     this.#panScroll0 = this.#timelineEl()?.scrollLeft ?? 0;
+    this.#laneLastY = e.clientY;
+    this.#lanePinchDist = 0;
   };
 
   #laneMove = (e: PointerEvent): void => {
+    if (this.#lanePtrs.has(e.pointerId)) {
+      this.#lanePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    if (this.#drag === "pinch-done") return;
+
+    if (this.#lanePtrs.size >= 2 || this.#drag === "pinch") {
+      if (this.#lanePtrs.size < 2) {
+        if (this.#drag === "pinch") this.#drag = "pinch-done";
+        return;
+      }
+      this.#drag = "pinch";
+      const pts = [...this.#lanePtrs.values()];
+      const a = pts[0]!;
+      const b = pts[1]!;
+      const dist1 = lanePointerDistance(a, b);
+      const mid = lanePointerMidpoint(a, b);
+      const dist0 = this.#lanePinchDist > 0 ? this.#lanePinchDist : dist1;
+      this.#lanePinchDist = dist1;
+      const tl = this.#timelineEl();
+      if (!tl) return;
+      const next = pinchZoomAtClientX(
+        tl,
+        this.pxPerSample,
+        dist0,
+        dist1,
+        mid.x,
+        TRACK_LABEL_PX,
+        MIN_PX_PER_SAMPLE,
+        MAX_PX_PER_SAMPLE,
+      );
+      if (next) {
+        this.#pendingScrollLeft = next.scrollLeft;
+        this.pxPerSample = next.pxPerUnit;
+        this.#setFollowPlayhead(false);
+      }
+      return;
+    }
+
     if (this.#drag === "rotate") {
       const dx = e.clientX - this.#rotateOriginX;
       // Drag left (dx < 0) → waveform moves left → positive rotate offset.
@@ -744,7 +810,8 @@ export class GlEditTimeline extends LitElement {
     if (this.#drag === "zoom") {
       const tl = this.#timelineEl();
       if (!tl) return;
-      const dy = e.movementY || 0;
+      const dy = e.clientY - this.#laneLastY;
+      this.#laneLastY = e.clientY;
       const next = zoomAtClientX(
         tl,
         this.pxPerSample,
@@ -762,7 +829,7 @@ export class GlEditTimeline extends LitElement {
     }
 
     // Resolve pending gesture — pan / zoom only (loop is ruler-only).
-    if (this.#drag === "none" && e.buttons) {
+    if (this.#drag === "none" && (e.buttons || this.#lanePtrs.size > 0)) {
       const st = this.#fsm.push({
         type: "move",
         pointerId: e.pointerId,
@@ -770,11 +837,13 @@ export class GlEditTimeline extends LitElement {
         y: e.clientY,
         t: e.timeStamp,
         target: "background",
+        pointerCount: this.#lanePtrs.size,
       });
       if (st.status === "resolved") {
         const kind: GestureKind = st.kind;
         if (kind === "scroll" || kind === "zoom") {
           this.#drag = kind;
+          this.#laneLastY = e.clientY;
           if (kind === "scroll") {
             this.#panOriginX = e.clientX;
             this.#panScroll0 = this.#timelineEl()?.scrollLeft ?? 0;
@@ -785,6 +854,24 @@ export class GlEditTimeline extends LitElement {
   };
 
   #laneUp = (e: PointerEvent): void => {
+    if (this.#lanePtrs.has(e.pointerId)) {
+      this.#lanePtrs.delete(e.pointerId);
+    }
+
+    if (
+      this.#lanePtrs.size >= 1 &&
+      (this.#drag === "pinch" || this.#drag === "pinch-done")
+    ) {
+      if (this.#lanePtrs.size >= 2) {
+        const pts = [...this.#lanePtrs.values()];
+        this.#lanePinchDist = lanePointerDistance(pts[0]!, pts[1]!);
+      } else {
+        this.#drag = "pinch-done";
+        this.#lanePinchDist = 0;
+      }
+      return;
+    }
+
     const mode = this.#drag;
     if (mode === "rotate") {
       const offset = this.rotateOffsetSamples;
@@ -802,6 +889,12 @@ export class GlEditTimeline extends LitElement {
       }
       return;
     }
+    if (mode === "pinch" || mode === "pinch-done") {
+      this.#drag = "none";
+      this.#lanePinchDist = 0;
+      this.#fsm.reset();
+      return;
+    }
     if (mode === "none" && e.type === "pointerup") {
       const st = this.#fsm.push({
         type: "up",
@@ -816,6 +909,7 @@ export class GlEditTimeline extends LitElement {
       }
     }
     this.#drag = "none";
+    this.#lanePinchDist = 0;
     this.#fsm.reset();
     if (mode === "scroll") this.#setFollowPlayhead(false);
     if (mode === "scrub") {
@@ -846,6 +940,7 @@ export class GlEditTimeline extends LitElement {
       this.#emitSel(true);
     }
   };
+
 }
 
 declare global {

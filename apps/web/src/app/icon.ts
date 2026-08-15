@@ -11,7 +11,12 @@ const LUCIDE_LOCAL = new Set(["audio-lines"]);
 /** Lucide via Concorde CDN — short helper for icon-heavy UI. */
 export function glIcon(
   name: string,
-  opts?: { size?: string; slot?: "prefix" | "suffix" },
+  opts?: {
+    size?: string;
+    slot?: "prefix" | "suffix";
+    /** FormCheckable swap: visible when selected / not selected. */
+    swap?: "on" | "off";
+  },
 ): TemplateResult {
   const local = LUCIDE_LOCAL.has(name);
   return html`<sonic-icon
@@ -20,6 +25,7 @@ export function glIcon(
     name=${name}
     size=${opts?.size ?? "sm"}
     slot=${opts?.slot ?? nothing}
+    swap=${opts?.swap ?? nothing}
   ></sonic-icon>`;
 }
 

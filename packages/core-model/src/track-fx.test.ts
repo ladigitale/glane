@@ -63,6 +63,13 @@ describe("TrackFx tone + envelope", () => {
     assert.equal(trackFxNeedsBus(fx), true);
   });
 
+  it("compressor is a wet insert", () => {
+    const fx = normalizeTrackFx({ type: "compressor", thresholdDb: -20 });
+    assert.equal(fx.type, "compressor");
+    assert.equal(fx.thresholdDb, -20);
+    assert.equal(trackFxNeedsBus(fx), true);
+  });
+
   it("toggles HP / LP / ADSR independently", () => {
     let fx = DEFAULT_TRACK_FX;
     fx = trackFxToggleHp(fx);

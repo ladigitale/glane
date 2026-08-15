@@ -13,6 +13,7 @@ import {
   ensureImportSession,
 } from "./sample-actions.js";
 import { seqUiState } from "./seq-ui-state.js";
+import { synthUiState } from "./synth-ui-state.js";
 
 export const PROJECT_CHANGE_EVENT = "glane:project-change";
 
@@ -39,6 +40,10 @@ async function createBlankProject(title: string): Promise<Project> {
     bars: 16,
     masterGainDb: 0,
     preampGainDb: 0,
+    masterFx: [
+      { ...DEFAULT_TRACK_FX },
+      { ...DEFAULT_TRACK_FX },
+    ],
     revision: 0,
     createdAt: now,
     updatedAt: now,
@@ -257,6 +262,7 @@ export const projectWorkspace = {
     }
 
     seqUiState.clear(id);
+    synthUiState.clear(id);
 
     const next = await projectWorkspace.ensure();
     notifyProjectChange();

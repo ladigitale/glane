@@ -2,6 +2,7 @@ import { createEntityId, nowIso, type SampleAnalysis } from "@glane/core-model";
 import { sampleOpfs } from "@glane/audio-io";
 import {
   characterizePcm,
+  hzToNoteName,
   type ClipCharacterization,
   type ProcessWorkerResponse,
 } from "@glane/audio-dsp";
@@ -54,6 +55,26 @@ function stripProcessingTags(tags: readonly string[]): string[] {
   );
 }
 
+/** Authored fund from synth bake — DSP pitch on multi-engine mixes often drifts. */
+function authoredSynthFundHz(
+  features: SampleAnalysis["features"],
+): number | null {
+  const synth = features?.synth;
+  if (!synth || typeof synth !== "object") return null;
+  const fund = (synth as { fundHz?: unknown }).fundHz;
+  return typeof fund === "number" && fund > 20 && fund < 5000 ? fund : null;
+}
+
+/** Prefer synth-authored fund over DSP re-estimate when present. */
+export function resolveSamplePitchHz(
+  analysis: Pick<SampleAnalysis, "pitchHz" | "features"> | undefined,
+): number | undefined {
+  if (!analysis) return undefined;
+  const synth = authoredSynthFundHz(analysis.features);
+  if (synth != null) return synth;
+  return analysis.pitchHz;
+}
+
 async function persistCharacterization(
   sampleId: string,
   analysis: ClipCharacterization,
@@ -69,8 +90,17 @@ async function persistCharacterization(
     transientDensity: analysis.transientDensity,
     features: existing?.features,
   };
-  if (analysis.pitchHz != null) row.pitchHz = analysis.pitchHz;
-  if (analysis.noteName) row.noteName = analysis.noteName;
+  const synthFund = authoredSynthFundHz(existing?.features);
+  if (synthFund != null) {
+    row.pitchHz = synthFund;
+    row.noteName = hzToNoteName(synthFund);
+  } else if (analysis.pitchHz != null) {
+    row.pitchHz = analysis.pitchHz;
+    if (analysis.noteName) row.noteName = analysis.noteName;
+  } else {
+    if (existing?.pitchHz != null) row.pitchHz = existing.pitchHz;
+    if (existing?.noteName) row.noteName = existing.noteName;
+  }
   if (analysis.bpm != null) row.bpm = analysis.bpm;
   const loop = loopScore ?? existing?.loopScore;
   if (loop != null) row.loopScore = loop;

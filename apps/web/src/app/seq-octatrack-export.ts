@@ -121,7 +121,9 @@ async function renderBuffer(
   clips: ScheduledClip[],
   durationSamples: number,
   tracks: TrackInsertConfig[],
-  masterGainDb: number,
+  project: Project,
+  /** When false, skip project master inserts (per-track stems). */
+  withMasterFx = true,
 ): Promise<AudioBuffer> {
   const prev = engine.master.gain.value;
   engine.master.gain.value = 1;
@@ -130,8 +132,10 @@ async function renderBuffer(
       clips,
       Number(asSampleIndex(Math.max(1, durationSamples))),
       tracks,
+      withMasterFx ? (project.masterFx ?? []) : [],
+      project.bpm,
     );
-    applyMasterGain(buffer, masterGainDb);
+    applyMasterGain(buffer, project.masterGainDb);
     return buffer;
   } finally {
     engine.master.gain.value = prev;
@@ -194,7 +198,8 @@ async function buildZip(opts: SeqOtExportOpts): Promise<{
     clips,
     Number(durationAtEngine),
     trackInserts,
-    project.masterGainDb,
+    project,
+    true,
   );
   await pushStem("master", masterBuf);
 
@@ -215,7 +220,8 @@ async function buildZip(opts: SeqOtExportOpts): Promise<{
       trackClips,
       Number(durationAtEngine),
       [insert],
-      project.masterGainDb,
+      project,
+      false,
     );
     await pushStem(stem, buf);
   }

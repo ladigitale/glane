@@ -164,4 +164,27 @@ describe("GestureFsm", () => {
     assert.equal(s.status, "resolved");
     if (s.status === "resolved") assert.equal(s.kind, "scroll");
   });
+
+  it("resolves two-finger as zoom", () => {
+    const fsm = new GestureFsm();
+    fsm.push({
+      type: "down",
+      pointerId: 1,
+      x: 0,
+      y: 0,
+      t: 0,
+      target: "background",
+    });
+    const s = fsm.push({
+      type: "move",
+      pointerId: 1,
+      x: 4,
+      y: 0,
+      t: 30,
+      target: "background",
+      pointerCount: 2,
+    });
+    assert.equal(s.status, "resolved");
+    if (s.status === "resolved") assert.equal(s.kind, "zoom");
+  });
 });

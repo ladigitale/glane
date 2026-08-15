@@ -1,10 +1,12 @@
 import {
   CLASS_COLORS,
+  DEFAULT_MASTER_FX,
   PPQ,
   asSampleIndex,
   asTick,
   createEntityId,
   msToSamples,
+  normalizeMasterFx,
   normalizeProject,
   normalizeTrack,
   nowIso,
@@ -64,10 +66,12 @@ import {
 } from "../generative.js";
 import { clapFeatureFromAnalysis } from "../ml/clap-runtime.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
-import { SAMPLE_PROCESSED_EVENT } from "../process-queue.js";
+import { SAMPLE_PROCESSED_EVENT, resolveSamplePitchHz } from "../process-queue.js";
 import { exportFormKey, seqDrawerKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
 import { navigate } from "../router.js";
+import { stashSynthHandoff } from "../synth-handoff.js";
+import { stashEditorHandoff } from "../editor-handoff.js";
 import {
   projectWorkspace,
 } from "../project-workspace.js";
@@ -108,6 +112,9 @@ import {
   paintStretchedWave,
   scrollLeftToCenterUnit,
   zoomAtClientX,
+  pinchZoomAtClientX,
+  lanePointerDistance,
+  lanePointerMidpoint,
 } from "../timeline/timeline.js";
 import "../track-volume-rotary.js";
 import "../track-fx-control.js";
@@ -120,6 +127,10 @@ import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import type { TransportAction } from "../transport-bar.js";
 import type { GlSeekBar } from "../seek-bar.js";
 import type { GlTransportBar } from "../transport-bar.js";
+import "@supersoniks/concorde/fieldset";
+import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/form-actions";
+import "@supersoniks/concorde/input";
 
 const MIN_CLIP_TICKS = PPQ / 4;
 const HANDLE_PX = 44;
@@ -176,6 +187,28 @@ export class GlSequencerPage extends LitElement {
       min-height: 0;
       overflow: hidden;
       touch-action: none;
+      --sc-label-fs: 0.9rem;
+      --sc-label-fw: 500;
+    }
+    .form-label {
+      margin-bottom: 0.22em;
+      display: block;
+      font-size: var(--sc-label-fs);
+      font-weight: var(--sc-label-fw);
+      line-height: 1.2;
+    }
+    .form-description {
+      color: var(--sc-base-400, var(--sc-neutral-500, #888));
+      font-size: 0.85em;
+      margin-top: 0.2em;
+      display: block;
+    }
+    .seq-gen-modal sonic-fieldset {
+      --sc-fieldset-mb: 0;
+    }
+    .seq-gen-modal input[type="range"] {
+      width: 100%;
+      accent-color: var(--sc-primary, #3d7ea6);
     }
     .timeline {
       flex: 1;
@@ -290,8 +323,23 @@ export class GlSequencerPage extends LitElement {
       z-index: 1;
       overflow: hidden;
     }
-    :host([data-rotate-clip]) .clip {
+    :host([data-rotate-clip]) .clip:not(.rotate-target) {
+      opacity: 0.22;
+      filter: saturate(0.35);
+      pointer-events: none;
+    }
+    :host([data-rotate-clip]) .xfade {
+      opacity: 0.15;
+    }
+    :host([data-rotate-clip]) .clip.rotate-target {
       cursor: ew-resize;
+      opacity: 1;
+      filter: none;
+      z-index: 4;
+      outline: 2px solid var(--gl-fg);
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--gl-accent) 70%, transparent),
+        0 0 14px color-mix(in srgb, var(--gl-accent) 45%, transparent);
     }
     .clip canvas.wave {
       position: absolute;
@@ -719,6 +767,13 @@ export class GlSequencerPage extends LitElement {
   #lastTapClipId: string | null = null;
   #lastTapAt = 0;
   #selDragging = false;
+  /** Lane pan / zoom / pinch — multi-pointer bookkeeping. */
+  #lanePtrs = new Map<number, { x: number; y: number }>();
+  #laneKind: GestureKind | "pinch" | "pinch-done" | null = null;
+  #lanePinchDist = 0;
+  #laneLastX = 0;
+  #laneLastY = 0;
+  #laneListening = false;
   #bufferCache = new Map<string, AudioBuffer>();
   #pcmCache = new Map<
     string,
@@ -757,6 +812,11 @@ export class GlSequencerPage extends LitElement {
   }
 
   #onKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.rotateClipTool) {
+      e.preventDefault();
+      this.#clearRotateClipTool();
+      return;
+    }
     if (!isSpaceKey(e) || shouldIgnoreShortcut(e)) return;
     e.preventDefault();
     void this.#handleTransport(this.playing ? "pause" : "play");
@@ -812,6 +872,11 @@ export class GlSequencerPage extends LitElement {
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
     window.removeEventListener("pagehide", this.#onPageHide);
+    window.removeEventListener("pointermove", this.#onLanePointerMove);
+    window.removeEventListener("pointerup", this.#onLanePointerUp);
+    window.removeEventListener("pointercancel", this.#onLanePointerUp);
+    this.#laneListening = false;
+    this.#lanePtrs.clear();
     this.#unsubWheel?.();
     this.#unsubWheel = null;
     const timeline = this.#timelineEl();
@@ -1146,6 +1211,29 @@ export class GlSequencerPage extends LitElement {
     this.pxPerTick = next.pxPerUnit;
   }
 
+  /** Pinch zoom about midpoint (mobile multitouch). */
+  #pinchZoomAtClientX(
+    distance0: number,
+    distance1: number,
+    clientX: number,
+  ): void {
+    const timeline = this.#timelineEl();
+    if (!timeline) return;
+    const next = pinchZoomAtClientX(
+      timeline,
+      this.pxPerTick,
+      distance0,
+      distance1,
+      clientX,
+      0,
+      MIN_PX_PER_TICK,
+      MAX_PX_PER_TICK,
+    );
+    if (!next) return;
+    this.#pendingScrollLeft = next.scrollLeft;
+    this.pxPerTick = next.pxPerUnit;
+  }
+
   get #drawerSamples(): Sample[] {
     let list = this.samples;
     // FormCheckable `unique` can write null when sibling buttons mount; treat as all.
@@ -1188,20 +1276,26 @@ export class GlSequencerPage extends LitElement {
       <div
         class="toolbar flex shrink-0 flex-wrap items-center gap-2 px-4 pb-1.5 pt-3 max-md:gap-1.5 max-md:px-2.5 max-md:pb-1 max-md:pt-2"
       >
-        ${this.selectedId
-          ? html`<sonic-button
-              size="sm"
-              variant="outline"
-              type=${this.rotateClipTool ? "primary" : "neutral"}
-              @click=${() => {
-                this.rotateClipTool = !this.rotateClipTool;
-              }}
+        ${this.rotateClipTool
+          ? html`<div
+              class="flex min-w-0 flex-1 items-center gap-2 text-xs text-content"
+              role="status"
             >
-              ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
-              ${t("seq.rotate")}
-            </sonic-button>`
+              <span class="truncate">${t("seq.rotateHint")}</span>
+              <sonic-button
+                size="xs"
+                variant="ghost"
+                type="neutral"
+                @click=${() => this.#clearRotateClipTool()}
+              >
+                ${t("dialog.cancel")}
+              </sonic-button>
+            </div>`
           : nothing}
-        <sonic-pop class="more ml-auto" placement="bottom-end">
+        <sonic-pop
+          class="more ${this.rotateClipTool ? "" : "ml-auto"}"
+          placement="bottom-end"
+        >
           <sonic-button
             shape="circle"
             variant="ghost"
@@ -1658,14 +1752,14 @@ export class GlSequencerPage extends LitElement {
       ? CLASS_COLORS[sample.class]
       : CLASS_COLORS.texture;
     const selected = this.selectedId === c.id;
+    const rotateTarget = this.rotateClipTool && selected;
     const clipW = Math.max(8, c.lengthTick * this.pxPerTick);
     const clipName = sample?.userName ?? sample?.name ?? "";
     return html`
       <div
-        class="clip ${selected ? "selected" : ""} ${this.snapHighlightId ===
-        c.id
-          ? "snap"
-          : ""}"
+        class="clip ${selected ? "selected" : ""} ${rotateTarget
+          ? "rotate-target"
+          : ""} ${this.snapHighlightId === c.id ? "snap" : ""}"
         style="left:${c.startTick * this.pxPerTick}px;width:${clipW}px;background:${color}"
         data-clip=${c.id}
         title=${clipName
@@ -1683,7 +1777,7 @@ export class GlSequencerPage extends LitElement {
               aria-hidden="true"
             ></canvas>`
           : null}
-        ${selected
+        ${selected && !this.rotateClipTool
           ? html`
               <div
                 class="handle start"
@@ -1924,12 +2018,27 @@ export class GlSequencerPage extends LitElement {
     this.selectedId = null;
     this.#engine = new TransportEngine();
     this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
+    this.#syncMasterFx();
     this.#syncTrackBuses();
   }
 
   #preampDb(): number {
     const v = this.project?.preampGainDb;
     return Number.isFinite(v) ? (v as number) : 0;
+  }
+
+  #masterFxPair(): [TrackFx, TrackFx] {
+    const raw = this.project?.masterFx;
+    return [
+      normalizeMasterFx(raw?.[0] ?? DEFAULT_MASTER_FX[0]),
+      normalizeMasterFx(raw?.[1] ?? DEFAULT_MASTER_FX[1]),
+    ];
+  }
+
+  #syncMasterFx(): void {
+    if (!this.#engine || !this.project) return;
+    const [a, b] = this.#masterFxPair();
+    this.#engine.setMasterFx(a, b, this.project.bpm);
   }
 
   #insertConfig(tr: Track): TrackInsertConfig {
@@ -1947,11 +2056,12 @@ export class GlSequencerPage extends LitElement {
   #renderMasterMix() {
     const p = this.project;
     if (!p) return nothing;
+    const [fx0, fx1] = this.#masterFxPair();
     return html`
       <div
         class="flex items-center gap-1.5"
         role="group"
-        aria-label=${t("seq.preamp")}
+        aria-label=${t("seq.masterMix")}
       >
         <gl-track-volume-rotary
           large
@@ -1961,6 +2071,24 @@ export class GlSequencerPage extends LitElement {
           @gl-gain=${(e: CustomEvent<{ gainDb: number; commit: boolean }>) =>
             void this.#onPreampGain(e.detail.gainDb, e.detail.commit)}
         ></gl-track-volume-rotary>
+        <gl-track-fx-control
+          compact
+          wetOnly
+          size="xs"
+          .fxAriaLabel=${t("seq.masterFx1")}
+          .fx=${fx0}
+          @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
+            void this.#onMasterFx(0, e.detail.fx, e.detail.commit)}
+        ></gl-track-fx-control>
+        <gl-track-fx-control
+          compact
+          wetOnly
+          size="xs"
+          .fxAriaLabel=${t("seq.masterFx2")}
+          .fx=${fx1}
+          @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
+            void this.#onMasterFx(1, e.detail.fx, e.detail.commit)}
+        ></gl-track-fx-control>
         <gl-vu-meter
           .analyser=${this.#engine?.analyser ?? null}
           ?active=${this.playing}
@@ -2013,6 +2141,20 @@ export class GlSequencerPage extends LitElement {
     this.project = { ...this.project, preampGainDb: gainDb };
     this.#bounceCache = null;
     this.#syncTrackBuses();
+    await this.#persistProjectMix(commit);
+  }
+
+  async #onMasterFx(
+    slot: 0 | 1,
+    fx: TrackFx,
+    commit: boolean,
+  ): Promise<void> {
+    if (!this.project) return;
+    const pair = this.#masterFxPair();
+    pair[slot] = normalizeMasterFx(fx);
+    this.project = { ...this.project, masterFx: pair };
+    this.#bounceCache = null;
+    this.#syncMasterFx();
     await this.#persistProjectMix(commit);
   }
 
@@ -3028,460 +3170,24 @@ export class GlSequencerPage extends LitElement {
 
       <sonic-modal
         align="left"
-        maxWidth="28rem"
+        maxWidth="52rem"
         .visible=${genOpen}
         @hide=${this.onSeqModalHide}
       >
         <sonic-modal-title>${t("seq.generateTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-3 text-sm text-content">
-            <p>${t("seq.generateBody")}</p>
-            <span class="font-mono text-[0.7rem] text-neutral-500"
-              >${this.project?.bpm ?? 120} ${t("seq.bpm")} · ${bars}
-              ${t("seq.barsUnit")} · ${formatClock(seqDurMs)}</span
-            >
-            <div class="flex flex-wrap gap-2">
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                @click=${() => this.#setAllGenAuto()}
-              >
-                ${t("seq.genRandomizeAll")}
-              </sonic-button>
-            </div>
-            <label class="flex flex-col gap-1 text-xs text-neutral-500">
-              ${t("seq.genSeed")}
-              <span class="flex gap-2">
-                <input
-                  class="box-border min-w-0 flex-1 rounded-md border border-neutral-500/25 bg-neutral-0 px-2.5 py-2 font-mono text-sm text-inherit [font:inherit]"
-                  type="number"
-                  min="0"
-                  .value=${String(this.draftGenSeed)}
-                  @input=${(e: Event) => {
-                    this.draftGenSeed =
-                      Number((e.target as HTMLInputElement).value) >>> 0;
-                    this.#persistGenUi();
-                  }}
-                />
-                <sonic-button
-                  variant="outline"
-                  type="neutral"
-                  size="sm"
-                  @click=${() => {
-                    this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
-                    this.#persistGenUi();
-                  }}
-                >
-                  ${t("seq.genSeedReroll")}
-                </sonic-button>
-              </span>
-              <span class="text-[0.65rem] opacity-80">${t("seq.genSeedHint")}</span>
-            </label>
-            ${this.#renderGenChoice({
-              label: t("seq.genSampleFilter"),
-              value: this.draftGenSampleFilter,
-              options: [
-                ["all", t("seq.allFilters")],
-                ["favorite", t("seq.filterFavorite")],
-                ["percussive", "percussive"],
-                ["tonal", "tonal"],
-                ["texture", "texture"],
-                ["noise", "noise"],
-                ["rhythmic", "rhythmic"],
-              ],
-              onPick: (v) => {
-                this.draftGenSampleFilter = v as SampleClass | "all" | "favorite";
-              },
-            })}
-            <div class="flex flex-col gap-1.5 text-xs text-neutral-500">
-              ${t("seq.genTagFilter")}
-              <gl-pop-select
-                class="w-full max-w-full"
-                size="sm"
-                multiple
-                .values=${this.draftGenTagFilter}
-                .options=${[
-                  { value: "", label: t("seq.allTags") },
-                  ...this.#genTagOptions,
-                ]}
-                placeholder=${t("seq.allTags")}
-                searchPlaceholder=${t("seq.popSearch")}
-                ?active=${this.draftGenTagFilter.length > 0}
-                @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
-                  this.draftGenTagFilter = e.detail.values.filter(Boolean);
-                  this.#persistGenUi();
-                }}
-              ></gl-pop-select>
-            </div>
-            <span class="font-mono text-[0.65rem] text-neutral-500"
-              >${tf("seq.genSampleFilterCount", {
-                n: this.#genPoolSamples().length,
-              })}</span
-            >
-            ${this.#renderGenSlider({
-              label: t("seq.genSampleVariety"),
-              value: this.draftGenSampleVariety,
-              min: 0,
-              max: 100,
-              fallback: 45,
-              format: (n) => `${Math.round(n)}%`,
-              onChange: (v) => {
-                this.draftGenSampleVariety = v === "auto" ? "auto" : v / 100;
-              },
-            })}
-            <span class="text-[0.65rem] text-neutral-500 opacity-80"
-              >${t("seq.genSampleVarietyHint")}</span
-            >
-            ${this.#renderGenSlider({
-              label: t("seq.genDensity"),
-              value: this.draftGenDensity,
-              min: 35,
-              max: 150,
-              fallback: 100,
-              format: (n) => `×${(n / 100).toFixed(2)}`,
-              onChange: (v) => {
-                this.draftGenDensity = v === "auto" ? "auto" : v / 100;
-              },
-            })}
-            ${this.#renderGenSlider({
-              label: t("seq.genEnergy"),
-              value: this.draftGenEnergy,
-              min: 0,
-              max: 100,
-              fallback: 55,
-              format: (n) => `${Math.round(n)}%`,
-              onChange: (v) => {
-                this.draftGenEnergy = v === "auto" ? "auto" : v / 100;
-              },
-            })}
-            ${this.#renderGenSlider({
-              label: t("seq.genDrumsTextures"),
-              value: this.draftGenDrumsTextures,
-              min: 0,
-              max: 100,
-              fallback: 55,
-              format: () => "",
-              footer: html`
-                <span class="flex justify-between font-mono text-[0.65rem]">
-                  <span>${t("seq.genTextures")}</span>
-                  <span>${t("seq.genDrums")}</span>
-                </span>
-              `,
-              onChange: (v) => {
-                this.draftGenDrumsTextures = v === "auto" ? "auto" : v / 100;
-              },
-            })}
-            ${this.#renderGenChoice({
-              label: t("seq.genMusicStyle"),
-              value: this.draftGenMusicStyle,
-              options: [
-                ["auto", t("seq.genAuto")],
-                ...MUSIC_STYLE_IDS.map(
-                  (id) =>
-                    [
-                      id,
-                      t(`seq.genStyle.${id}` as MessageKey),
-                    ] as [string, string],
-                ),
-              ],
-              onPick: (v) => {
-                this.draftGenMusicStyle = v as GenMusicStyleChoice;
-              },
-            })}
-            ${this.#renderGenChoice({
-              label: t("seq.genGroove"),
-              value: this.draftGenGroove,
-              options: [
-                ["auto", t("seq.genAuto")],
-                ["straight", t("seq.genGrooveStraight")],
-                ["shuffle", t("seq.genGrooveShuffle")],
-                ["half-time", t("seq.genGrooveHalftime")],
-              ],
-              onPick: (v) => {
-                this.draftGenGroove = v as GenGrooveChoice;
-              },
-            })}
-            <sonic-button
-              size="sm"
-              variant="outline"
-              type="neutral"
-              ?active=${this.draftGenAdvanced}
-              @click=${() => {
-                this.draftGenAdvanced = !this.draftGenAdvanced;
-                this.#persistGenUi();
-              }}
-            >
-              ${t("seq.genAdvanced")}
-            </sonic-button>
-            ${this.draftGenAdvanced
-              ? html`
-                  ${this.#renderGenChoice({
-                    label: t("seq.genLockPitch"),
-                    value: this.draftGenLockPitch === "on" ? "on" : "off",
-                    options: [
-                      ["off", t("seq.genOff")],
-                      ["on", t("seq.genOn")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenLockPitch = v === "on" ? "on" : "off";
-                    },
-                  })}
-                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
-                    >${t("seq.genLockPitchHint")}</span
-                  >
-                  ${this.draftGenLockPitch === "on"
-                    ? nothing
-                    : html`
-                        ${this.#renderGenChoice({
-                          label: t("seq.genPitchDown"),
-                          value:
-                            this.draftGenPitchDown === "auto"
-                              ? "auto"
-                              : String(this.draftGenPitchDown),
-                          options: [
-                            ["auto", t("seq.genAuto")],
-                            ...([0, 1, 2, 3, 5, 7, 12, 24] as const).map(
-                              (n) => [String(n), String(n)] as [string, string],
-                            ),
-                          ],
-                          onPick: (v) => {
-                            this.draftGenPitchDown =
-                              v === "auto" ? "auto" : Number(v);
-                          },
-                        })}
-                        ${this.#renderGenChoice({
-                          label: t("seq.genPitchUp"),
-                          value:
-                            this.draftGenPitchUp === "auto"
-                              ? "auto"
-                              : String(this.draftGenPitchUp),
-                          options: [
-                            ["auto", t("seq.genAuto")],
-                            ...([0, 1, 2, 3, 5, 7, 12, 24] as const).map(
-                              (n) => [String(n), String(n)] as [string, string],
-                            ),
-                          ],
-                          onPick: (v) => {
-                            this.draftGenPitchUp =
-                              v === "auto" ? "auto" : Number(v);
-                          },
-                        })}
-                        <span class="text-[0.65rem] text-neutral-500 opacity-80"
-                          >${t("seq.genPitchRangeHint")}</span
-                        >
-                        ${this.#renderGenChoice({
-                          label: t("seq.genKey"),
-                          value:
-                            this.draftGenKey === "auto"
-                              ? "auto"
-                              : String(this.draftGenKey),
-                          options: [
-                            ["auto", t("seq.genAuto")],
-                            ...Array.from({ length: 12 }, (_, pc) => [
-                              String(pc),
-                              keyPcLabel(pc),
-                            ] as [string, string]),
-                          ],
-                          onPick: (v) => {
-                            this.draftGenKey =
-                              v === "auto" ? "auto" : Number(v) >>> 0;
-                          },
-                        })}
-                        ${this.#renderGenChoice({
-                          label: t("seq.genScale"),
-                          value: this.draftGenScale,
-                          options: [
-                            ["auto", t("seq.genAuto")],
-                            ["major", t("seq.genScaleMajor")],
-                            ["minor", t("seq.genScaleMinor")],
-                          ],
-                          onPick: (v) => {
-                            this.draftGenScale = v as GenScaleMode;
-                          },
-                        })}
-                        ${this.#renderGenChoice({
-                          label: t("seq.genPalette"),
-                          value: this.draftGenPalette,
-                          options: [
-                            ["auto", t("seq.genAuto")],
-                            ["pop", t("seq.genPalettePop")],
-                            ["modal", t("seq.genPaletteModal")],
-                            ["jazz", t("seq.genPaletteJazz")],
-                            ["ambient", t("seq.genPaletteAmbient")],
-                            ["mixed", t("seq.genPaletteMixed")],
-                          ],
-                          onPick: (v) => {
-                            this.draftGenPalette = v as GenPaletteChoice;
-                          },
-                        })}
-                      `}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genForm"),
-                    value: this.draftGenForm,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["song", t("seq.genFormSong")],
-                      ["ambient", t("seq.genFormAmbient")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenForm = v as GenFormStyle;
-                    },
-                  })}
-                  ${this.#renderGenSlider({
-                    label: t("seq.genHumanize"),
-                    value: this.draftGenHumanize,
-                    min: 0,
-                    max: 100,
-                    fallback: 65,
-                    format: (n) => `${Math.round(n)}%`,
-                    onChange: (v) => {
-                      this.draftGenHumanize = v === "auto" ? "auto" : v / 100;
-                    },
-                  })}
-                  ${this.#renderGenSlider({
-                    label: t("seq.genVariation"),
-                    value: this.draftGenVariation,
-                    min: 0,
-                    max: 100,
-                    fallback: 55,
-                    format: (n) => `${Math.round(n)}%`,
-                    onChange: (v) => {
-                      this.draftGenVariation = v === "auto" ? "auto" : v / 100;
-                    },
-                  })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genBpmSync"),
-                    value: this.draftGenBpmSync,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["on", t("seq.genOn")],
-                      ["off", t("seq.genOff")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenBpmSync = v as GenTriState;
-                    },
-                  })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genLockTempoPow2"),
-                    value:
-                      this.draftGenLockTempoPow2 === "on" ? "on" : "off",
-                    options: [
-                      ["off", t("seq.genOff")],
-                      ["on", t("seq.genOn")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenLockTempoPow2 =
-                        v === "on" ? "on" : "off";
-                    },
-                  })}
-                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
-                    >${t("seq.genLockTempoPow2Hint")}</span
-                  >
-                  ${this.#renderGenChoice({
-                    label: t("seq.genForbidPitchStretch"),
-                    value:
-                      this.draftGenForbidPitchStretch === "on" ? "on" : "off",
-                    options: [
-                      ["off", t("seq.genOff")],
-                      ["on", t("seq.genOn")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenForbidPitchStretch =
-                        v === "on" ? "on" : "off";
-                    },
-                  })}
-                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
-                    >${t("seq.genForbidPitchStretchHint")}</span
-                  >
-                  ${this.#renderGenChoice({
-                    label: t("seq.genStretchUp"),
-                    value:
-                      this.draftGenStretchUp === "auto"
-                        ? "auto"
-                        : String(this.draftGenStretchUp),
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ...GEN_STRETCH_UP_RATIOS.map(
-                        (n) =>
-                          [String(n), genStretchRatioLabel(n)] as [
-                            string,
-                            string,
-                          ],
-                      ),
-                    ],
-                    onPick: (v) => {
-                      this.draftGenStretchUp =
-                        v === "auto" ? "auto" : Number(v);
-                    },
-                  })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genStretchDown"),
-                    value:
-                      this.draftGenStretchDown === "auto"
-                        ? "auto"
-                        : String(this.draftGenStretchDown),
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ...GEN_STRETCH_DOWN_RATIOS.map(
-                        (n) =>
-                          [String(n), genStretchRatioLabel(n)] as [
-                            string,
-                            string,
-                          ],
-                      ),
-                    ],
-                    onPick: (v) => {
-                      this.draftGenStretchDown =
-                        v === "auto" ? "auto" : Number(v);
-                    },
-                  })}
-                  <span class="text-[0.65rem] text-neutral-500 opacity-80"
-                    >${t("seq.genStretchRatioHint")}</span
-                  >
-                  ${this.#renderGenChoice({
-                    label: t("seq.genReverse"),
-                    value: this.draftGenReverse,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["on", t("seq.genOn")],
-                      ["off", t("seq.genOff")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenReverse = v as GenTriState;
-                    },
-                  })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genStutter"),
-                    value: this.draftGenStutter,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["on", t("seq.genOn")],
-                      ["off", t("seq.genOff")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenStutter = v as GenTriState;
-                    },
-                  })}
-                  ${this.#renderGenChoice({
-                    label: t("seq.genCallResponse"),
-                    value: this.draftGenCallResponse,
-                    options: [
-                      ["auto", t("seq.genAuto")],
-                      ["on", t("seq.genOn")],
-                      ["off", t("seq.genOff")],
-                    ],
-                    onPick: (v) => {
-                      this.draftGenCallResponse = v as GenTriState;
-                    },
-                  })}
-                `
-              : nothing}
-          </div>
+          ${this.#renderGenerateForm(bars, seqDurMs)}
         </sonic-modal-content>
         <sonic-modal-actions>
           <sonic-button hideModal variant="outline" type="neutral">
             ${t("dialog.cancel")}
+          </sonic-button>
+          <sonic-button
+            variant="outline"
+            type="neutral"
+            @click=${() => this.#openSynthSongKit()}
+          >
+            ${t("seq.synthKit")}
           </sonic-button>
           <sonic-button
             type="primary"
@@ -3508,11 +3214,12 @@ export class GlSequencerPage extends LitElement {
               <li>Outils de piste : colonne sticky à droite (mute / volume / solo / FX)</li>
               <li>Sons : tiroir vertical à droite (glisser sur une piste)</li>
               <li>Lecture en boucle</li>
-              <li>Fond : ↕ zoom · ↔ pan</li>
+              <li>Fond : pincer = zoom · ↕ zoom · ↔ pan</li>
               <li>Règle = région de boucle · BPM / durée dans le gutter droit</li>
               <li>Poignées = in-out / tête de lecture</li>
               <li>Poignée timeline = déplacer la boucle</li>
               <li>Clip = temps / piste · Alt = sans aimant</li>
+              <li>Double-tap clip = éditeur (retour via Arrangement)</li>
               <li>Appui long clip = options (fade / stretch / offset) / dupliquer</li>
               <li>Poignées clip = trim · poubelle = supprimer · fin = durée</li>
               <li>${t("seq.rotateDocs")}</li>
@@ -3542,6 +3249,26 @@ export class GlSequencerPage extends LitElement {
     this.#persistGenUi();
     this.seqModal = null;
     await this.#generateSequence({ confirmed: true });
+  }
+
+  /** Open synth Song kit with BPM / tonic from the generate dialog. */
+  #openSynthSongKit(): void {
+    const tonicPc =
+      typeof this.draftGenKey === "number"
+        ? ((this.draftGenKey % 12) + 12) % 12
+        : 0;
+    stashSynthHandoff({
+      mode: "song",
+      bpm: this.project?.bpm ?? 120,
+      tonicPc,
+      scaleMode:
+        this.draftGenScale === "minor" || this.draftGenScale === "major"
+          ? this.draftGenScale
+          : "major",
+      intention: "full",
+    });
+    this.seqModal = null;
+    navigate({ name: "synth" });
   }
 
   #setAllGenAuto(): void {
@@ -3602,33 +3329,538 @@ export class GlSequencerPage extends LitElement {
     return list;
   }
 
+  #renderGenerateForm(bars: number, seqDurMs: number) {
+    return html`
+      <div
+        class="seq-gen-modal seq-modal-body flex flex-col gap-4 text-sm text-content"
+      >
+        <div class="flex flex-col gap-1">
+          <p class="m-0">${t("seq.generateBody")}</p>
+          <p class="form-description m-0 font-mono">
+            ${this.project?.bpm ?? 120} ${t("seq.bpm")} · ${bars}
+            ${t("seq.barsUnit")} · ${formatClock(seqDurMs)}
+          </p>
+        </div>
+
+        <sonic-fieldset
+          label=${t("seq.genSectionSetup")}
+          description=${t("seq.genSectionSetupHint")}
+        >
+          <sonic-form-layout>
+            <div class="form-item-container flex flex-col gap-1">
+              <span class="form-label">${t("seq.genSeed")}</span>
+              <div class="flex flex-wrap items-center gap-2">
+                <sonic-input
+                  class="min-w-0 flex-1"
+                  type="number"
+                  size="sm"
+                  min="0"
+                  .value=${String(this.draftGenSeed)}
+                  @change=${(e: Event) => {
+                    this.draftGenSeed =
+                      Number((e.target as HTMLInputElement).value) >>> 0;
+                    this.#persistGenUi();
+                  }}
+                ></sonic-input>
+                <sonic-button
+                  variant="outline"
+                  type="neutral"
+                  size="sm"
+                  @click=${() => {
+                    this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+                    this.#persistGenUi();
+                  }}
+                >
+                  ${t("seq.genSeedReroll")}
+                </sonic-button>
+              </div>
+              <span class="form-description m-0">${t("seq.genSeedHint")}</span>
+            </div>
+            <sonic-form-actions>
+              <sonic-button
+                size="sm"
+                variant="outline"
+                type="neutral"
+                @click=${() => this.#setAllGenAuto()}
+              >
+                ${t("seq.genRandomizeAll")}
+              </sonic-button>
+            </sonic-form-actions>
+          </sonic-form-layout>
+        </sonic-fieldset>
+
+        <sonic-fieldset
+          label=${t("seq.genSectionPool")}
+          description=${t("seq.genSectionPoolHint")}
+        >
+          <sonic-form-layout>
+            ${this.#renderGenChoice({
+              label: t("seq.genSampleFilter"),
+              value: this.draftGenSampleFilter,
+              options: [
+                ["all", t("seq.allFilters")],
+                ["favorite", t("seq.filterFavorite")],
+                ["percussive", "percussive"],
+                ["tonal", "tonal"],
+                ["texture", "texture"],
+                ["noise", "noise"],
+                ["rhythmic", "rhythmic"],
+              ],
+              onPick: (v) => {
+                this.draftGenSampleFilter = v as SampleClass | "all" | "favorite";
+              },
+            })}
+            <div class="form-item-container flex flex-col gap-1">
+              <span class="form-label">${t("seq.genTagFilter")}</span>
+              <gl-pop-select
+                class="w-full max-w-full"
+                size="sm"
+                multiple
+                .values=${this.draftGenTagFilter}
+                .options=${[
+                  { value: "", label: t("seq.allTags") },
+                  ...this.#genTagOptions,
+                ]}
+                placeholder=${t("seq.allTags")}
+                searchPlaceholder=${t("seq.popSearch")}
+                ?active=${this.draftGenTagFilter.length > 0}
+                @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
+                  this.draftGenTagFilter = e.detail.values.filter(Boolean);
+                  this.#persistGenUi();
+                }}
+              ></gl-pop-select>
+            </div>
+            <p class="form-description m-0 font-mono">
+              ${tf("seq.genSampleFilterCount", {
+                n: this.#genPoolSamples().length,
+              })}
+            </p>
+          </sonic-form-layout>
+        </sonic-fieldset>
+
+        <sonic-fieldset
+          label=${t("seq.genSectionFeel")}
+          description=${t("seq.genSectionFeelHint")}
+        >
+          <sonic-form-layout>
+            ${this.#renderGenSlider({
+              label: t("seq.genSampleVariety"),
+              value: this.draftGenSampleVariety,
+              min: 0,
+              max: 100,
+              fallback: 45,
+              format: (n) => `${Math.round(n)}%`,
+              onChange: (v) => {
+                this.draftGenSampleVariety = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            <p class="form-description m-0">${t("seq.genSampleVarietyHint")}</p>
+            ${this.#renderGenSlider({
+              label: t("seq.genDensity"),
+              value: this.draftGenDensity,
+              min: 35,
+              max: 150,
+              fallback: 100,
+              format: (n) => `×${(n / 100).toFixed(2)}`,
+              onChange: (v) => {
+                this.draftGenDensity = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            ${this.#renderGenSlider({
+              label: t("seq.genEnergy"),
+              value: this.draftGenEnergy,
+              min: 0,
+              max: 100,
+              fallback: 55,
+              format: (n) => `${Math.round(n)}%`,
+              onChange: (v) => {
+                this.draftGenEnergy = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            ${this.#renderGenSlider({
+              label: t("seq.genDrumsTextures"),
+              value: this.draftGenDrumsTextures,
+              min: 0,
+              max: 100,
+              fallback: 55,
+              format: () => "",
+              footer: html`
+                <span class="flex justify-between font-mono text-[0.65rem]">
+                  <span>${t("seq.genTextures")}</span>
+                  <span>${t("seq.genDrums")}</span>
+                </span>
+              `,
+              onChange: (v) => {
+                this.draftGenDrumsTextures = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+          </sonic-form-layout>
+        </sonic-fieldset>
+
+        <sonic-fieldset
+          label=${t("seq.genSectionStyle")}
+          description=${t("seq.genSectionStyleHint")}
+        >
+          <sonic-form-layout>
+            ${this.#renderGenChoice({
+              label: t("seq.genMusicStyle"),
+              value: this.draftGenMusicStyle,
+              options: [
+                ["auto", t("seq.genAuto")],
+                ...MUSIC_STYLE_IDS.map(
+                  (id) =>
+                    [
+                      id,
+                      t(`seq.genStyle.${id}` as MessageKey),
+                    ] as [string, string],
+                ),
+              ],
+              onPick: (v) => {
+                this.draftGenMusicStyle = v as GenMusicStyleChoice;
+              },
+            })}
+            ${this.#renderGenChoice({
+              label: t("seq.genGroove"),
+              value: this.draftGenGroove,
+              options: [
+                ["auto", t("seq.genAuto")],
+                ["straight", t("seq.genGrooveStraight")],
+                ["shuffle", t("seq.genGrooveShuffle")],
+                ["half-time", t("seq.genGrooveHalftime")],
+              ],
+              onPick: (v) => {
+                this.draftGenGroove = v as GenGrooveChoice;
+              },
+            })}
+          </sonic-form-layout>
+        </sonic-fieldset>
+
+        <sonic-form-actions>
+          <sonic-button
+            size="sm"
+            variant="outline"
+            type="neutral"
+            ?active=${this.draftGenAdvanced}
+            @click=${() => {
+              this.draftGenAdvanced = !this.draftGenAdvanced;
+              this.#persistGenUi();
+            }}
+          >
+            ${glIcon("sliders", { slot: "prefix", size: "xs" })}
+            ${t("seq.genAdvanced")}
+          </sonic-button>
+        </sonic-form-actions>
+
+        ${this.draftGenAdvanced
+          ? html`
+              <sonic-fieldset label=${t("seq.genSectionPitch")}>
+                <sonic-form-layout>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genLockPitch"),
+                    value: this.draftGenLockPitch === "on" ? "on" : "off",
+                    options: [
+                      ["off", t("seq.genOff")],
+                      ["on", t("seq.genOn")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenLockPitch = v === "on" ? "on" : "off";
+                    },
+                  })}
+                  <p class="form-description m-0">${t("seq.genLockPitchHint")}</p>
+                  ${this.draftGenLockPitch === "on"
+                    ? nothing
+                    : html`
+                        ${this.#renderGenChoice({
+                          label: t("seq.genPitchDown"),
+                          value:
+                            this.draftGenPitchDown === "auto"
+                              ? "auto"
+                              : String(this.draftGenPitchDown),
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ...([0, 1, 2, 3, 5, 7, 12, 24] as const).map(
+                              (n) =>
+                                [String(n), String(n)] as [string, string],
+                            ),
+                          ],
+                          onPick: (v) => {
+                            this.draftGenPitchDown =
+                              v === "auto" ? "auto" : Number(v);
+                          },
+                        })}
+                        ${this.#renderGenChoice({
+                          label: t("seq.genPitchUp"),
+                          value:
+                            this.draftGenPitchUp === "auto"
+                              ? "auto"
+                              : String(this.draftGenPitchUp),
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ...([0, 1, 2, 3, 5, 7, 12, 24] as const).map(
+                              (n) =>
+                                [String(n), String(n)] as [string, string],
+                            ),
+                          ],
+                          onPick: (v) => {
+                            this.draftGenPitchUp =
+                              v === "auto" ? "auto" : Number(v);
+                          },
+                        })}
+                        <p class="form-description m-0">
+                          ${t("seq.genPitchRangeHint")}
+                        </p>
+                        ${this.#renderGenChoice({
+                          label: t("seq.genKey"),
+                          value:
+                            this.draftGenKey === "auto"
+                              ? "auto"
+                              : String(this.draftGenKey),
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ...Array.from({ length: 12 }, (_, pc) => [
+                              String(pc),
+                              keyPcLabel(pc),
+                            ] as [string, string]),
+                          ],
+                          onPick: (v) => {
+                            this.draftGenKey =
+                              v === "auto" ? "auto" : Number(v) >>> 0;
+                          },
+                        })}
+                        ${this.#renderGenChoice({
+                          label: t("seq.genScale"),
+                          value: this.draftGenScale,
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ["major", t("seq.genScaleMajor")],
+                            ["minor", t("seq.genScaleMinor")],
+                          ],
+                          onPick: (v) => {
+                            this.draftGenScale = v as GenScaleMode;
+                          },
+                        })}
+                        ${this.#renderGenChoice({
+                          label: t("seq.genPalette"),
+                          value: this.draftGenPalette,
+                          options: [
+                            ["auto", t("seq.genAuto")],
+                            ["pop", t("seq.genPalettePop")],
+                            ["modal", t("seq.genPaletteModal")],
+                            ["jazz", t("seq.genPaletteJazz")],
+                            ["ambient", t("seq.genPaletteAmbient")],
+                            ["mixed", t("seq.genPaletteMixed")],
+                          ],
+                          onPick: (v) => {
+                            this.draftGenPalette = v as GenPaletteChoice;
+                          },
+                        })}
+                      `}
+                </sonic-form-layout>
+              </sonic-fieldset>
+
+              <sonic-fieldset label=${t("seq.genSectionForm")}>
+                <sonic-form-layout>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genForm"),
+                    value: this.draftGenForm,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["song", t("seq.genFormSong")],
+                      ["ambient", t("seq.genFormAmbient")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenForm = v as GenFormStyle;
+                    },
+                  })}
+                  ${this.#renderGenSlider({
+                    label: t("seq.genHumanize"),
+                    value: this.draftGenHumanize,
+                    min: 0,
+                    max: 100,
+                    fallback: 65,
+                    format: (n) => `${Math.round(n)}%`,
+                    onChange: (v) => {
+                      this.draftGenHumanize = v === "auto" ? "auto" : v / 100;
+                    },
+                  })}
+                  ${this.#renderGenSlider({
+                    label: t("seq.genVariation"),
+                    value: this.draftGenVariation,
+                    min: 0,
+                    max: 100,
+                    fallback: 55,
+                    format: (n) => `${Math.round(n)}%`,
+                    onChange: (v) => {
+                      this.draftGenVariation = v === "auto" ? "auto" : v / 100;
+                    },
+                  })}
+                </sonic-form-layout>
+              </sonic-fieldset>
+
+              <sonic-fieldset label=${t("seq.genSectionTiming")}>
+                <sonic-form-layout>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genBpmSync"),
+                    value: this.draftGenBpmSync,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenBpmSync = v as GenTriState;
+                    },
+                  })}
+                  <p class="form-description m-0">${t("seq.genBpmSyncHint")}</p>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genLockTempoPow2"),
+                    value:
+                      this.draftGenLockTempoPow2 === "on" ? "on" : "off",
+                    options: [
+                      ["off", t("seq.genOff")],
+                      ["on", t("seq.genOn")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenLockTempoPow2 = v === "on" ? "on" : "off";
+                    },
+                  })}
+                  <p class="form-description m-0">
+                    ${t("seq.genLockTempoPow2Hint")}
+                  </p>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genForbidPitchStretch"),
+                    value:
+                      this.draftGenForbidPitchStretch === "on" ? "on" : "off",
+                    options: [
+                      ["off", t("seq.genOff")],
+                      ["on", t("seq.genOn")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenForbidPitchStretch =
+                        v === "on" ? "on" : "off";
+                    },
+                  })}
+                  <p class="form-description m-0">
+                    ${t("seq.genForbidPitchStretchHint")}
+                  </p>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genStretchUp"),
+                    value:
+                      this.draftGenStretchUp === "auto"
+                        ? "auto"
+                        : String(this.draftGenStretchUp),
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ...GEN_STRETCH_UP_RATIOS.map(
+                        (n) =>
+                          [String(n), genStretchRatioLabel(n)] as [
+                            string,
+                            string,
+                          ],
+                      ),
+                    ],
+                    onPick: (v) => {
+                      this.draftGenStretchUp =
+                        v === "auto" ? "auto" : Number(v);
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genStretchDown"),
+                    value:
+                      this.draftGenStretchDown === "auto"
+                        ? "auto"
+                        : String(this.draftGenStretchDown),
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ...GEN_STRETCH_DOWN_RATIOS.map(
+                        (n) =>
+                          [String(n), genStretchRatioLabel(n)] as [
+                            string,
+                            string,
+                          ],
+                      ),
+                    ],
+                    onPick: (v) => {
+                      this.draftGenStretchDown =
+                        v === "auto" ? "auto" : Number(v);
+                    },
+                  })}
+                  <p class="form-description m-0">
+                    ${t("seq.genStretchRatioHint")}
+                  </p>
+                </sonic-form-layout>
+              </sonic-fieldset>
+
+              <sonic-fieldset label=${t("seq.genSectionArticulate")}>
+                <sonic-form-layout>
+                  ${this.#renderGenChoice({
+                    label: t("seq.genReverse"),
+                    value: this.draftGenReverse,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenReverse = v as GenTriState;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genStutter"),
+                    value: this.draftGenStutter,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenStutter = v as GenTriState;
+                    },
+                  })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genCallResponse"),
+                    value: this.draftGenCallResponse,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["on", t("seq.genOn")],
+                      ["off", t("seq.genOff")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenCallResponse = v as GenTriState;
+                    },
+                  })}
+                </sonic-form-layout>
+              </sonic-fieldset>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
   #renderGenChoice(opts: {
     label: string;
     value: string;
     options: Array<[string, string]>;
     onPick: (value: string) => void;
   }) {
+    const defaultValue = opts.options[0]?.[0] ?? "auto";
     return html`
-      <div class="flex flex-col gap-1.5 text-xs text-neutral-500">
-        ${opts.label}
-        <div class="flex flex-wrap gap-[0.35rem]" role="radiogroup">
-          ${opts.options.map(
-            ([value, label]) => html`
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                ?active=${opts.value === value}
-                @click=${() => {
-                  opts.onPick(value);
-                  this.#persistGenUi();
-                }}
-              >
-                ${label}
-              </sonic-button>
-            `,
-          )}
-        </div>
+      <div class="form-item-container flex flex-col gap-1">
+        <span class="form-label">${opts.label}</span>
+        <gl-pop-select
+          class="w-full max-w-full"
+          size="sm"
+          .value=${opts.value}
+          .options=${opts.options.map(([value, label]) => ({
+            value,
+            label,
+          }))}
+          ?active=${opts.value !== defaultValue}
+          @gl-change=${(e: CustomEvent<{ value: string }>) => {
+            opts.onPick(e.detail.value);
+            this.#persistGenUi();
+          }}
+        ></gl-pop-select>
       </div>
     `;
   }
@@ -3644,15 +3876,13 @@ export class GlSequencerPage extends LitElement {
     onChange: (v: number | GenAuto) => void;
   }) {
     const sliderValue =
-      opts.value === "auto"
-        ? opts.fallback
-        : Math.round(opts.value * 100);
+      opts.value === "auto" ? opts.fallback : Math.round(opts.value * 100);
     const display =
       opts.value === "auto" ? t("seq.genAuto") : opts.format(sliderValue);
     const isAuto = opts.value === "auto";
     return html`
-      <label class="flex flex-col gap-1 text-xs text-neutral-500">
-        <span class="flex items-center justify-between gap-2">
+      <div class="form-item-container flex flex-col gap-1">
+        <span class="form-label flex items-center justify-between gap-2 mb-0">
           <span>${opts.label}</span>
           <sonic-button
             size="sm"
@@ -3669,7 +3899,6 @@ export class GlSequencerPage extends LitElement {
         </span>
         <input
           type="range"
-          class="w-full"
           min=${opts.min}
           max=${opts.max}
           ?disabled=${isAuto}
@@ -3680,10 +3909,10 @@ export class GlSequencerPage extends LitElement {
           }}
         />
         ${display
-          ? html`<span class="font-mono text-[0.65rem]">${display}</span>`
+          ? html`<span class="form-description m-0 font-mono">${display}</span>`
           : nothing}
         ${opts.footer ?? nothing}
-      </label>
+      </div>
     `;
   }
 
@@ -3699,6 +3928,7 @@ export class GlSequencerPage extends LitElement {
     };
     await db.projects.put(this.project);
     this.#syncTransportLoop();
+    this.#syncMasterFx();
     this.#syncTrackBuses();
     if (this.playing) await this.#resyncSchedule();
   }
@@ -4165,6 +4395,7 @@ export class GlSequencerPage extends LitElement {
 
       // Decode only the next ~16 beats — never the whole sequence up front.
       const preload = this.#playPreloadTicks();
+      this.#syncMasterFx();
       this.#syncTrackBuses();
       const scheduled = await this.#buildSchedule({
         windowTicks: { from: fromTick, to: fromTick + preload },
@@ -4321,6 +4552,10 @@ export class GlSequencerPage extends LitElement {
   #openClipEditor(clip: Clip): void {
     if (!clip.sampleId) return;
     this.#lastTapClipId = null;
+    const projectId = this.project?.id ?? this.projectId;
+    if (projectId) {
+      stashEditorHandoff({ from: "project", projectId });
+    }
     navigate({ name: "sample", id: clip.sampleId });
   }
 
@@ -4335,8 +4570,11 @@ export class GlSequencerPage extends LitElement {
       return;
     }
     if (this.rotateClipTool) {
-      this.#clipRotateDown(e, clip);
-      return;
+      if (clip.id === this.selectedId) {
+        this.#clipRotateDown(e, clip);
+        return;
+      }
+      this.#clearRotateClipTool();
     }
     this.#fsm.reset();
     this.#fsm.push({
@@ -4682,61 +4920,135 @@ export class GlSequencerPage extends LitElement {
 
   #laneDown = (e: PointerEvent, _trackId: string): void => {
     if ((e.target as HTMLElement).closest(".clip")) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    this.#clearRotateClipTool();
     this.selectedId = null;
     const lane = e.currentTarget as HTMLElement;
+    this.#lanePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try {
+      lane.setPointerCapture(e.pointerId);
+    } catch {
+      /* already captured elsewhere */
+    }
 
-    // Lane: pan / zoom / tap-clear only — loop region is ruler + handles.
-    this.#fsm.reset();
-    this.#fsm.push({
-      type: "down",
-      pointerId: e.pointerId,
-      x: e.clientX,
-      y: e.clientY,
-      t: e.timeStamp,
-      target: "background",
-    });
-    let lastX = e.clientX;
-    let lastY = e.clientY;
-    let kind: GestureKind | null = null;
-    lane.setPointerCapture(e.pointerId);
-
-    const move = (ev: PointerEvent) => {
-      if (kind == null) {
-        const st = this.#fsm.push({
-          type: "move",
-          pointerId: ev.pointerId,
-          x: ev.clientX,
-          y: ev.clientY,
-          t: ev.timeStamp,
-          target: "background",
-        });
-        if (st.status === "resolved") {
-          if (st.kind === "scroll" || st.kind === "zoom") kind = st.kind;
-          else return;
-        } else {
-          return;
-        }
+    if (this.#lanePtrs.size === 1) {
+      this.#fsm.reset();
+      this.#fsm.push({
+        type: "down",
+        pointerId: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        t: e.timeStamp,
+        target: "background",
+      });
+      this.#laneKind = null;
+      this.#laneLastX = e.clientX;
+      this.#laneLastY = e.clientY;
+      this.#lanePinchDist = 0;
+      if (!this.#laneListening) {
+        this.#laneListening = true;
+        window.addEventListener("pointermove", this.#onLanePointerMove);
+        window.addEventListener("pointerup", this.#onLanePointerUp);
+        window.addEventListener("pointercancel", this.#onLanePointerUp);
       }
-      const dx = ev.clientX - lastX;
-      const dy = ev.clientY - lastY;
-      lastX = ev.clientX;
-      lastY = ev.clientY;
-      if (kind === "scroll") {
-        this.#viewBusy = true;
-        const timeline = this.#timelineEl();
-        if (timeline) timeline.scrollLeft -= dx;
-      } else if (kind === "zoom") {
-        this.#viewBusy = true;
-        this.#zoomAtClientX(dy, ev.clientX);
-      }
-    };
+      return;
+    }
 
-    const up = (ev: PointerEvent) => {
-      lane.removeEventListener("pointermove", move);
-      lane.removeEventListener("pointerup", up);
-      lane.removeEventListener("pointercancel", up);
-      this.#viewBusy = false;
-      if (kind === "scroll") this.#setFollowPlayhead(false);
+    if (this.#lanePtrs.size >= 2) {
+      this.#laneKind = "pinch";
+      this.#viewBusy = true;
+      this.#fsm.reset();
+      const pts = [...this.#lanePtrs.values()];
+      this.#lanePinchDist = lanePointerDistance(pts[0]!, pts[1]!);
+    }
+  };
+
+  #onLanePointerMove = (ev: PointerEvent): void => {
+    if (!this.#lanePtrs.has(ev.pointerId)) return;
+    this.#lanePtrs.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+    if (this.#laneKind === "pinch-done") return;
+
+    if (this.#lanePtrs.size >= 2) {
+      this.#laneKind = "pinch";
+      this.#viewBusy = true;
+      const pts = [...this.#lanePtrs.values()];
+      const a = pts[0]!;
+      const b = pts[1]!;
+      const dist1 = lanePointerDistance(a, b);
+      const mid = lanePointerMidpoint(a, b);
+      const dist0 = this.#lanePinchDist > 0 ? this.#lanePinchDist : dist1;
+      this.#lanePinchDist = dist1;
+      this.#pinchZoomAtClientX(dist0, dist1, mid.x);
+      this.#setFollowPlayhead(false);
+      return;
+    }
+
+    if (this.#laneKind === "pinch") {
+      this.#laneKind = "pinch-done";
+      return;
+    }
+
+    if (this.#laneKind == null) {
+      const st = this.#fsm.push({
+        type: "move",
+        pointerId: ev.pointerId,
+        x: ev.clientX,
+        y: ev.clientY,
+        t: ev.timeStamp,
+        target: "background",
+        pointerCount: this.#lanePtrs.size,
+      });
+      if (st.status === "resolved") {
+        if (st.kind === "scroll" || st.kind === "zoom") this.#laneKind = st.kind;
+        else return;
+      } else {
+        return;
+      }
+    }
+
+    const dx = ev.clientX - this.#laneLastX;
+    const dy = ev.clientY - this.#laneLastY;
+    this.#laneLastX = ev.clientX;
+    this.#laneLastY = ev.clientY;
+    if (this.#laneKind === "scroll") {
+      this.#viewBusy = true;
+      const timeline = this.#timelineEl();
+      if (timeline) timeline.scrollLeft -= dx;
+    } else if (this.#laneKind === "zoom") {
+      this.#viewBusy = true;
+      this.#zoomAtClientX(dy, ev.clientX);
+    }
+  };
+
+  #onLanePointerUp = (ev: PointerEvent): void => {
+    if (!this.#lanePtrs.has(ev.pointerId)) return;
+    this.#lanePtrs.delete(ev.pointerId);
+
+    if (this.#lanePtrs.size >= 2) {
+      const pts = [...this.#lanePtrs.values()];
+      this.#lanePinchDist = lanePointerDistance(pts[0]!, pts[1]!);
+      return;
+    }
+
+    if (this.#lanePtrs.size === 1) {
+      if (this.#laneKind === "pinch") this.#laneKind = "pinch-done";
+      this.#lanePinchDist = 0;
+      return;
+    }
+
+    window.removeEventListener("pointermove", this.#onLanePointerMove);
+    window.removeEventListener("pointerup", this.#onLanePointerUp);
+    window.removeEventListener("pointercancel", this.#onLanePointerUp);
+    this.#laneListening = false;
+    this.#viewBusy = false;
+    const kind = this.#laneKind;
+    this.#laneKind = null;
+    this.#lanePinchDist = 0;
+
+    if (kind === "scroll") this.#setFollowPlayhead(false);
+
+    if (kind == null) {
       const st = this.#fsm.push({
         type: "up",
         pointerId: ev.pointerId,
@@ -4746,7 +5058,6 @@ export class GlSequencerPage extends LitElement {
         target: "background",
       });
       if (
-        kind == null &&
         st.status === "resolved" &&
         (st.kind === "tap" || st.kind === "longpress")
       ) {
@@ -4755,12 +5066,8 @@ export class GlSequencerPage extends LitElement {
         this.#syncTransportLoop();
         if (this.playing) void this.#resyncSchedule();
       }
-      this.#fsm.reset();
-    };
-
-    lane.addEventListener("pointermove", move);
-    lane.addEventListener("pointerup", up);
-    lane.addEventListener("pointercancel", up);
+    }
+    this.#fsm.reset();
   };
 
   #tickAtClamped = (clientX: number): number =>
@@ -4970,6 +5277,10 @@ export class GlSequencerPage extends LitElement {
             ${glIcon("sliders", { slot: "prefix", size: "xs" })}
             ${t("seq.clipOptions")}
           </sonic-menu-item>
+          <sonic-menu-item @click=${() => this.#armRotateFromCtx()}>
+            ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+            ${t("seq.rotate")}
+          </sonic-menu-item>
           <sonic-menu-item @click=${() => void this.#duplicateFromCtx()}>
             ${glIcon("copy", { slot: "prefix", size: "xs" })}
             ${t("seq.duplicate")}
@@ -4986,7 +5297,6 @@ export class GlSequencerPage extends LitElement {
       : undefined;
     const open = !!clip;
     const fadeMax = clip ? this.#fadeMaxMs(clip) : 0;
-    const label = STRETCH_LABEL[clip?.stretchMode ?? "off"];
     const sample = clip?.sampleId
       ? this.samples.find((s) => s.id === clip.sampleId)
       : undefined;
@@ -5061,14 +5371,33 @@ export class GlSequencerPage extends LitElement {
                         )}
                     />
                   </label>
+                  <div class="flex flex-col gap-1.5 text-xs text-neutral-500">
+                    <span>${t("seq.stretch")}</span>
+                    <gl-pop-select
+                      class="w-full max-w-full"
+                      size="sm"
+                      .value=${clip.stretchMode}
+                      .options=${STRETCH_ORDER.map((m) => ({
+                        value: m,
+                        label: STRETCH_LABEL[m],
+                      }))}
+                      ?active=${clip.stretchMode !== "off"}
+                      @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                        void this.#setStretch(
+                          clip.id,
+                          e.detail.value as StretchMode,
+                        );
+                      }}
+                    ></gl-pop-select>
+                  </div>
                   <sonic-button
                     variant="outline"
-                    type="neutral"
+                    type="primary"
                     size="sm"
-                    @click=${() => void this.#cycleStretch(clip.id)}
+                    @click=${() => this.#armRotateFromOpts()}
                   >
-                    ${glIcon("move-horizontal", { slot: "prefix", size: "xs" })}
-                    ${t("seq.stretch")} ${label}
+                    ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+                    ${t("seq.rotate")}
                   </sonic-button>
                 `
               : nothing}
@@ -5086,6 +5415,29 @@ export class GlSequencerPage extends LitElement {
   onClipOptsHide = (): void => {
     this.clipOptsId = null;
   };
+
+  #clearRotateClipTool(): void {
+    if (this.rotateClipTool) this.rotateClipTool = false;
+  }
+
+  #armRotateClip(clipId: string): void {
+    this.selectedId = clipId;
+    this.rotateClipTool = true;
+  }
+
+  #armRotateFromCtx(): void {
+    const ctx = this.clipCtx;
+    if (!ctx) return;
+    this.clipCtx = null;
+    this.#armRotateClip(ctx.clipId);
+  }
+
+  #armRotateFromOpts(): void {
+    const id = this.clipOptsId;
+    if (!id) return;
+    this.clipOptsId = null;
+    this.#armRotateClip(id);
+  }
 
   #dismissClipMenus(): void {
     this.clipCtx = null;
@@ -5245,6 +5597,7 @@ export class GlSequencerPage extends LitElement {
     const up = async () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      this.#clearRotateClipTool();
       const updated = this.clips.find((c) => c.id === clip.id);
       if (!updated || updated.contentOffsetMs === originOffset) return;
       await db.clips.put(updated);
@@ -5269,14 +5622,9 @@ export class GlSequencerPage extends LitElement {
     window.addEventListener("pointerup", up);
   };
 
-  async #cycleStretch(clipId?: string): Promise<void> {
-    const id = clipId ?? this.selectedId;
-    const clip = id
-      ? this.clips.find((c) => c.id === id)
-      : this.#selectedClip();
-    if (!clip) return;
-    const i = STRETCH_ORDER.indexOf(clip.stretchMode);
-    const stretchMode = STRETCH_ORDER[(i + 1) % STRETCH_ORDER.length]!;
+  async #setStretch(clipId: string, stretchMode: StretchMode): Promise<void> {
+    const clip = this.clips.find((c) => c.id === clipId);
+    if (!clip || clip.stretchMode === stretchMode) return;
     const updated = { ...clip, stretchMode };
     await db.clips.put(updated);
     this.clips = this.clips.map((c) => (c.id === clip.id ? updated : c));
@@ -5355,7 +5703,7 @@ export class GlSequencerPage extends LitElement {
           loopStartMs: s.loopStartMs,
           loopEndMs: s.loopEndMs,
           loopXfadeMs: s.loopXfadeMs,
-          pitchHz: a?.pitchHz,
+          pitchHz: resolveSamplePitchHz(a),
           noteName: a?.noteName,
           harmonicity: a?.harmonicity,
           centroidHz: a?.centroidHz,

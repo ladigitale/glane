@@ -1,9 +1,9 @@
 /**
  * Shared timeline chrome — editor (1 lane, sample space) + sequencer (ticks).
- * Zoom math: @glane/gestures applyVerticalZoom (pxPerUnit ≡ pxPerTick).
+ * Zoom math: @glane/gestures applyVerticalZoom / applyPinchZoom (pxPerUnit ≡ pxPerTick).
  */
 import type { StretchMode } from "@glane/core-model";
-import { applyVerticalZoom } from "@glane/gestures";
+import { applyPinchZoom, applyVerticalZoom } from "@glane/gestures";
 import { WaveformRenderer, type WaveformView } from "@glane/waveform";
 import type { PeakPyramid } from "@glane/audio-io";
 import { css } from "lit";
@@ -54,6 +54,48 @@ export function zoomAtClientX(
   );
   if (next.pxPerTick === pxPerUnit) return null;
   return { pxPerUnit: next.pxPerTick, scrollLeft: next.scrollLeft };
+}
+
+/** Pinch zoom about clientX (typically midpoint of two fingers). */
+export function pinchZoomAtClientX(
+  el: HTMLElement,
+  pxPerUnit: number,
+  distance0: number,
+  distance1: number,
+  clientX: number,
+  contentOriginPx: number,
+  minPx: number,
+  maxPx: number,
+): TimelineZoomState | null {
+  const rect = el.getBoundingClientRect();
+  const next = applyPinchZoom(
+    { pxPerTick: pxPerUnit, scrollLeft: el.scrollLeft },
+    distance0,
+    distance1,
+    clientX - rect.left,
+    contentOriginPx,
+    minPx,
+    maxPx,
+  );
+  if (next.pxPerTick === pxPerUnit) return null;
+  return { pxPerUnit: next.pxPerTick, scrollLeft: next.scrollLeft };
+}
+
+/** Active pointer samples for lane pan / vertical zoom / pinch. */
+export type LanePointerSample = { x: number; y: number };
+
+export function lanePointerDistance(
+  a: LanePointerSample,
+  b: LanePointerSample,
+): number {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+export function lanePointerMidpoint(
+  a: LanePointerSample,
+  b: LanePointerSample,
+): LanePointerSample {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
 export function bindTimelineWheel(

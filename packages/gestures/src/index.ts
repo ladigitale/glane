@@ -81,10 +81,11 @@ export class GestureFsm {
       const dist = Math.hypot(dx, dy);
       const dt = ev.t - this.state.t0;
 
+      // Second finger → pinch zoom (call sites track distance; FSM only locks kind).
       if ((ev.pointerCount ?? 1) >= 2) {
         this.state = {
           status: "resolved",
-          kind: Math.abs(dx) > Math.abs(dy) ? "slip" : "zoom",
+          kind: "zoom",
           pointerId: ev.pointerId,
           x: ev.x,
           y: ev.y,

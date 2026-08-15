@@ -7,7 +7,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/yamnet/map.test.ts src/clap/similarity.test.ts src/clap/rank.test.ts src/enrich.test.ts src/resample.test.ts src/separate/demucs.test.ts"
+    "test": "tsx --test src/yamnet/map.test.ts src/clap/similarity.test.ts src/clap/rank.test.ts src/enrich.test.ts src/resample.test.ts src/separate/demucs.test.ts src/denoise/rnnoise-math.test.ts"
   },
   "dependencies": {
     "@glane/core-model": "0.1.0"

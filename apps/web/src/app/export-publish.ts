@@ -94,6 +94,8 @@ async function bounceProject(opts: {
       clips,
       Number(asSampleIndex(Math.max(1, durationSamples))),
       tracks,
+      project.masterFx ?? [],
+      project.bpm,
     );
     await applyMasterGainAsync(buffer, project.masterGainDb);
     onProgress?.({ stage: "wav" });

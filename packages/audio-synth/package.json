@@ -1,0 +1,18 @@
+{
+  "name": "@glane/audio-synth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/sample.test.ts src/anchor.test.ts src/map-engines.test.ts src/coherence.test.ts src/arp.test.ts src/machines.test.ts src/render-role.test.ts"
+  },
+  "dependencies": {
+    "@glane/core-model": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

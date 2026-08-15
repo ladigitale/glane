@@ -78,6 +78,38 @@ export type AccountForm = {
 
 export const accountFormKey = new DataProviderKey<AccountForm>("glAccountForm");
 
+/** Synth generator — mode / coherence / qty (FormCheckable). */
+export type SynthForm = {
+  mode: "variations" | "family" | "song";
+  freeFmRatios: "1" | null;
+  coherence: "parametric" | "musical";
+  globalQty: string;
+  openCardId: string;
+};
+
+export const synthFormKey = new DataProviderKey<SynthForm>("glSynthForm");
+
+/** Synth open role — engines + machine toggles (FormCheckable). */
+export type SynthRoleForm = {
+  engines: string[];
+  engineUi: "1" | null;
+  quantity: string;
+  randomness: string;
+};
+
+export const synthRoleFormKey = new DataProviderKey<SynthRoleForm>(
+  "glSynthRoleForm",
+);
+
+/** Synth validate — selected draft indices (FormCheckable multi). */
+export type SynthValidateForm = {
+  selected: string[];
+};
+
+export const synthValidateFormKey = new DataProviderKey<SynthValidateForm>(
+  "glSynthValidateForm",
+);
+
 /** Sequencer sample drawer filters. */
 export type SeqDrawerForm = {
   filter: SampleClass | "all" | "favorite";

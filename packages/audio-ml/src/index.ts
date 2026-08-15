@@ -33,6 +33,9 @@ export {
   DEMUCS_OVERLAP,
   DEMUCS_STRIDE,
   DEMUCS_STEMS,
+  DEMUCS_INSTRUMENTAL_STEMS,
+  INSTRUMENTAL_STEM,
+  DENOISED_STEM,
   ML_DEMUCS_TAG,
   stemTag,
   makeTransitionWindow,
@@ -40,6 +43,15 @@ export {
   stereoToMono,
   type DemucsStemName,
 } from "./separate/demucs-math.js";
+export {
+  RNNOISE_SAMPLE_RATE,
+  RNNOISE_FRAME_SIZE,
+  RNNOISE_PCM_SCALE,
+  denoiseMonoPcm,
+  floatToRnnoisePcm,
+  rnnoisePcmToFloat,
+  type RnnoiseFrameProcessor,
+} from "./denoise/rnnoise-math.js";
 export {
   separateOverlapAdd,
   type DemucsChunkInfer,
