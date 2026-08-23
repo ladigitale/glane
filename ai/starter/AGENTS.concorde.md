@@ -9,6 +9,7 @@ Front: `apps/web` — Lit custom elements `gl-*` + `@supersoniks/concorde`.
 | `.cursor/skills/concorde-ui/SKILL.md` | Pick UI components by use case |
 | `.cursor/skills/concorde-scope/SKILL.md` | Inherited API / form / icon defaults (scope) |
 | `.cursor/skills/prefer-tailwind/SKILL.md` | Lit UI: Tailwind `class=` over new BEM/CSS (rule on `apps/web/**/*.ts`) |
+| `.cursor/skills/glane-arranger/SKILL.md` | Sequence gen: lock / call–response / kinship between melodic voices |
 
 ## Architecture
 

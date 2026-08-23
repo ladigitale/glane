@@ -18,7 +18,8 @@ export type ReelSceneId =
   | "tunnel"
   | "field"
   | "ripple"
-  | "bars";
+  | "bars"
+  | "orbit";
 
 export type ReelSceneSegment = {
   id: ReelSceneId;
@@ -40,6 +41,7 @@ const SCENES: readonly ReelSceneId[] = [
   "field",
   "ripple",
   "bars",
+  "orbit",
 ] as const;
 
 export const REEL_SCENE_IDS: readonly ReelSceneId[] = SCENES;
@@ -741,6 +743,9 @@ function sceneCode(id: ReelSceneId): number {
       return 4;
     case "bars":
       return 5;
+    case "orbit":
+      // Drawn by Three.js path — map to particles if GL ever sees it.
+      return 0;
   }
 }
 
@@ -1483,6 +1488,8 @@ export function createReelViz(w: number, h: number): ReelViz | null {
     peaks?: Float32Array,
   ) => {
     if (weight < 0.02) return;
+    // Three.js path — skip custom WebGL paint.
+    if (scene === "orbit") return;
     // Motion ghost — slightly earlier frame, thinner.
     const ghostT = Math.max(0, timeS - (0.045 + e.high * 0.03));
     drawRings(scene, ghostT, e, wave, accent, weight * 0.28);
@@ -1914,6 +1921,37 @@ export function paintReelScene2d(
         ctx.fillStyle = i % 3 === 0 ? palette.accent : palette.wave;
         ctx.globalAlpha = weight * (0.35 + e.rms * 0.4);
         ctx.fillRect(x, midY - barH, Math.max(1, barW * 0.45), barH * 2);
+      }
+    } else if (scene === "orbit") {
+      // Fallback when Three.js is unavailable — faux 3D solids.
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < 5; i++) {
+        const spin = timeS * (0.6 + i * 0.12) * (i % 2 === 0 ? 1 : -1);
+        const r =
+          (100 + i * 55) * (1 + e.bass * 0.25 * Math.sin(timeS * 8 + i));
+        ctx.strokeStyle = i % 2 === 0 ? palette.accent : palette.wave;
+        ctx.globalAlpha = weight * (0.3 + e.rms * 0.35);
+        polyPath(ctx, cx, cy, r, 3 + (i % 4), spin, 1.15 + e.mid * 0.2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = palette.wave;
+      ctx.globalAlpha = weight * (0.12 + e.bass * 0.2);
+      polyPath(ctx, cx, cy, 55 + e.rms * 40, 6, timeS * 0.9, 1);
+      ctx.fill();
+      for (let i = 0; i < 6; i++) {
+        const a = timeS * 0.8 + (i / 6) * Math.PI * 2;
+        const rad = 160 + e.bass * 50;
+        const x = cx + Math.cos(a) * rad;
+        const y = cy + Math.sin(a) * rad * 0.7;
+        ctx.fillStyle = palette.accent;
+        ctx.globalAlpha = weight * (0.35 + e.high * 0.4);
+        ctx.beginPath();
+        ctx.moveTo(x, y - 10);
+        ctx.lineTo(x + 8, y);
+        ctx.lineTo(x, y + 10);
+        ctx.lineTo(x - 8, y);
+        ctx.closePath();
+        ctx.fill();
       }
     }
 

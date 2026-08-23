@@ -691,7 +691,7 @@ const fr = {
   "export.reelShare": "Partager…",
   "export.reelDownload": "Télécharger le clip",
   "export.reelHint":
-    "Clip vertical 9:16 (max 30 s) — ouvre Instagram → Reel → importer depuis la galerie. Les scènes cochées s’enchaînent au hasard ; chaque génération est unique.",
+    "Clip vertical 9:16 (max 90 s) — ouvre Instagram → Reel → importer depuis la galerie. Les scènes cochées s’enchaînent au hasard ; chaque génération est unique.",
   "export.reelScenes": "Effets visuels",
   "export.reelScenesHint": "Coche ceux à inclure — enchaînement aléatoire pendant le clip.",
   "export.reelScene.particles": "Particules",
@@ -700,6 +700,7 @@ const fr = {
   "export.reelScene.field": "Champ",
   "export.reelScene.ripple": "Ondes",
   "export.reelScene.bars": "Barres",
+  "export.reelScene.orbit": "Orbit 3D",
   "export.reelBg": "Fond",
   "export.reelAccent": "Accent",
   "export.reelEncoding": "Encodage du clip…",
@@ -1433,7 +1434,7 @@ const en: Record<keyof typeof fr, string> = {
   "export.reelShare": "Share…",
   "export.reelDownload": "Download clip",
   "export.reelHint":
-    "Vertical 9:16 clip (max 30 s) — open Instagram → Reel → import from gallery. Checked scenes sequence randomly; each generate is unique.",
+    "Vertical 9:16 clip (max 90 s) — open Instagram → Reel → import from gallery. Checked scenes sequence randomly; each generate is unique.",
   "export.reelScenes": "Visual effects",
   "export.reelScenesHint": "Tick which to include — random order during the clip.",
   "export.reelScene.particles": "Particles",
@@ -1442,6 +1443,7 @@ const en: Record<keyof typeof fr, string> = {
   "export.reelScene.field": "Field",
   "export.reelScene.ripple": "Ripples",
   "export.reelScene.bars": "Bars",
+  "export.reelScene.orbit": "3D orbit",
   "export.reelBg": "Background",
   "export.reelAccent": "Accent",
   "export.reelEncoding": "Encoding clip…",

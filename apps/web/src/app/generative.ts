@@ -17,6 +17,7 @@ import {
   type StretchMode,
   type TrackFx,
 } from "@glane/core-model";
+import { ensemble } from "./generative-ensemble";
 import {
   buildSectionHarmonyTimeline,
   pickArpCell,
@@ -4119,7 +4120,19 @@ export function planSequence(opts: {
     return { trackId: track.id, ...mix };
   });
 
-  // Call–response pairs: lead↔perc, hat↔snare when both present
+  // Melodic ensemble: lock / respond / kinship (skill glane-arranger).
+  const ensemblePlan = ensemble.plan({
+    roles,
+    rnd,
+    callResponseMode,
+    energy,
+    sparse: drumsVsTexture < 0.4,
+  });
+  const hasMelodicRespond = ensemblePlan.relationByTrack.some(
+    (r) => r === "respond",
+  );
+
+  // Kit call–response pairs: lead↔perc, hat↔snare (melodic dialogue is EnsemblePlan).
   const respondTracks = new Set<number>();
   if (callResponseMode !== "off") {
     const leadIdx = roles.indexOf("lead");
@@ -4195,22 +4208,29 @@ export function planSequence(opts: {
       }
       continue;
     }
+    const voiceRel = ensemblePlan.relationByTrack[ti] ?? "independent";
+    const isPrimaryMelodic = ti === ensemblePlan.primaryLeadTrack;
+    const sparseMel = drumsVsTexture < 0.4;
     const leadCell =
       !lockPitch && role === "lead"
-        ? pickMelodyCell(rnd, drumsVsTexture < 0.4)
+        ? isPrimaryMelodic && ensemblePlan.leadCell
+          ? ensemblePlan.leadCell
+          : voiceRel === "respond" && ensemblePlan.responseCell
+            ? ensemblePlan.responseCell
+            : (ensemblePlan.leadCell ?? pickMelodyCell(rnd, sparseMel))
         : null;
     const leadCellAlt =
       !lockPitch && role === "lead"
-        ? pickMelodyCell(rnd, drumsVsTexture < 0.4)
+        ? isPrimaryMelodic && ensemblePlan.leadCellAlt
+          ? ensemblePlan.leadCellAlt
+          : (ensemblePlan.leadCellAlt ?? pickMelodyCell(rnd, sparseMel))
         : null;
     const arpCell =
       !lockPitch && role === "arp"
-        ? pickArpCell(rnd, drumsVsTexture < 0.4 || energy < 0.4)
+        ? pickArpCell(rnd, sparseMel || energy < 0.4)
         : null;
     const arpCellAlt =
-      !lockPitch && role === "arp"
-        ? pickArpCell(rnd, true)
-        : null;
+      !lockPitch && role === "arp" ? pickArpCell(rnd, true) : null;
 
     const humanizeMs =
       (isDrumRole(role)
@@ -4352,21 +4372,29 @@ export function planSequence(opts: {
             hits = hits.filter((h) => h.accent || rnd() < 0.7 + energy * 0.2);
           }
         } else if (role === "lead" && (leadCell || leadCellAlt)) {
-          const cell =
-            section.kind === "bridge" || section.kind === "outro"
-              ? (leadCellAlt ?? leadCell!)
-              : leadCell!;
-          hits = melodyCellToHits(cell, ppq, beatsPerBar, groove);
-          if (section.kind === "intro" || section.kind === "outro") {
-            hits = hits.filter((h) => h.accent || rnd() < 0.28);
-          } else if (section.kind === "bridge") {
-            hits = hits.filter((h) => h.accent || rnd() < 0.5);
-          } else if (section.kind === "verse") {
-            hits = hits.filter((h) => h.accent || rnd() < 0.55 + energy * 0.2);
-          }
-          // Soft mutual gate vs arp ostinato on the same arrangement.
-          if (roles.includes("arp") && rnd() < 0.45) {
-            hits = hits.filter((h) => h.accent || rnd() < 0.35);
+          if (voiceRel === "respond" && ensemblePlan.responseCell) {
+            hits = ensemble.applyRespond(
+              ensemblePlan.responseCell,
+              beatsPerBar,
+              ppq,
+            );
+          } else {
+            const cell =
+              section.kind === "bridge" || section.kind === "outro"
+                ? (leadCellAlt ?? leadCell!)
+                : leadCell!;
+            hits = melodyCellToHits(cell, ppq, beatsPerBar, groove);
+            if (section.kind === "intro" || section.kind === "outro") {
+              hits = hits.filter((h) => h.accent || rnd() < 0.28);
+            } else if (section.kind === "bridge") {
+              hits = hits.filter((h) => h.accent || rnd() < 0.5);
+            } else if (section.kind === "verse") {
+              hits = hits.filter((h) => h.accent || rnd() < 0.55 + energy * 0.2);
+            }
+            // Soft mutual gate vs arp ostinato on the same arrangement.
+            if (roles.includes("arp") && rnd() < 0.45) {
+              hits = hits.filter((h) => h.accent || rnd() < 0.35);
+            }
           }
         } else {
           hits = evolveMotifHits(baseMotif, {
@@ -4384,12 +4412,43 @@ export function planSequence(opts: {
             allowEmptyKit,
           });
         }
-        hits = callResponseShift(
-          hits,
-          ppq,
-          beatsPerBar,
-          respondTracks.has(ti),
-        );
+
+        // Ensemble relations for melodic followers / primary call thinning.
+        if (
+          !lockPitch &&
+          isMelodicRole(role) &&
+          ensemblePlan.sharedOnsets.length > 0
+        ) {
+          if (voiceRel === "respond" && role !== "lead") {
+            const cell =
+              ensemblePlan.responseCell ?? ensemblePlan.leadCell;
+            if (cell) {
+              hits = ensemble.applyRespond(cell, beatsPerBar, ppq);
+            }
+          } else if (voiceRel === "lock") {
+            hits = ensemble.applyLock(
+              hits,
+              ensemblePlan.sharedOnsets,
+              beatsPerBar,
+              ppq,
+            );
+          } else if (voiceRel === "kinship") {
+            hits = ensemble.applyKinship(
+              hits,
+              ensemblePlan.sharedOnsets,
+              beatsPerBar,
+              ppq,
+              rnd,
+            );
+          } else if (isPrimaryMelodic && hasMelodicRespond) {
+            hits = ensemble.thinCallHalf(hits, beatsPerBar, ppq, rnd);
+          }
+        }
+
+        // Kit-only half-bar shift (melodic dialogue uses EnsemblePlan).
+        if (isDrumRole(role) && respondTracks.has(ti)) {
+          hits = callResponseShift(hits, ppq, beatsPerBar, true);
+        }
 
         const absHits = hits
           .map((h) => {

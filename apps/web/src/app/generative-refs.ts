@@ -498,6 +498,66 @@ export function pickMelodyCell(
   return src[Math.floor(rnd() * src.length)] ?? src[0]!;
 }
 
+/** Call / response melody pairs for antiphonal arrangement. */
+export type CallResponsePair = {
+  call: readonly MelodyEvent[];
+  response: readonly MelodyEvent[];
+};
+
+export const CALL_RESPONSE_PAIRS: readonly CallResponsePair[] = [
+  // Call fragment (5–3–1) ↔ Response fragment (6–5–4–1)
+  {
+    call: [
+      { degree: 4, sixteenths: 4, accent: true },
+      { degree: 2, sixteenths: 4 },
+      { degree: 0, sixteenths: 8 },
+    ],
+    response: [
+      { degree: 5, sixteenths: 4 },
+      { degree: 4, sixteenths: 4 },
+      { degree: 3, sixteenths: 4 },
+      { degree: 0, sixteenths: 4, accent: true },
+    ],
+  },
+  // Call–echo ↔ rising answer
+  {
+    call: [
+      { degree: 4, sixteenths: 4, accent: true },
+      { degree: 4, sixteenths: 4 },
+      { degree: 2, sixteenths: 4 },
+      { degree: 0, sixteenths: 4 },
+    ],
+    response: [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 2, sixteenths: 4 },
+      { degree: 4, sixteenths: 4 },
+      { degree: 7, sixteenths: 4 },
+    ],
+  },
+  // Sparse sigh call ↔ neighbour answer
+  {
+    call: [
+      { degree: 7, sixteenths: 4, accent: true },
+      { degree: 5, sixteenths: 4 },
+      { degree: 4, sixteenths: 8 },
+    ],
+    response: [
+      { degree: 0, sixteenths: 2, accent: true },
+      { degree: 1, sixteenths: 2 },
+      { degree: 0, sixteenths: 4 },
+      { degree: 2, sixteenths: 4 },
+      { degree: 0, sixteenths: 4 },
+    ],
+  },
+];
+
+export function pickCallResponsePair(rnd: () => number): CallResponsePair {
+  return (
+    CALL_RESPONSE_PAIRS[Math.floor(rnd() * CALL_RESPONSE_PAIRS.length)] ??
+    CALL_RESPONSE_PAIRS[0]!
+  );
+}
+
 /**
  * Arpeggio cells — degrees relative to *current chord root*
  * (0=root, 2=3rd, 4=5th, 6=7th, 7=octave). `degree: null` = rest.

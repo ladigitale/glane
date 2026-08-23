@@ -27,10 +27,12 @@
     "@supersoniks/concorde": "^4.6.0",
     "dexie": "^4.0.8",
     "lit": "^3.2.1",
-    "onnxruntime-web": "^1.22.0"
+    "onnxruntime-web": "^1.22.0",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@tailwindcss/container-queries": "^0.1.1",
+    "@types/three": "^0.185.4",
     "autoprefixer": "^10.4.16",
     "postcss": "^8.4.14",
     "tailwindcss": "^3.3.3",

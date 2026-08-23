@@ -17,9 +17,13 @@ import {
   scenesAt,
   type ReelPalette,
   type ReelSceneId,
+  type ReelViz,
 } from "./reel-export-viz";
+import {
+  createReelThreeViz,
+} from "./reel-export-three";
 
-export const REEL_MAX_DURATION_S = 30;
+export const REEL_MAX_DURATION_S = 90;
 export const REEL_FADE_OUT_S = 1.5;
 export const REEL_WIDTH = 1080;
 export const REEL_HEIGHT = 1920;
@@ -340,23 +344,35 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas2D unavailable");
 
-  const viz = createReelViz(REEL_WIDTH, REEL_HEIGHT);
+  // Prefer Three for all scenes; legacy WebGL/2D only if Three fails.
+  let threeViz: ReelViz | null = null;
+  try {
+    threeViz = await createReelThreeViz(REEL_WIDTH, REEL_HEIGHT);
+  } catch {
+    threeViz = null;
+  }
+  const viz = threeViz ? null : createReelViz(REEL_WIDTH, REEL_HEIGHT);
 
   const paint = (elapsed: number) => {
     const progress = Math.min(1, elapsed / durationS);
     const e = energyAt(energy, progress);
     const sc = scenesAt(scenes, elapsed);
-    if (viz) {
-      viz.render({
-        timeS: elapsed,
-        progress,
-        energy: e,
-        sceneA: sc.a,
-        sceneB: sc.b,
-        mix: sc.mix,
-        palette,
-        peaks,
-      });
+    const frame = {
+      timeS: elapsed,
+      progress,
+      energy: e,
+      sceneA: sc.a,
+      sceneB: sc.b,
+      mix: sc.mix,
+      palette,
+      peaks,
+    };
+
+    if (threeViz) {
+      threeViz.render(frame);
+      ctx.drawImage(threeViz.canvas, 0, 0);
+    } else if (viz) {
+      viz.render(frame);
       ctx.drawImage(viz.canvas, 0, 0);
     } else {
       paintReelScene2d(ctx, {
@@ -470,6 +486,7 @@ async function encode(opts: ReelEncodeOpts): Promise<ReelEncodeResult> {
     };
   } finally {
     viz?.dispose();
+    threeViz?.dispose();
     await audioCtx.close().catch(() => undefined);
   }
 }
