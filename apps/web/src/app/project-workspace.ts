@@ -75,7 +75,8 @@ export const projectWorkspace = {
     return all.filter((p) => !p.deletedAt);
   },
 
-  async ensure(): Promise<Project> {
+  /** Active project if any — never auto-creates. */
+  async ensure(): Promise<Project | null> {
     const prefs = await ensurePrefs();
     if (prefs.currentProjectId) {
       const cur = await db.projects.get(prefs.currentProjectId);
@@ -86,13 +87,15 @@ export const projectWorkspace = {
       await setCurrentId(list[0].id, false);
       return list[0];
     }
-    const created = await createBlankProject("Projet 1");
-    await setCurrentId(created.id, false);
-    return created;
+    if (prefs.currentProjectId) {
+      prefs.currentProjectId = "";
+      await db.prefs.put(prefs);
+    }
+    return null;
   },
 
-  async currentId(): Promise<string> {
-    return (await projectWorkspace.ensure()).id;
+  async currentId(): Promise<string | null> {
+    return (await projectWorkspace.ensure())?.id ?? null;
   },
 
   async switchTo(id: string): Promise<Project> {
@@ -218,8 +221,8 @@ export const projectWorkspace = {
     return project;
   },
 
-  /** Soft-delete project + cascade library/arrangement; switches to another workspace. */
-  async remove(id: string): Promise<Project> {
+  /** Soft-delete project + cascade library/arrangement; switches to another workspace if any. */
+  async remove(id: string): Promise<Project | null> {
     const p = await db.projects.get(id);
     if (!p || p.deletedAt) return projectWorkspace.ensure();
 

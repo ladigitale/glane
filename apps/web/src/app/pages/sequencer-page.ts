@@ -106,11 +106,12 @@ import {
   MAX_PX_PER_TICK,
   MIN_PX_PER_TICK,
   RULER_H,
-  TRACK_LABEL_PX,
   bindTimelineWheel,
+  TRACK_GUTTER_PX,
   formatClock,
   paintStretchedWave,
   scrollLeftToCenterUnit,
+  edgeScrollAtClientX,
   zoomAtClientX,
   pinchZoomAtClientX,
   lanePointerDistance,
@@ -118,11 +119,13 @@ import {
 } from "../timeline/timeline.js";
 import "../track-volume-rotary.js";
 import "../track-fx-control.js";
+import { formatTrackFxSummaryLines } from "../track-fx-control.js";
 import "../pop-select.js";
 import "../seek-bar.js";
 import "../transport-bar.js";
 import "../vu-meter.js";
 import { glIcon } from "../icon.js";
+import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import type { TransportAction } from "../transport-bar.js";
 import type { GlSeekBar } from "../seek-bar.js";
@@ -203,8 +206,18 @@ export class GlSequencerPage extends LitElement {
       margin-top: 0.2em;
       display: block;
     }
-    .seq-gen-modal sonic-fieldset {
+    .seq-gen-modal sonic-fieldset,
+    .seq-settings-modal sonic-fieldset {
       --sc-fieldset-mb: 0;
+    }
+    .seq-settings-modal {
+      max-height: min(80vh, 42rem);
+      overflow-y: auto;
+    }
+    .transport-wrap,
+    .master-mix,
+    .master-mix-conf {
+      overflow: visible;
     }
     .seq-gen-modal input[type="range"] {
       width: 100%;
@@ -245,49 +258,20 @@ export class GlSequencerPage extends LitElement {
       border-bottom: 1px solid color-mix(in srgb, var(--gl-fg) 12%, transparent);
     }
     .track-label {
-      width: ${TRACK_LABEL_PX}px;
+      width: ${TRACK_GUTTER_PX}px;
       flex-shrink: 0;
       min-height: 0;
-      overflow: hidden;
+      overflow: visible;
       background: var(--gl-ink);
       position: sticky;
       right: 0;
       z-index: 5;
       box-shadow: -4px 0 10px color-mix(in srgb, #000 28%, transparent);
     }
-    /* FX pop is position:fixed but trapped in this sticky stacking context — elevate while open. */
-    .track-label.fx-open {
-      z-index: 40;
-    }
-    .mute-sw {
-      position: relative;
-      width: 44px;
-      height: 24px;
-      border-radius: 12px;
-      border: 0;
-      padding: 0;
-      cursor: pointer;
-      background: color-mix(in srgb, var(--gl-fg) 22%, transparent);
-      flex-shrink: 0;
-      min-height: 24px;
-    }
-    .mute-sw.on {
-      background: color-mix(in srgb, var(--gl-danger, #c45) 55%, transparent);
-    }
-    .mute-sw::after {
-      content: "";
-      position: absolute;
-      top: 3px;
-      left: 3px;
-      width: 18px;
-      height: 18px;
-      border-radius: 50%;
-      background: var(--gl-fg);
-      transition: transform 120ms ease;
-    }
-    .mute-sw.on::after {
-      transform: translateX(20px);
-      background: var(--gl-ink);
+    /* Active track switch: checked = audible (green). */
+    .track-active-sw {
+      --sc-primary: var(--sc-success);
+      --sc-primary-content: var(--sc-success-content);
     }
     .lane {
       position: relative;
@@ -555,7 +539,7 @@ export class GlSequencerPage extends LitElement {
       z-index: 1;
     }
     .ruler-gutter {
-      width: ${TRACK_LABEL_PX}px;
+      width: ${TRACK_GUTTER_PX}px;
       flex-shrink: 0;
       position: sticky;
       right: 0;
@@ -668,8 +652,10 @@ export class GlSequencerPage extends LitElement {
   @state() private drawerOpen = true;
 
   @state() private dropTrackId: string | null = null;
-  /** Track whose FX pop is open — elevates sticky label above siblings. */
-  @state() private fxPopTrackId: string | null = null;
+  /** Track settings modal (active / volume / FX). */
+  @state() private trackSettingsId: string | null = null;
+  /** Master mix settings modal (preamp + FX). */
+  @state() private masterSettingsOpen = false;
   /** Playhead in ticks — px derived at render so zoom stays aligned. */
   @state() private playheadTick = 0;
   @state() private loadingPlay = false;
@@ -767,6 +753,10 @@ export class GlSequencerPage extends LitElement {
   #lastTapClipId: string | null = null;
   #lastTapAt = 0;
   #selDragging = false;
+  /** Edge auto-pan while dragging loop selection / edges. */
+  #selEdgeScrollRaf = 0;
+  #selEdgeScrollX = 0;
+  #selEdgeScrollApply: (() => void) | null = null;
   /** Lane pan / zoom / pinch — multi-pointer bookkeeping. */
   #lanePtrs = new Map<number, { x: number; y: number }>();
   #laneKind: GestureKind | "pinch" | "pinch-done" | null = null;
@@ -865,9 +855,69 @@ export class GlSequencerPage extends LitElement {
         void this.#paintClipWaves();
       });
     }
+    this.#syncChromeMore();
+  }
+
+  #seqMoreItems(): MoreMenuEntry[] {
+    const bars = this.project?.bars ?? 16;
+    const bpm = this.project?.bpm ?? 120;
+    return [
+      {
+        label: t("seq.bpmTitle"),
+        icon: "gauge",
+        hint: String(bpm),
+        disabled: !this.project,
+        onClick: () => this.#openSeqModal("bpm"),
+      },
+      {
+        label: t("seq.barsTitle"),
+        icon: "ruler",
+        hint: `${bars} ${t("seq.barsUnit")}`,
+        disabled: !this.project,
+        onClick: () => this.#openSeqModal("bars"),
+      },
+      "divider",
+      {
+        label: t("seq.undo"),
+        icon: "undo",
+        onClick: () => void this.#undo(),
+      },
+      {
+        label: t("seq.generate"),
+        icon: "wand",
+        disabled:
+          !this.project ||
+          this.samples.length === 0 ||
+          this.tracks.length === 0,
+        onClick: () => this.#openSeqModal("generate"),
+      },
+      {
+        label: this.exportBusy ?? t("export.open"),
+        icon: "download",
+        disabled:
+          !this.project ||
+          this.clips.length === 0 ||
+          Boolean(this.exportBusy),
+        onClick: () => void this.#toggleExportPanel(),
+      },
+      "divider",
+      {
+        label: t("seq.docs"),
+        icon: "book-open",
+        onClick: () => this.#openSeqModal("docs"),
+      },
+    ];
+  }
+
+  #syncChromeMore(): void {
+    chromeMore.set({
+      ariaLabel: t("seq.more"),
+      items: this.#seqMoreItems(),
+    });
   }
 
   override disconnectedCallback(): void {
+    chromeMore.clear();
     this.#persistUiState();
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
@@ -886,6 +936,7 @@ export class GlSequencerPage extends LitElement {
     this.#tlRo = null;
     cancelAnimationFrame(this.#raf);
     cancelAnimationFrame(this.#wavePaintRaf);
+    this.#stopSelEdgeScroll();
     this.#engine?.stop();
     this.#revokeReel();
     super.disconnectedCallback();
@@ -1111,7 +1162,7 @@ export class GlSequencerPage extends LitElement {
     const timeline = this.#timelineEl();
     if (!timeline) return;
     const max = Math.max(1, this.#projectLengthTick());
-    const usableW = Math.max(64, timeline.clientWidth - TRACK_LABEL_PX);
+    const usableW = Math.max(64, timeline.clientWidth - TRACK_GUTTER_PX);
     const start = timeline.scrollLeft / this.pxPerTick;
     const end = (timeline.scrollLeft + usableW) / this.pxPerTick;
     const viewStart = Math.max(0, Math.min(max, start));
@@ -1140,13 +1191,13 @@ export class GlSequencerPage extends LitElement {
     }
     const timeline = this.#timelineEl();
     if (!timeline) return;
-    const usableW = Math.max(64, timeline.clientWidth - TRACK_LABEL_PX);
+    const usableW = Math.max(64, timeline.clientWidth - TRACK_GUTTER_PX);
     const next = scrollLeftToCenterUnit(
       this.#transportPlayheadTick(),
       this.pxPerTick,
       usableW,
       0,
-      Math.max(usableW, timeline.scrollWidth - TRACK_LABEL_PX),
+      Math.max(usableW, timeline.scrollWidth - TRACK_GUTTER_PX),
     );
     if (timeline.scrollLeft !== next) timeline.scrollLeft = next;
     else this.#syncViewWindow();
@@ -1273,11 +1324,11 @@ export class GlSequencerPage extends LitElement {
     const seqEndPx = seqLenTick * this.pxPerTick;
     const bpm = this.project?.bpm ?? 120;
     return html`
-      <div
-        class="toolbar flex shrink-0 flex-wrap items-center gap-2 px-4 pb-1.5 pt-3 max-md:gap-1.5 max-md:px-2.5 max-md:pb-1 max-md:pt-2"
-      >
-        ${this.rotateClipTool
-          ? html`<div
+      ${this.rotateClipTool
+        ? html`<div
+            class="toolbar flex shrink-0 flex-wrap items-center gap-2 px-4 pb-1.5 pt-3 max-md:gap-1.5 max-md:px-2.5 max-md:pb-1 max-md:pt-2"
+          >
+            <div
               class="flex min-w-0 flex-1 items-center gap-2 text-xs text-content"
               role="status"
             >
@@ -1290,76 +1341,14 @@ export class GlSequencerPage extends LitElement {
               >
                 ${t("dialog.cancel")}
               </sonic-button>
-            </div>`
-          : nothing}
-        <sonic-pop
-          class="more ${this.rotateClipTool ? "" : "ml-auto"}"
-          placement="bottom-end"
-        >
-          <sonic-button
-            shape="circle"
-            variant="ghost"
-            type="neutral"
-            size="sm"
-            icon
-            data-aria-label=${t("seq.more")}
-          >
-            ${glIcon("more-vertical", { size: "sm" })}
-          </sonic-button>
-          <div
-            slot="content"
-            class="max-h-[min(70dvh,24rem)] overflow-y-auto overscroll-contain"
-          >
-            <sonic-menu direction="column" align="left" size="sm">
-              <sonic-menu-item
-                ?disabled=${!this.project}
-                @click=${() => this.#openSeqModal("bpm")}
-              >
-                ${glIcon("gauge", { slot: "prefix", size: "xs" })}
-                ${t("seq.bpmTitle")} · ${bpm}
-              </sonic-menu-item>
-              <sonic-menu-item
-                ?disabled=${!this.project}
-                @click=${() => this.#openSeqModal("bars")}
-              >
-                ${glIcon("ruler", { slot: "prefix", size: "xs" })}
-                ${t("seq.barsTitle")} · ${bars} ${t("seq.barsUnit")}
-              </sonic-menu-item>
-              <sonic-divider></sonic-divider>
-              <sonic-menu-item @click=${() => void this.#undo()}>
-                ${glIcon("undo", { slot: "prefix", size: "xs" })}
-                ${t("seq.undo")}
-              </sonic-menu-item>
-              <sonic-menu-item
-                ?disabled=${!this.project ||
-                this.samples.length === 0 ||
-                this.tracks.length === 0}
-                @click=${() => this.#openSeqModal("generate")}
-              >
-                ${glIcon("wand", { slot: "prefix", size: "xs" })}
-                ${t("seq.generate")}
-              </sonic-menu-item>
-              <sonic-menu-item
-                ?disabled=${!this.project ||
-                this.clips.length === 0 ||
-                Boolean(this.exportBusy)}
-                @click=${() => void this.#toggleExportPanel()}
-              >
-                ${glIcon("download", { slot: "prefix", size: "xs" })}
-                ${this.exportBusy ?? t("export.open")}
-              </sonic-menu-item>
-              <sonic-divider></sonic-divider>
-              <sonic-menu-item @click=${() => this.#openSeqModal("docs")}>
-                ${glIcon("book-open", { slot: "prefix", size: "xs" })}
-                ${t("seq.docs")}
-              </sonic-menu-item>
-            </sonic-menu>
-          </div>
-        </sonic-pop>
-      </div>
+            </div>
+          </div>`
+        : nothing}
       ${this.#renderExportModal()}
       ${this.#renderSeqModals(bars, seqDurMs)}
       ${this.#renderClipOptsModal()}
+      ${this.#renderTrackSettingsModal()}
+      ${this.#renderMasterSettingsModal()}
       ${this.#renderClipCtxMenu()}
       <div class="workspace relative flex min-h-0 flex-1 overflow-hidden">
         <div class="timeline">
@@ -1378,7 +1367,7 @@ export class GlSequencerPage extends LitElement {
             : nothing}
           <div
             class="timeline-canvas"
-            style="min-width:${laneW + TRACK_LABEL_PX + Math.ceil(HANDLE_PX / 2)}px"
+            style="min-width:${laneW + TRACK_GUTTER_PX + Math.ceil(HANDLE_PX / 2)}px"
           >
             ${this.#renderTimeRuler(
               laneW,
@@ -1453,7 +1442,7 @@ export class GlSequencerPage extends LitElement {
           >${this.viewMode === "vue" ? t("tl.view") : t("tl.global")}</span
         >
       </div>
-      <div class="transport-wrap shrink-0 px-4 pb-1.5 max-md:px-2.5 max-md:pb-1">
+      <div class="transport-wrap shrink-0 px-4 pb-2.5 max-md:px-2.5 max-md:pb-2">
         <gl-transport-bar
           .playing=${this.playing}
           .loading=${this.loadingPlay}
@@ -1666,8 +1655,7 @@ export class GlSequencerPage extends LitElement {
   #renderTrack(tr: Track, laneW: number) {
     const laneClips = this.clips.filter((c) => c.trackId === tr.id);
     const xfades = trackXfadeZones(laneClips);
-    const lin = gainDbToLin(tr.gainDb);
-    const fxOpen = this.fxPopTrackId === tr.id;
+    const lines = this.#trackConfLines(tr);
     return html`
       <div class="track">
         <div
@@ -1689,62 +1677,135 @@ export class GlSequencerPage extends LitElement {
           ${laneClips.map((c) => this.#renderClip(c))}
         </div>
         <div
-          class="track-label flex min-h-0 flex-col justify-center gap-0.5 overflow-hidden px-1.5 py-1 text-xs text-neutral-500 ${fxOpen
-            ? "fx-open"
-            : ""}"
+          class="track-label relative flex min-h-0 flex-col justify-center overflow-visible py-1 pl-1 pr-7 text-neutral-500"
         >
-          <div class="flex min-w-0 items-baseline justify-between gap-1">
-            <span class="truncate text-content">${tr.name}</span>
-            <span class="shrink-0 font-mono text-[0.6rem] opacity-75"
-              >×${lin.toFixed(lin === 0 || lin === 1 || lin === 2 ? 0 : 2)}</span
-            >
+          <div
+            class="flex min-w-0 flex-col gap-px font-mono text-[0.6rem] leading-tight"
+            title=${lines.join(" · ")}
+          >
+            ${lines.map(
+              (line) => html`<span class="truncate">${line}</span>`,
+            )}
           </div>
-          <div class="flex min-w-0 flex-nowrap items-center gap-0.5 overflow-hidden">
-            <button
-              type="button"
-              class="mute-sw ${tr.mute ? "on" : ""}"
-              title=${tr.mute ? "Unmute" : "Mute"}
-              aria-pressed=${tr.mute}
-              aria-label=${tr.mute ? "Unmute" : "Mute"}
-              @click=${() => void this.#toggleMute(tr)}
-            ></button>
-            <gl-track-volume-rotary
-              .gainDb=${tr.gainDb}
-              @gl-gain=${(e: CustomEvent<{ gainDb: number; commit: boolean }>) =>
-                void this.#onTrackGain(tr, e.detail.gainDb, e.detail.commit)}
-            ></gl-track-volume-rotary>
-            <button
-              type="button"
-              class="solo inline-flex h-6 w-7 items-center justify-center rounded-md border border-neutral-500/20 bg-transparent p-0 text-neutral-500 ${tr.solo
-                ? "border-transparent bg-primary text-neutral-0"
-                : ""}"
-              title="Solo"
-              aria-pressed=${tr.solo}
-              @click=${() => void this.#toggleSolo(tr)}
-            >
-              ${glIcon("headphones", { size: "xs" })}
-            </button>
-            <gl-track-fx-control
-              compact
-              .fx=${tr.fx}
-              @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
-                void this.#onTrackFx(tr, e.detail.fx, e.detail.commit)}
-              @gl-fx-pop=${(e: CustomEvent<{ open: boolean }>) =>
-                this.#onTrackFxPop(tr.id, e.detail.open)}
-            ></gl-track-fx-control>
-          </div>
+          <sonic-button
+            shape="circle"
+            variant="ghost"
+            type="neutral"
+            size="xs"
+            icon
+            class="absolute right-0.5 top-0.5 shrink-0"
+            data-aria-label=${`${tr.name} — ${t("seq.trackSettingsHint")}`}
+            title=${t("seq.trackSettingsHint")}
+            @click=${() => {
+              this.trackSettingsId = tr.id;
+            }}
+          >
+            ${glIcon("sliders", { size: "xs" })}
+          </sonic-button>
         </div>
       </div>
     `;
   }
 
-  #onTrackFxPop(trackId: string, open: boolean) {
-    this.fxPopTrackId = open
-      ? trackId
-      : this.fxPopTrackId === trackId
-        ? null
-        : this.fxPopTrackId;
+  #gainLinLabel(gainDb: number): string {
+    const lin = gainDbToLin(gainDb);
+    return `×${lin.toFixed(lin === 0 || lin === 1 || lin === 2 ? 0 : 2)}`;
   }
+
+  /** One line per conf family for the sticky gutter (no track name). */
+  #trackConfLines(tr: Track): string[] {
+    const lines: string[] = [];
+    if (tr.mute) lines.push("M");
+    lines.push(this.#gainLinLabel(tr.gainDb));
+    lines.push(...formatTrackFxSummaryLines(tr.fx));
+    return lines;
+  }
+
+  #masterConfLines(p: Project): string[] {
+    const [fx0, fx1] = this.#masterFxPair();
+    const lines = [this.#gainLinLabel(p.preampGainDb ?? 0)];
+    lines.push(...formatTrackFxSummaryLines(fx0, true));
+    lines.push(...formatTrackFxSummaryLines(fx1, true));
+    return lines;
+  }
+
+  #renderTrackSettingsModal() {
+    const tr = this.tracks.find((t) => t.id === this.trackSettingsId);
+    const open = !!tr;
+    return html`
+      <sonic-modal
+        align="left"
+        maxWidth="28rem"
+        .visible=${open}
+        @hide=${() => {
+          this.trackSettingsId = null;
+        }}
+      >
+        <sonic-modal-title
+          >${tr
+            ? `${t("seq.trackSettings")} — ${tr.name}`
+            : t("seq.trackSettings")}</sonic-modal-title
+        >
+        <sonic-modal-content>
+          ${tr
+            ? html`
+                <div
+                  class="seq-settings-modal flex w-full flex-col gap-4 text-content"
+                >
+                  <sonic-fieldset label=${t("seq.sectionVolume")} tight>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <sonic-switch
+                        class="track-active-sw"
+                        .checked=${tr.mute ? null : true}
+                        @change=${(e: Event) => {
+                          const on =
+                            (e.target as HTMLElement & { checked: true | null })
+                              .checked === true;
+                          void this.#setTrackActive(tr, on);
+                        }}
+                      >
+                        ${t("seq.trackActive")}
+                      </sonic-switch>
+                      <gl-track-volume-rotary
+                        .gainDb=${tr.gainDb}
+                        @gl-gain=${(e: CustomEvent<{
+                          gainDb: number;
+                          commit: boolean;
+                        }>) =>
+                          void this.#onTrackGain(
+                            tr,
+                            e.detail.gainDb,
+                            e.detail.commit,
+                          )}
+                      ></gl-track-volume-rotary>
+                      <span class="font-mono text-xs text-neutral-500"
+                        >${this.#gainLinLabel(tr.gainDb)}</span
+                      >
+                    </div>
+                  </sonic-fieldset>
+                  <gl-track-fx-control
+                    inline
+                    .fx=${tr.fx}
+                    .fxAriaLabel=${t("seq.sectionFx")}
+                    @gl-fx=${(e: CustomEvent<{
+                      fx: TrackFx;
+                      commit: boolean;
+                    }>) =>
+                      void this.#onTrackFx(tr, e.detail.fx, e.detail.commit)}
+                  ></gl-track-fx-control>
+                </div>
+              `
+            : nothing}
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button hideModal variant="outline" type="neutral">
+            ${t("dialog.ok")}
+          </sonic-button>
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
+  }
+
 
   #renderClip(c: Clip) {
     const sample = this.samples.find((s) => s.id === c.sampleId);
@@ -1797,6 +1858,10 @@ export class GlSequencerPage extends LitElement {
 
   async #loadSamples(): Promise<void> {
     const projectId = this.project?.id ?? (await projectWorkspace.currentId());
+    if (!projectId) {
+      this.samples = [];
+      return;
+    }
     this.samples = await db.samples
       .where("projectId")
       .equals(projectId)
@@ -2001,6 +2066,13 @@ export class GlSequencerPage extends LitElement {
       const cur = await projectWorkspace.currentId();
       if (cur !== p.id) await projectWorkspace.switchTo(p.id);
     }
+    if (!p) {
+      this.project = null;
+      this.tracks = [];
+      this.clips = [];
+      this.selectedId = null;
+      return;
+    }
     if (this.playing) {
       this.#engine?.stop();
       this.playing = false;
@@ -2056,39 +2128,43 @@ export class GlSequencerPage extends LitElement {
   #renderMasterMix() {
     const p = this.project;
     if (!p) return nothing;
-    const [fx0, fx1] = this.#masterFxPair();
+    const lines = this.#masterConfLines(p);
     return html`
       <div
-        class="flex items-center gap-1.5"
+        class="master-mix flex items-center gap-2 overflow-visible"
         role="group"
         aria-label=${t("seq.masterMix")}
       >
-        <gl-track-volume-rotary
-          large
-          .label=${t("seq.preamp")}
-          title=${t("seq.preampHint")}
-          .gainDb=${p.preampGainDb ?? 0}
-          @gl-gain=${(e: CustomEvent<{ gainDb: number; commit: boolean }>) =>
-            void this.#onPreampGain(e.detail.gainDb, e.detail.commit)}
-        ></gl-track-volume-rotary>
-        <gl-track-fx-control
-          compact
-          wetOnly
-          size="xs"
-          .fxAriaLabel=${t("seq.masterFx1")}
-          .fx=${fx0}
-          @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
-            void this.#onMasterFx(0, e.detail.fx, e.detail.commit)}
-        ></gl-track-fx-control>
-        <gl-track-fx-control
-          compact
-          wetOnly
-          size="xs"
-          .fxAriaLabel=${t("seq.masterFx2")}
-          .fx=${fx1}
-          @gl-fx=${(e: CustomEvent<{ fx: TrackFx; commit: boolean }>) =>
-            void this.#onMasterFx(1, e.detail.fx, e.detail.commit)}
-        ></gl-track-fx-control>
+        <div
+          class="master-mix-conf relative flex min-w-[5rem] flex-col justify-center overflow-visible py-0.5 pl-0.5 pr-7 text-neutral-500"
+        >
+          <div
+            class="flex flex-col gap-px overflow-visible font-mono text-[0.6rem] leading-snug"
+            title=${lines.join(" · ")}
+          >
+            ${lines.map(
+              (line) =>
+                html`<span class="block overflow-visible whitespace-nowrap"
+                  >${line}</span
+                >`,
+            )}
+          </div>
+          <sonic-button
+            shape="circle"
+            variant="ghost"
+            type="neutral"
+            size="xs"
+            icon
+            class="absolute right-0 top-0 shrink-0"
+            data-aria-label=${t("seq.masterSettingsHint")}
+            title=${t("seq.masterSettingsHint")}
+            @click=${() => {
+              this.masterSettingsOpen = true;
+            }}
+          >
+            ${glIcon("sliders", { size: "xs" })}
+          </sonic-button>
+        </div>
         <gl-vu-meter
           .analyser=${this.#engine?.analyser ?? null}
           ?active=${this.playing}
@@ -2098,15 +2174,86 @@ export class GlSequencerPage extends LitElement {
     `;
   }
 
-  async #toggleMute(tr: Track): Promise<void> {
-    tr.mute = !tr.mute;
-    await db.tracks.put(tr);
-    this.tracks = [...this.tracks];
-    if (this.playing) await this.#resyncSchedule();
+  #renderMasterSettingsModal() {
+    const p = this.project;
+    const [fx0, fx1] = p ? this.#masterFxPair() : [null, null];
+    return html`
+      <sonic-modal
+        align="left"
+        maxWidth="28rem"
+        .visible=${this.masterSettingsOpen && !!p}
+        @hide=${() => {
+          this.masterSettingsOpen = false;
+        }}
+      >
+        <sonic-modal-title>${t("seq.masterSettings")}</sonic-modal-title>
+        <sonic-modal-content>
+          ${p && fx0 && fx1
+            ? html`
+                <div
+                  class="seq-settings-modal flex w-full flex-col gap-4 text-content"
+                >
+                  <sonic-fieldset label=${t("seq.preamp")} tight>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <gl-track-volume-rotary
+                        large
+                        .label=${t("seq.preamp")}
+                        title=${t("seq.preampHint")}
+                        .gainDb=${p.preampGainDb ?? 0}
+                        @gl-gain=${(e: CustomEvent<{
+                          gainDb: number;
+                          commit: boolean;
+                        }>) =>
+                          void this.#onPreampGain(
+                            e.detail.gainDb,
+                            e.detail.commit,
+                          )}
+                      ></gl-track-volume-rotary>
+                      <span class="font-mono text-xs text-neutral-500"
+                        >${t("seq.preamp")}
+                        ${this.#gainLinLabel(p.preampGainDb ?? 0)}</span
+                      >
+                    </div>
+                  </sonic-fieldset>
+                  <gl-track-fx-control
+                    inline
+                    wetOnly
+                    .fxAriaLabel=${t("seq.masterFx1")}
+                    .fx=${fx0}
+                    @gl-fx=${(e: CustomEvent<{
+                      fx: TrackFx;
+                      commit: boolean;
+                    }>) =>
+                      void this.#onMasterFx(0, e.detail.fx, e.detail.commit)}
+                  ></gl-track-fx-control>
+                  <gl-track-fx-control
+                    inline
+                    wetOnly
+                    .fxAriaLabel=${t("seq.masterFx2")}
+                    .fx=${fx1}
+                    @gl-fx=${(e: CustomEvent<{
+                      fx: TrackFx;
+                      commit: boolean;
+                    }>) =>
+                      void this.#onMasterFx(1, e.detail.fx, e.detail.commit)}
+                  ></gl-track-fx-control>
+                </div>
+              `
+            : nothing}
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button hideModal variant="outline" type="neutral">
+            ${t("dialog.ok")}
+          </sonic-button>
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
   }
 
-  async #toggleSolo(tr: Track): Promise<void> {
-    tr.solo = !tr.solo;
+
+  /** Active = audible; inactive mutes the track. */
+  async #setTrackActive(tr: Track, active: boolean): Promise<void> {
+    tr.mute = !active;
     await db.tracks.put(tr);
     this.tracks = [...this.tracks];
     if (this.playing) await this.#resyncSchedule();
@@ -3211,7 +3358,7 @@ export class GlSequencerPage extends LitElement {
             <ul
               class="m-0 flex list-disc flex-col gap-1.5 pl-[1.1rem] text-[0.85rem] text-neutral-500"
             >
-              <li>Outils de piste : colonne sticky à droite (mute / volume / solo / FX)</li>
+              <li>Outils de piste : rappel condensé à droite → une modale (volume + effets + filtres)</li>
               <li>Sons : tiroir vertical à droite (glisser sur une piste)</li>
               <li>Lecture en boucle</li>
               <li>Fond : pincer = zoom · ↕ zoom · ↔ pan</li>
@@ -5076,6 +5223,46 @@ export class GlSequencerPage extends LitElement {
       Math.min(this.#projectLengthTick(), this.#tickAtClientX(clientX)),
     );
 
+  /** Pan the timeline when the pointer is near a horizontal edge (selection drag). */
+  #applySelEdgeScroll(clientX: number): boolean {
+    const timeline = this.#timelineEl();
+    if (!timeline) return false;
+    const dx = edgeScrollAtClientX(timeline, clientX, {
+      rightInsetPx: TRACK_GUTTER_PX,
+    });
+    if (dx === 0) return false;
+    this.#setFollowPlayhead(false);
+    return true;
+  }
+
+  #pumpSelEdgeScroll = (): void => {
+    this.#selEdgeScrollRaf = 0;
+    if (!this.#selEdgeScrollApply) return;
+    if (!this.#applySelEdgeScroll(this.#selEdgeScrollX)) return;
+    this.#selEdgeScrollApply();
+    this.#selEdgeScrollRaf = requestAnimationFrame(this.#pumpSelEdgeScroll);
+  };
+
+  #onSelDragMove(clientX: number, apply: (clientX: number) => void): void {
+    this.#selEdgeScrollX = clientX;
+    this.#selEdgeScrollApply = () => apply(this.#selEdgeScrollX);
+    apply(clientX);
+    if (this.#applySelEdgeScroll(clientX)) {
+      apply(this.#selEdgeScrollX);
+      if (!this.#selEdgeScrollRaf) {
+        this.#selEdgeScrollRaf = requestAnimationFrame(this.#pumpSelEdgeScroll);
+      }
+    }
+  }
+
+  #stopSelEdgeScroll(): void {
+    this.#selEdgeScrollApply = null;
+    if (this.#selEdgeScrollRaf) {
+      cancelAnimationFrame(this.#selEdgeScrollRaf);
+      this.#selEdgeScrollRaf = 0;
+    }
+  }
+
   /** Click-drag on the time ruler creates / redraws the loop region. */
   #rulerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
@@ -5086,15 +5273,19 @@ export class GlSequencerPage extends LitElement {
     this.selEndTick = origin;
     this.#selDragging = true;
     lane.setPointerCapture(e.pointerId);
+    const apply = (clientX: number) => {
+      this.selEndTick = this.#tickAtClamped(clientX);
+      this.#syncTransportLoop();
+    };
     const move = (ev: PointerEvent) => {
       if (!this.#selDragging) return;
-      this.selEndTick = this.#tickAtClamped(ev.clientX);
-      this.#syncTransportLoop();
+      this.#onSelDragMove(ev.clientX, apply);
     };
     const up = (ev: PointerEvent) => {
       lane.removeEventListener("pointermove", move);
       lane.removeEventListener("pointerup", up);
       lane.removeEventListener("pointercancel", up);
+      this.#stopSelEdgeScroll();
       this.#selDragging = false;
       const end = this.#tickAtClamped(ev.clientX);
       this.selEndTick = end;
@@ -5124,8 +5315,8 @@ export class GlSequencerPage extends LitElement {
     el.setPointerCapture(e.pointerId);
     const a0 = Math.min(this.selStartTick, this.selEndTick);
     const b0 = Math.max(this.selStartTick, this.selEndTick);
-    const move = (ev: PointerEvent) => {
-      const t = this.#tickAtClamped(ev.clientX);
+    const apply = (clientX: number) => {
+      const t = this.#tickAtClamped(clientX);
       if (edge === "start") {
         this.selStartTick = Math.min(t, b0 - MIN_CLIP_TICKS / 4);
         this.selEndTick = b0;
@@ -5135,10 +5326,14 @@ export class GlSequencerPage extends LitElement {
       }
       this.#syncTransportLoop();
     };
+    const move = (ev: PointerEvent) => {
+      this.#onSelDragMove(ev.clientX, apply);
+    };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
+      this.#stopSelEdgeScroll();
       if (this.selStartTick != null && this.selEndTick != null) {
         const a = Math.min(this.selStartTick, this.selEndTick);
         const b = Math.max(this.selStartTick, this.selEndTick);
@@ -5164,8 +5359,8 @@ export class GlSequencerPage extends LitElement {
     const b0 = Math.max(this.selStartTick, this.selEndTick);
     const width = Math.max(1, b0 - a0);
     const originTick = this.#tickAtClamped(e.clientX);
-    const move = (ev: PointerEvent) => {
-      const delta = this.#tickAtClamped(ev.clientX) - originTick;
+    const apply = (clientX: number) => {
+      const delta = this.#tickAtClamped(clientX) - originTick;
       let nextA = a0 + delta;
       let nextB = nextA + width;
       const maxT = this.#projectLengthTick();
@@ -5181,10 +5376,14 @@ export class GlSequencerPage extends LitElement {
       this.selEndTick = nextB;
       this.#syncTransportLoop();
     };
+    const move = (ev: PointerEvent) => {
+      this.#onSelDragMove(ev.clientX, apply);
+    };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
+      this.#stopSelEdgeScroll();
       this.#syncTransportLoop();
       if (this.playing) void this.#resyncSchedule();
     };

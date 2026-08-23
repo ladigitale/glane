@@ -1,5 +1,5 @@
 import { LitElement, css, html, nothing } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, state } from "lit/decorators.js";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import {
@@ -22,10 +22,8 @@ import {
   type MachineKnobId,
   type MachineFilterType,
 } from "@glane/audio-synth";
-import type { Sample } from "@glane/core-model";
 import tailwind from "../../css/tailwind";
 import { t, tf } from "../i18n/messages.js";
-import { db } from "../db.js";
 import { navigate } from "../router.js";
 import {
   PROJECT_CHANGE_EVENT,
@@ -241,14 +239,10 @@ export class GlSynthPage extends LitElement {
     `,
   ];
 
-  @property({ attribute: false }) sampleId = "";
-
   @state() private phase: Phase = "edit";
   @state() private cards: SynthRoleCard[] = [
     audioSynth.roles.createRoleCard("pivot", { quantity: 8 }),
   ];
-  @state() private referent: Sample | null = null;
-  @state() private fromLibrary = false;
   @state() private busy = false;
   @state() private progress = "";
   @state() private drafts: DraftItem[] = [];
@@ -318,11 +312,6 @@ export class GlSynthPage extends LitElement {
   @handle(synthFormKey.mode)
   onMode(mode: SynthMode): void {
     if (this.#booting || !mode) return;
-    if (this.fromLibrary && mode !== "variations") {
-      this.statusMsg = t("synth.familyNoReferent");
-      set(synthFormKey.mode, "variations");
-      return;
-    }
     this.#applyMode(mode);
   }
 
@@ -413,7 +402,6 @@ export class GlSynthPage extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has("sampleId")) void this.#boot();
     if (this.#booting) return;
     const persistKeys = [
       "mode",
@@ -503,19 +491,10 @@ export class GlSynthPage extends LitElement {
   #flushPersist(): void {
     if (!this.#projectId || this.#booting) return;
     const prev = synthUiState.load(this.#projectId) ?? {};
-    const snap = this.#snapshotUi();
-    const sampleId = this.sampleId?.trim();
-    if (sampleId && this.fromLibrary) {
-      synthUiState.save(this.#projectId, {
-        ...prev,
-        referent: { ...snap, sampleId },
-      });
-    } else if (!sampleId) {
-      synthUiState.save(this.#projectId, {
-        ...prev,
-        blank: snap,
-      });
-    }
+    synthUiState.save(this.#projectId, {
+      ...prev,
+      blank: this.#snapshotUi(),
+    });
   }
 
   async #boot(): Promise<void> {
@@ -533,9 +512,7 @@ export class GlSynthPage extends LitElement {
         : null;
 
       const handoff = takeSynthHandoff();
-      if (handoff && !this.sampleId?.trim()) {
-        this.fromLibrary = false;
-        this.referent = null;
+      if (handoff) {
         this.bpm = handoff.bpm ?? 120;
         this.tonicPc = handoff.tonicPc ?? 0;
         this.scaleMode =
@@ -558,147 +535,27 @@ export class GlSynthPage extends LitElement {
         return;
       }
 
-      const id = this.sampleId?.trim();
-      if (!id) {
-        this.fromLibrary = false;
-        this.referent = null;
-        if (saved?.blank) {
-          this.#applySnapshot(saved.blank);
-          this.#pushRoleForm();
-          return;
-        }
-        this.cards = [
-          audioSynth.roles.createRoleCard("pivot", { quantity: 8 }),
-        ];
-        this.#pushSynthForm({
-          mode: "variations",
-          coherence: "musical",
-          freeFmRatios: null,
-          openCardId: this.cards[0]?.id ?? "",
-          globalQty: "8",
-        });
-        this.#pushRoleForm(this.cards[0]);
-        return;
-      }
-
-      const sample = await db.samples.get(id);
-      if (gen !== this.#bootGen) return;
-      if (!sample || sample.deletedAt) {
-        this.fromLibrary = false;
-        this.referent = null;
-        return;
-      }
-
-      this.fromLibrary = true;
-      this.referent = sample;
-
-      if (saved?.referent?.sampleId === id) {
-        this.#applySnapshot(saved.referent);
+      if (saved?.blank) {
+        this.#applySnapshot(saved.blank);
         this.#pushRoleForm();
         return;
       }
-
-      await this.#bootLibraryCard(sample, id);
+      this.cards = [
+        audioSynth.roles.createRoleCard("pivot", { quantity: 8 }),
+      ];
+      this.#pushSynthForm({
+        mode: "variations",
+        coherence: "musical",
+        freeFmRatios: null,
+        openCardId: this.cards[0]?.id ?? "",
+        globalQty: "8",
+      });
+      this.#pushRoleForm(this.cards[0]);
     } finally {
       if (gen !== this.#bootGen) return;
       this.#booting = false;
       this.#queuePersist();
     }
-  }
-
-  async #bootLibraryCard(
-    sample: Sample,
-    id: string,
-  ): Promise<void> {
-    const analysis = await db.analyses.get(id);
-    // Keep pitch class of the referent (metadata + free-FM musical helpers).
-    this.tonicPc =
-      analysis?.pitchHz && analysis.pitchHz > 20 && analysis.pitchHz < 4000
-        ? audioSynth.coherence.hzToPitchClass(analysis.pitchHz)
-        : 0;
-    const card = audioSynth.roles.createRoleCard("pivot", { quantity: 8 });
-    // Library referent: editable min/max ranges around analysis (not pivot UI).
-    card.usePivot = false;
-    card.pivot = audioSynth.anchorFromAnalysis({
-      durationMs: sample.durationMs,
-      pitchHz: analysis?.pitchHz,
-      centroidHz: analysis?.centroidHz,
-      transientDensity: analysis?.transientDensity,
-      harmonicity: analysis?.harmonicity,
-    });
-    card.pivotFm = {
-      ...audioSynth.defaultsFm,
-      carrier: card.pivot.fund,
-      duration: card.pivot.duration,
-      ampAttack: card.pivot.ampAttack,
-      ampDecay: card.pivot.ampDecay,
-      ampSustain: card.pivot.ampSustain,
-      ampRelease: card.pivot.ampRelease,
-    };
-    card.pivotNoise = {
-      ...audioSynth.defaultsNoise,
-      lp: card.pivot.cutoff,
-      duration: card.pivot.duration,
-      ampAttack: card.pivot.ampAttack,
-      ampDecay: card.pivot.ampDecay,
-      ampSustain: card.pivot.ampSustain,
-      ampRelease: card.pivot.ampRelease,
-    };
-    card.pivotAdditive = {
-      ...audioSynth.defaultsAdditive,
-      fund: card.pivot.fund,
-      duration: card.pivot.duration,
-      ampAttack: card.pivot.ampAttack,
-      ampDecay: card.pivot.ampDecay,
-      ampSustain: card.pivot.ampSustain,
-      ampRelease: card.pivot.ampRelease,
-    };
-    card.pivotPhysical = {
-      ...audioSynth.defaultsPhysical,
-      length: card.pivot.fund,
-      duration: card.pivot.duration,
-      ampAttack: card.pivot.ampAttack,
-      ampDecay: card.pivot.ampDecay,
-      ampSustain: card.pivot.ampSustain,
-      ampRelease: card.pivot.ampRelease,
-    };
-    card.pivotVoice = {
-      ...audioSynth.defaultsVoice,
-      fund: card.pivot.fund,
-      duration: card.pivot.duration,
-      ampAttack: card.pivot.ampAttack,
-      ampDecay: card.pivot.ampDecay,
-      ampSustain: card.pivot.ampSustain,
-      ampRelease: card.pivot.ampRelease,
-    };
-    card.pivotGranular = {
-      ...audioSynth.defaultsGranular,
-      duration: card.pivot.duration,
-      ampAttack: card.pivot.ampAttack,
-      ampDecay: card.pivot.ampDecay,
-      ampSustain: card.pivot.ampSustain,
-      ampRelease: card.pivot.ampRelease,
-    };
-    Object.assign(card, this.#rangesAroundPivots(card, card.randomness));
-    // Slightly tighter / asymmetric band around the analysis pivot.
-    const span = card.randomness * 0.55;
-    for (const key of audioSynth.keys) {
-      const p = card.pivot[key];
-      card.ranges[key] = {
-        ...card.ranges[key],
-        min: Math.max(0, p - span * 1.15),
-        max: Math.min(1, p + span * 0.85),
-      };
-    }
-    this.cards = [card];
-    this.#pushSynthForm({
-      mode: "variations",
-      coherence: this.coherence || "musical",
-      freeFmRatios: this.freeFmRatiosFlag,
-      openCardId: card.id,
-      globalQty: "8",
-    });
-    this.#pushRoleForm(card);
   }
 
 
@@ -801,7 +658,7 @@ export class GlSynthPage extends LitElement {
     this.#updateCard(cardId, (c) => {
       if (
         this.mode === "variations" &&
-        (c.usePivot || this.fromLibrary || c.role === "pivot")
+        (c.usePivot || c.role === "pivot")
       ) {
         return {
           ...c,
@@ -970,19 +827,10 @@ export class GlSynthPage extends LitElement {
         cards: this.cards,
         seed,
         mode: this.mode,
-        referentId: this.referent?.id,
         yieldEvery: 1,
         intention: this.mode === "song" ? this.intention : undefined,
         coherence: {
-          // Blank variations / family: lock pitched engines to tonic.
-          // Library referent: parametric so analysis fund/cutoff ranges are audible
-          // (musical snap-to-C was wiping the referent pitch).
-          // Song keeps the parametric / musical toggle.
-          kind: this.fromLibrary
-            ? "parametric"
-            : this.mode === "song"
-              ? this.coherence
-              : "musical",
+          kind: this.mode === "song" ? this.coherence : "musical",
           tonicPc: this.tonicPc,
           bpm: this.bpm,
           scaleMode: this.scaleMode,
@@ -1087,11 +935,6 @@ export class GlSynthPage extends LitElement {
         <div class="form-item-container flex flex-col gap-1">
           <div class="flex justify-between gap-2">
             <span class="form-label mb-0">${label}</span>
-            ${this.fromLibrary
-              ? html`<span class="text-neutral-500 tabular-nums text-xs"
-                  >◉ ${Math.round(pivot * 100)}</span
-                >`
-              : nothing}
           </div>
           <div class="grid grid-cols-2 gap-2">
             <label class="flex flex-col gap-0.5">
@@ -1308,21 +1151,14 @@ export class GlSynthPage extends LitElement {
   }
 
   #modePop() {
-    const options = this.fromLibrary
-      ? [
-          {
-            value: "variations",
-            label: t("synth.modeVariations"),
-          },
-        ]
-      : [
-          {
-            value: "variations",
-            label: t("synth.modeVariations"),
-          },
-          { value: "family", label: t("synth.modeFamily") },
-          { value: "song", label: t("synth.modeSong") },
-        ];
+    const options = [
+      {
+        value: "variations",
+        label: t("synth.modeVariations"),
+      },
+      { value: "family", label: t("synth.modeFamily") },
+      { value: "song", label: t("synth.modeSong") },
+    ];
     return html`
       <gl-pop-select
         size="sm"
@@ -1330,12 +1166,7 @@ export class GlSynthPage extends LitElement {
         .options=${options}
         ?active=${this.mode !== "variations"}
         @gl-change=${(e: CustomEvent<{ value: string }>) => {
-          const mode = e.detail.value as SynthMode;
-          if (this.fromLibrary && mode !== "variations") {
-            this.statusMsg = t("synth.familyNoReferent");
-            return;
-          }
-          set(synthFormKey.mode, mode);
+          set(synthFormKey.mode, e.detail.value as SynthMode);
         }}
       ></gl-pop-select>
     `;
@@ -1351,9 +1182,6 @@ export class GlSynthPage extends LitElement {
   }
 
   #renderEdit() {
-    const referentLabel = this.referent
-      ? this.referent.userName?.trim() || this.referent.name
-      : "";
     const open = this.cards.find((c) => c.id === this.openCardId) ?? null;
     const tonicOpts = [
       "C",
@@ -1379,11 +1207,6 @@ export class GlSynthPage extends LitElement {
             <h1 class="font-display m-0 text-2xl lg:text-3xl">
               ${t("synth.title")}
             </h1>
-            ${this.fromLibrary && referentLabel
-              ? html`<p class="form-description m-0">
-                  ${t("synth.referent")}: ${referentLabel}
-                </p>`
-              : nothing}
           </div>
           ${this.#modePop()}
         </header>
@@ -1404,14 +1227,7 @@ export class GlSynthPage extends LitElement {
                   40,
                   (n) => set(synthFormKey.globalQty, String(n)),
                 )}
-                ${this.mode !== "song" && !this.fromLibrary
-                  ? this.#freeFmSwitch()
-                  : nothing}
-                ${this.fromLibrary && referentLabel
-                  ? html`<p class="form-description m-0">
-                      ${t("synth.referentHint")}
-                    </p>`
-                  : nothing}
+                ${this.mode !== "song" ? this.#freeFmSwitch() : nothing}
               </sonic-form-layout>
 
               ${this.mode === "song"
@@ -1658,7 +1474,7 @@ export class GlSynthPage extends LitElement {
   }
 
   #renderCardDetail(card: SynthRoleCard) {
-    const usePivotUi = card.usePivot && !this.fromLibrary;
+    const usePivotUi = card.usePivot;
     const machineSpec = audioSynth.machines.specFor(card.role);
     const showMachine = Boolean(machineSpec) && card.role !== "pivot";
     const roleOwnsDsp = audioSynth.usesRoleSynth(card.role);

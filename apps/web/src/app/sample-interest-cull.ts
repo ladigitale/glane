@@ -50,11 +50,16 @@ function isInterestCullCandidate(s: Sample): boolean {
 function inferKind(sample: {
   class?: string;
   tags?: string[];
-  name?: string;
 }): "oneshot" | "texture" {
   if (sample.class === "texture" || sample.class === "noise") return "texture";
   if ((sample.tags ?? []).includes("texture")) return "texture";
-  if (sample.name?.includes(" · texture · ")) return "texture";
+  if ((sample.tags ?? []).includes("song-slice")) return "texture";
+  if (
+    (sample.tags ?? []).includes("whole") ||
+    (sample.tags ?? []).includes("file-whole")
+  ) {
+    return "texture";
+  }
   return "oneshot";
 }
 

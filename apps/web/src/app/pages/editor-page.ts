@@ -59,12 +59,13 @@ import {
 import { editorFormKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
-import { renderMoreMenu, type MoreMenuEntry } from "../more-menu.js";
+import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { formatClock } from "../timeline/timeline.js";
 import type { TransportAction } from "../transport-bar.js";
 import "../seek-bar.js";
 import "../track-fx-control.js";
+import { formatTrackFxSummaryLines } from "../track-fx-control.js";
 import type { GlEditTimeline } from "../timeline/edit-timeline.js";
 import "../timeline/edit-timeline.js";
 import "../transport-bar.js";
@@ -129,6 +130,13 @@ export class GlEditorPage extends LitElement {
         min-height: 280px;
         flex: none;
       }
+      .editor-settings-modal sonic-fieldset {
+        --sc-fieldset-mb: 0;
+      }
+      .editor-settings-modal {
+        max-height: min(80vh, 42rem);
+        overflow-y: auto;
+      }
     `,
   ];
 
@@ -166,9 +174,12 @@ export class GlEditorPage extends LitElement {
   @state() private hasClipboard = false;
   @state() private dirty = false;
   @state() private historyLen = 0;
-  /** Lane tool: circular-shift waveform in the file. */
+  /** Lane tool: circular-shift waveform (armed via long-press / menu). */
   @state() private rotateTool = false;
+  /** Long-press context menu on the waveform lane. */
+  @state() private waveCtx: { x: number; y: number } | null = null;
   @state() private infoOpen = false;
+  @state() private settingsOpen = false;
 
   #engine: TransportEngine | null = null;
   /** Working PCM — @state so `.pcm` reaches the timeline after async load. */
@@ -224,6 +235,11 @@ export class GlEditorPage extends LitElement {
   }
 
   #onKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.rotateTool) {
+      e.preventDefault();
+      this.#clearRotateTool();
+      return;
+    }
     if (!isSpaceKey(e) || shouldIgnoreShortcut(e)) return;
     e.preventDefault();
     void this.#handleTransport(this.playing ? "pause" : "play");
@@ -243,6 +259,17 @@ export class GlEditorPage extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     if (changed.has("sampleId") && this.sampleId) void this.#load();
+    this.#syncChromeMore();
+  }
+
+  #syncChromeMore(): void {
+    const selL = Math.min(this.selStart, this.selEnd);
+    const selR = Math.max(this.selStart, this.selEnd);
+    const hasSel = selR > selL + 1;
+    chromeMore.set({
+      ariaLabel: t("editor.more"),
+      items: this.#editMenuItems(hasSel),
+    });
   }
 
   override render() {
@@ -293,45 +320,24 @@ export class GlEditorPage extends LitElement {
         >
           ${glIcon("info", { size: "sm" })}
         </sonic-button>
-        ${renderMoreMenu({
-          ariaLabel: t("editor.more"),
-          items: this.#editMenuItems(hasSel),
-        })}
       </div>
       ${this.#processingMeta()}
-      <p class="font-mono text-xs text-neutral-500">
-        ${this.state.endSample - this.state.startSample} samples
-        ${Math.abs(this.state.stretchRatio - 1) > 1e-3
-          ? ` · stretch ×${this.state.stretchRatio.toFixed(2)}`
-          : ""}
-        ${hasSel ? ` · boucle ${selR - selL}` : ""}
-      </p>
-      <div class="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <gl-track-fx-control
-          class="text-[0.85rem]"
-          size="sm"
-          .fx=${this.previewFx}
-          showApply
-          applyLabel=${hasSel
-            ? t("editor.fxApplySel")
-            : t("editor.fxApplyAll")}
-          ?applyDisabled=${!trackFxIsActive(this.previewFx) || this.applyingFx}
-          @gl-fx=${this.#onPreviewFxEvent}
-          @gl-fx-apply=${this.#onFxApply}
-        ></gl-track-fx-control>
-        <sonic-button
-          size="sm"
-          variant="outline"
-          type=${this.rotateTool ? "primary" : "neutral"}
-          ?disabled=${this.applyingFx || !this.master}
-          @click=${() => {
-            this.rotateTool = !this.rotateTool;
-          }}
-          >${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}${t(
-            "editor.rotate",
-          )}</sonic-button
-        >
-      </div>
+      ${this.rotateTool
+        ? html`<div
+            class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-content"
+            role="status"
+          >
+            <span class="min-w-0 flex-1 truncate">${t("editor.rotateHint")}</span>
+            <sonic-button
+              size="xs"
+              variant="ghost"
+              type="neutral"
+              @click=${() => this.#clearRotateTool()}
+            >
+              ${t("dialog.cancel")}
+            </sonic-button>
+          </div>`
+        : nothing}
       <gl-edit-timeline
         .pcm=${this.master
           ? toMonoPcm(this.master, this.#channelCount)
@@ -339,6 +345,8 @@ export class GlEditorPage extends LitElement {
         .sampleRate=${this.#sampleRate}
         .label=${this.sample?.userName ?? this.sample?.name ?? "Sample"}
         .color=${waveColor}
+        .confLines=${this.#editorConfLines(hasSel, selL, selR)}
+        .settingsHint=${t("editor.settingsHint")}
         .startSample=${this.state.startSample}
         .endSample=${this.state.endSample}
         .selStart=${this.selStart}
@@ -351,8 +359,12 @@ export class GlEditorPage extends LitElement {
         @gl-seek=${this.#onTimelineSeek}
         @gl-view=${this.#onTimelineView}
         @gl-rotate=${this.#onTimelineRotate}
+        @gl-lane-longpress=${this.#onLaneLongpress}
         @gl-scrub-start=${this.#onScrubStart}
         @gl-scrub-end=${this.#onScrubEnd}
+        @gl-settings=${() => {
+          this.settingsOpen = true;
+        }}
       ></gl-edit-timeline>
       <div class="mt-[0.15rem] mb-[0.35rem] flex items-center gap-[0.35rem]">
         <gl-seek-bar
@@ -366,11 +378,6 @@ export class GlEditorPage extends LitElement {
           @gl-seek=${this.#onSeekBar}
           @gl-seek-end=${this.#onSeekBarEnd}
         ></gl-seek-bar>
-        <span
-          class="min-w-[2.6rem] shrink-0 select-none text-right font-mono text-[0.6rem] tracking-wide text-neutral-500 lowercase"
-          title=${t("tl.viewModeHint")}
-          >${this.viewMode === "vue" ? t("tl.view") : t("tl.global")}</span
-        >
       </div>
       <gl-transport-bar class="block" .playing=${this.playing}
         .clock=${formatClock(clockMs)}
@@ -381,6 +388,8 @@ export class GlEditorPage extends LitElement {
       ${this.#renderDynamicsModal()}
       ${this.#renderForceRoleModal()}
       ${this.#renderDocsModal()}
+      ${this.#renderSettingsModal(hasSel)}
+      ${this.#renderWaveCtxMenu()}
       <gl-sample-info
         .sampleId=${this.sampleId}
         .visible=${this.infoOpen}
@@ -388,10 +397,6 @@ export class GlEditorPage extends LitElement {
           this.infoOpen = false;
         }}
       ></gl-sample-info>
-      <div class="max-h-24 overflow-auto font-mono text-[0.7rem] text-neutral-500">
-        ops: ${this.ops.length === 0 ? "(aucune)" : this.ops.map((o) => o.op).join(" → ")}
-        ${this.historyLen > 0 ? ` · undo×${this.historyLen}` : ""}
-      </div>
     `;
   }
 
@@ -580,8 +585,52 @@ export class GlEditorPage extends LitElement {
     void this.#commitRotate(e.detail.offsetSamples);
   };
 
+  #onLaneLongpress = (e: CustomEvent<{ x: number; y: number }>): void => {
+    if (this.applyingFx || !this.master) return;
+    this.waveCtx = { x: e.detail.x, y: e.detail.y };
+  };
+
+  #clearRotateTool(): void {
+    if (this.rotateTool) this.rotateTool = false;
+  }
+
+  #armRotateTool(): void {
+    this.waveCtx = null;
+    this.rotateTool = true;
+  }
+
+  #renderWaveCtxMenu() {
+    const ctx = this.waveCtx;
+    if (!ctx) return nothing;
+    return html`
+      <div
+        class="fixed inset-0 z-40"
+        @pointerdown=${(e: PointerEvent) => {
+          e.preventDefault();
+          this.waveCtx = null;
+        }}
+      ></div>
+      <div
+        class="fixed z-[41] min-w-[11rem] -translate-x-3 -translate-y-full rounded-md bg-neutral-100 p-1 text-content shadow-[0_8px_24px_rgba(0,0,0,0.35)] max-md:max-w-[min(18rem,calc(100vw-1.5rem))]"
+        style="left:${ctx.x}px;top:${ctx.y}px;margin-top:-0.35rem"
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+      >
+        <sonic-menu direction="column" align="left" size="sm">
+          <sonic-menu-item
+            ?disabled=${this.applyingFx || !this.master}
+            @click=${() => this.#armRotateTool()}
+          >
+            ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+            ${t("editor.rotate")}
+          </sonic-menu-item>
+        </sonic-menu>
+      </div>
+    `;
+  }
+
   async #commitRotate(offsetSamples: number): Promise<void> {
     const offset = Math.round(offsetSamples);
+    this.#clearRotateTool();
     if (!offset) {
       this.#editTimeline()?.clearRotateOffset();
       return;
@@ -777,6 +826,12 @@ export class GlEditorPage extends LitElement {
         onClick: () => this.#pasteClipboard(),
       },
       { section: t("editor.sectionTransform") },
+      {
+        label: t("editor.rotate"),
+        icon: "refresh-cw",
+        disabled: busy || !this.master,
+        onClick: () => this.#armRotateTool(),
+      },
       {
         label: t("editor.silence"),
         icon: "volume-x",
@@ -1300,6 +1355,60 @@ export class GlEditorPage extends LitElement {
         </sonic-modal-content>
         <sonic-modal-actions>
           <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
+  }
+
+  #editorConfLines(hasSel: boolean, selL: number, selR: number): string[] {
+    const frames = Math.max(0, this.state.endSample - this.state.startSample);
+    const durS = frames / Math.max(1, this.#sampleRate);
+    const lines = [`${durS.toFixed(durS >= 10 ? 1 : 2)}s`];
+    if (Math.abs(this.state.stretchRatio - 1) > 1e-3) {
+      lines.push(`×${this.state.stretchRatio.toFixed(2)}`);
+    }
+    if (hasSel) {
+      const loopS = (selR - selL) / Math.max(1, this.#sampleRate);
+      lines.push(`↻${loopS.toFixed(loopS >= 10 ? 1 : 2)}s`);
+    }
+    lines.push(...formatTrackFxSummaryLines(this.previewFx));
+    return lines;
+  }
+
+  #renderSettingsModal(hasSel: boolean) {
+    return html`
+      <sonic-modal
+        align="left"
+        maxWidth="28rem"
+        .visible=${this.settingsOpen}
+        @hide=${() => {
+          this.settingsOpen = false;
+        }}
+      >
+        <sonic-modal-title>${t("editor.settings")}</sonic-modal-title>
+        <sonic-modal-content>
+          <div
+            class="editor-settings-modal flex w-full flex-col gap-4 text-content"
+          >
+            <gl-track-fx-control
+              inline
+              showApply
+              .fx=${this.previewFx}
+              .fxAriaLabel=${t("editor.sectionFx")}
+              applyLabel=${hasSel
+                ? t("editor.fxApplySel")
+                : t("editor.fxApplyAll")}
+              ?applyDisabled=${!trackFxIsActive(this.previewFx) ||
+              this.applyingFx}
+              @gl-fx=${this.#onPreviewFxEvent}
+              @gl-fx-apply=${this.#onFxApply}
+            ></gl-track-fx-control>
+          </div>
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button hideModal variant="outline" type="neutral">
+            ${t("dialog.ok")}
+          </sonic-button>
         </sonic-modal-actions>
       </sonic-modal>
     `;
@@ -2078,6 +2187,7 @@ export class GlEditorPage extends LitElement {
   };
 
   override disconnectedCallback(): void {
+    chromeMore.clear();
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
     window.removeEventListener("beforeunload", this.#onBeforeUnload);

@@ -23,12 +23,16 @@ import "./locale-switch.js";
 import { glDialog } from "./dialog.js";
 import { glBrandMark, glIcon } from "./icon.js";
 import {
+  chromeMore,
+  renderMoreMenu,
+  type ChromeMoreState,
+} from "./more-menu.js";
+import {
   APP_THEMES,
   applyTheme,
   themeMeta,
   type AppThemeId,
 } from "./theme.js";
-import "./pop-select.js";
 import "./pages/capture-page.js";
 import "./pages/library-page.js";
 import "./pages/editor-page.js";
@@ -97,23 +101,40 @@ export class GlApp extends LitElement {
         min-height: 0;
         overflow: hidden;
       }
-      .mobile-nav {
-        padding: max(1rem, env(safe-area-inset-top))
-          max(1rem, env(safe-area-inset-right))
-          max(1rem, env(safe-area-inset-bottom))
-          max(1rem, env(safe-area-inset-left));
-      }
       /* Ghost [active] uses --sc-base-100 — same as header bg-neutral-100 → invisible. */
-      header sonic-menu-item[active]::part(button),
-      .mobile-nav sonic-menu-item[active]::part(button) {
+      sonic-menu-item[active]::part(button) {
         background: var(--sc-base-200);
+      }
+      /* Breadcrumb label ellipsis: constrain pop host + force slot text to clip. */
+      .gl-bc-pop {
+        display: block;
+        min-width: 0;
+      }
+      .gl-bc-pop sonic-button {
+        max-width: 100%;
+        width: 100%;
+        overflow: hidden;
+      }
+      .gl-bc-label {
+        display: block;
+        max-width: 7.25rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      @media (min-width: 640px) {
+        .gl-bc-pop.max-w-40 .gl-bc-label {
+          max-width: 8.75rem;
+        }
+        .gl-bc-pop.max-w-44 .gl-bc-label {
+          max-width: 9.75rem;
+        }
       }
     `,
   ];
 
   @state() private route: Route = parsePath(location.pathname);
   @state() private paletteOpen = false;
-  @state() private mobileOpen = false;
   @state() private projects: Project[] = [];
   @state() private currentProjectId = "";
   @state() private themeId: AppThemeId = "nord";
@@ -140,7 +161,14 @@ export class GlApp extends LitElement {
   @state()
   locale: PrefsForm["locale"] = "fr";
 
+  @state()
+  chromeMoreLabel = "";
+
+  @state()
+  chromeMoreItems: ChromeMoreState["items"] = [];
+
   #unsubProc: (() => void) | null = null;
+  #unsubChromeMore: (() => void) | null = null;
   #path = location.pathname;
   #raf = 0;
   #leaveGuardBusy = false;
@@ -154,6 +182,12 @@ export class GlApp extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     set(paletteKey, { q: "" });
+    chromeMore.clear();
+    this.#unsubChromeMore = chromeMore.subscribe(() => {
+      const s = chromeMore.get();
+      this.chromeMoreLabel = s.ariaLabel;
+      this.chromeMoreItems = s.items;
+    });
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     this.#raf = requestAnimationFrame(this.#watchLocation);
@@ -179,6 +213,8 @@ export class GlApp extends LitElement {
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     cancelAnimationFrame(this.#raf);
+    this.#unsubChromeMore?.();
+    this.#unsubChromeMore = null;
     this.#unsubProc?.();
     super.disconnectedCallback();
   }
@@ -195,6 +231,15 @@ export class GlApp extends LitElement {
     if (this.#leaveGuardBusy || nextPath === this.#path) return;
     const fromRoute = this.route;
     const toRoute = parsePath(nextPath);
+    if (this.#routeNeedsProject(toRoute)) {
+      const cur = await projectWorkspace.ensure();
+      if (!cur) {
+        history.replaceState({}, "", pathFor({ name: "landing" }));
+        this.#path = "/";
+        this.route = { name: "landing" };
+        return;
+      }
+    }
     const leavingEditor =
       fromRoute.name === "sample" &&
       (toRoute.name !== "sample" || toRoute.id !== fromRoute.id);
@@ -213,7 +258,6 @@ export class GlApp extends LitElement {
           history.pushState({}, "", nextPath);
           this.#path = nextPath;
           this.route = toRoute;
-          this.mobileOpen = false;
         } finally {
           this.#leaveGuardBusy = false;
         }
@@ -223,7 +267,6 @@ export class GlApp extends LitElement {
 
     this.#path = nextPath;
     this.route = toRoute;
-    this.mobileOpen = false;
   }
 
   #onProjectChange = (): void => {
@@ -236,8 +279,27 @@ export class GlApp extends LitElement {
       projectWorkspace.ensure(),
     ]);
     this.projects = list;
-    this.currentProjectId = current.id;
-    set(projectPickKey, { projectId: current.id });
+    this.currentProjectId = current?.id ?? "";
+    set(projectPickKey, { projectId: current?.id ?? "" });
+    if (!current && this.#routeNeedsProject(this.route)) {
+      history.replaceState({}, "", pathFor({ name: "landing" }));
+      this.#path = "/";
+      this.route = { name: "landing" };
+    }
+  }
+
+  #routeNeedsProject(route: Route): boolean {
+    switch (route.name) {
+      case "capture":
+      case "library":
+      case "sample":
+      case "synth":
+      case "project":
+      case "session":
+        return true;
+      default:
+        return false;
+    }
   }
 
   #onKey = (e: KeyboardEvent): void => {
@@ -251,8 +313,7 @@ export class GlApp extends LitElement {
     }
     if (e.key === "Escape") {
       this.paletteOpen = false;
-      this.mobileOpen = false;
-    }
+      }
   };
 
   #applyTheme(theme: AppThemeId): void {
@@ -270,16 +331,16 @@ export class GlApp extends LitElement {
         route: { name: "capture" },
       },
       {
-        href: pathFor({ name: "library" }),
-        label: t("nav.library"),
-        icon: "library",
-        route: { name: "library" },
-      },
-      {
         href: pathFor({ name: "synth" }),
         label: t("nav.synth"),
         icon: "sliders",
         route: { name: "synth" },
+      },
+      {
+        href: pathFor({ name: "library" }),
+        label: t("nav.library"),
+        icon: "library",
+        route: { name: "library" },
       },
       {
         href: pathFor({
@@ -296,7 +357,7 @@ export class GlApp extends LitElement {
     ];
   }
 
-  /** Privacy / diagnostic — burger menu + command palette, not primary nav. */
+  /** Account / privacy / diagnostic — top-level, outside the current project. */
   #accessLinks(): { href: string; label: string; icon: string; route: Route }[] {
     return [
       {
@@ -320,6 +381,11 @@ export class GlApp extends LitElement {
     ];
   }
 
+  #isAccessRoute(): boolean {
+    const n = this.route.name;
+    return n === "account" || n === "privacy" || n === "diagnostic";
+  }
+
   /** Selected nav item from app route (SPA + /project/:id). */
   #navActive(link: { route: Route }): boolean {
     const name = link.route.name;
@@ -337,6 +403,318 @@ export class GlApp extends LitElement {
       return this.route.name === "synth";
     }
     return this.route.name === name;
+  }
+
+
+  /** Current chrome section label (Capture / Library / …). */
+  #sectionLabel(): string {
+    const name = this.route.name;
+    if (name === "sample") {
+      return peekEditorHandoff()?.from === "project"
+        ? t("nav.project")
+        : t("nav.library");
+    }
+    if (name === "session") return t("nav.capture");
+    const link = [...this.#navLinks(), ...this.#accessLinks()].find(
+      (l) => l.route.name === name,
+    );
+    return link?.label ?? t("nav.capture");
+  }
+
+  #currentProjectTitle(): string {
+    return (
+      this.projects.find((p) => p.id === this.currentProjectId)?.title ??
+      t("project.switch")
+    );
+  }
+
+  /** Close sonic-pop after a menu click (Tadaaa pattern). */
+  #closeNavPop = {
+    capture: true,
+    handleEvent(event: Event) {
+      const menu = event.currentTarget as HTMLElement | null;
+      const pop = menu?.closest("sonic-pop") as
+        | (HTMLElement & { hide?: () => void })
+        | null;
+      queueMicrotask(() => pop?.hide?.());
+    },
+  };
+
+  /** Parent in the app chrome hierarchy (not browser history). */
+  #chromeParentRoute(): Route {
+    // Editor (/sample/:id) sits under library; all other chrome pages under home.
+    return this.route.name === "sample"
+      ? { name: "library" }
+      : { name: "landing" };
+  }
+
+  #chromeParentLabel(): string {
+    return this.route.name === "sample" ? t("nav.library") : t("nav.home");
+  }
+
+  #breadcrumb() {
+    const section = this.#sectionLabel();
+    const parent = this.#chromeParentRoute();
+    const parentLabel = this.#chromeParentLabel();
+    const up = html`
+      <sonic-button
+        href=${pathFor(parent)}
+        ?pushState=${true}
+        shape="circle"
+        variant="ghost"
+        size="sm"
+        class="shrink-0"
+        data-aria-label=${parentLabel}
+        title=${parentLabel}
+      >
+        ${glIcon("arrow-left", { size: "sm" })}
+      </sonic-button>
+    `;
+
+    /** Top-level access pages: single crumb, switch among account / privacy / diagnostic. */
+    if (this.#isAccessRoute()) {
+      return html`
+        <nav
+          class="gl-breadcrumb flex min-w-0 flex-1 items-center gap-0.5 text-sm"
+          aria-label=${t("common.breadcrumb")}
+        >
+          ${up}
+          <sonic-pop
+            class="gl-bc-pop max-w-40 sm:max-w-52"
+            placement="bottom"
+          >
+            <sonic-button
+              variant="ghost"
+              type="neutral"
+              size="sm"
+              justify="start"
+              class="max-w-full"
+              aria-current="page"
+              title=${section}
+              data-aria-label=${section}
+            >
+              <span class="gl-bc-label font-medium text-neutral-900"
+                >${section}</span
+              >
+              ${glIcon("chevron-down", { size: "xs", slot: "suffix" })}
+            </sonic-button>
+            ${this.#accessMenu()}
+          </sonic-pop>
+        </nav>
+      `;
+    }
+
+    const projectTitle = this.#currentProjectTitle();
+    return html`
+      <nav
+        class="gl-breadcrumb flex min-w-0 flex-1 items-center gap-0.5 text-sm"
+        aria-label=${t("common.breadcrumb")}
+      >
+        ${up}
+        <sonic-pop
+          class="gl-bc-pop max-w-32 sm:max-w-40"
+          placement="bottom"
+        >
+          <sonic-button
+            variant="ghost"
+            type="neutral"
+            size="sm"
+            justify="start"
+            class="max-w-full"
+            title=${projectTitle}
+            data-aria-label=${t("project.switch")}
+          >
+            <span class="gl-bc-label text-neutral-600">${projectTitle}</span>
+            ${glIcon("chevron-down", { size: "xs", slot: "suffix" })}
+          </sonic-button>
+          ${this.#projectMenu()}
+        </sonic-pop>
+        <span class="shrink-0" aria-hidden="true"
+          >${glIcon("chevron-right", { size: "sm" })}</span
+        >
+        <sonic-pop
+          class="gl-bc-pop max-w-32 sm:max-w-44"
+          placement="bottom"
+        >
+          <sonic-button
+            variant="ghost"
+            type="neutral"
+            size="sm"
+            justify="start"
+            class="max-w-full"
+            aria-current="page"
+            title=${section}
+            data-aria-label=${section}
+          >
+            <span class="gl-bc-label font-medium text-neutral-900"
+              >${section}</span
+            >
+            ${glIcon("chevron-down", { size: "xs", slot: "suffix" })}
+          </sonic-button>
+          ${this.#sectionMenu()}
+        </sonic-pop>
+      </nav>
+    `;
+  }
+
+  /** Page contextual more — breadcrumb row, right-aligned (`chromeMore.set`). */
+  #breadcrumbMore() {
+    const items = this.chromeMoreItems;
+    if (!Array.isArray(items) || items.length === 0) return nothing;
+    return renderMoreMenu({
+      ariaLabel: this.chromeMoreLabel || t("nav.menu"),
+      items,
+    });
+  }
+
+  #projectMenu() {
+    return html`
+      <div
+        slot="content"
+        class="max-h-[min(36rem,calc(100dvh-5.5rem))] overflow-y-auto overscroll-contain"
+      >
+        <sonic-menu
+          direction="column"
+          align="left"
+          size="sm"
+          @click=${this.#closeNavPop}
+        >
+          <sonic-divider
+            label=${t("project.switch")}
+            align="left"
+            size="sm"
+          ></sonic-divider>
+          ${this.projects.map(
+            (p) => html`
+              <sonic-menu-item
+                ?active=${p.id === this.currentProjectId}
+                @click=${() => set(projectPickKey.projectId, p.id)}
+              >
+                ${glIcon("folder", { slot: "prefix", size: "xs" })}
+                ${p.title}
+              </sonic-menu-item>
+            `,
+          )}
+          <sonic-menu-item @click=${() => void this.#createProject()}>
+            ${glIcon("plus", { slot: "prefix", size: "xs" })}
+            ${t("project.new")}
+          </sonic-menu-item>
+          ${this.currentProjectId
+            ? html`
+                <sonic-menu-item @click=${() => void this.#renameProject()}>
+                  ${glIcon("pencil", { slot: "prefix", size: "xs" })}
+                  ${t("project.rename")}
+                </sonic-menu-item>
+                <sonic-menu-item @click=${() => void this.#duplicateProject()}>
+                  ${glIcon("copy", { slot: "prefix", size: "xs" })}
+                  ${t("project.duplicate")}
+                </sonic-menu-item>
+                <sonic-menu-item
+                  type="danger"
+                  @click=${() => void this.#deleteProject()}
+                >
+                  ${glIcon("trash-2", { slot: "prefix", size: "xs" })}
+                  ${t("project.delete")}
+                </sonic-menu-item>
+              `
+            : nothing}
+        </sonic-menu>
+      </div>
+    `;
+  }
+
+  #linkMenu(
+    links: { href: string; label: string; icon: string; route: Route }[],
+  ) {
+    return html`
+      <div
+        slot="content"
+        class="max-h-[min(36rem,calc(100dvh-5.5rem))] overflow-y-auto overscroll-contain"
+      >
+        <sonic-menu
+          direction="column"
+          align="left"
+          size="sm"
+          @click=${this.#closeNavPop}
+        >
+          ${links.map(
+            (l) => html`
+              <sonic-menu-item
+                href=${l.href}
+                ?pushState=${true}
+                ?active=${this.#navActive(l)}
+              >
+                ${glIcon(l.icon, { slot: "prefix", size: "xs" })}
+                ${l.label}
+              </sonic-menu-item>
+            `,
+          )}
+        </sonic-menu>
+      </div>
+    `;
+  }
+
+  /** Project chrome: Capture / Library / Synth / Arrangement. */
+  #sectionMenu() {
+    return this.#linkMenu(this.#navLinks());
+  }
+
+  /** Access chrome: Compte / Vie privée / Diagnostic. */
+  #accessMenu() {
+    return this.#linkMenu(this.#accessLinks());
+  }
+
+  #mainNavMenu() {
+    return html`
+      <div
+        slot="content"
+        class="max-h-[min(36rem,calc(100dvh-5.5rem))] overflow-y-auto overscroll-contain"
+      >
+        <sonic-menu
+          direction="column"
+          align="left"
+          size="sm"
+          @click=${this.#closeNavPop}
+        >
+          <sonic-divider
+            label=${t("theme.section")}
+            align="left"
+            size="sm"
+          ></sonic-divider>
+          ${APP_THEMES.map(
+            (meta) => html`
+              <sonic-menu-item
+                ?active=${this.themeId === meta.id}
+                @click=${() => void this.#setTheme(meta.id)}
+              >
+                ${t(meta.labelKey)}
+              </sonic-menu-item>
+            `,
+          )}
+          <sonic-divider
+            label=${t("theme.language")}
+            align="left"
+            size="sm"
+          ></sonic-divider>
+          <div class="px-1 py-1">
+            <gl-locale-switch size="sm"></gl-locale-switch>
+          </div>
+          <sonic-divider></sonic-divider>
+          ${this.#accessLinks().map(
+            (l) => html`
+              <sonic-menu-item
+                href=${l.href}
+                ?pushState=${true}
+                ?active=${this.#navActive(l)}
+              >
+                ${glIcon(l.icon, { slot: "prefix", size: "xs" })}
+                ${l.label}
+              </sonic-menu-item>
+            `,
+          )}
+        </sonic-menu>
+      </div>
+    `;
   }
 
   #chromeLess(): boolean {
@@ -379,6 +757,20 @@ export class GlApp extends LitElement {
           <header
             class="sticky top-0 z-10 flex min-w-0 shrink-0 items-center gap-1.5 bg-neutral-100 px-3 py-2"
           >
+            <sonic-pop class="inline-block shrink-0" placement="bottom">
+              <sonic-button
+                shape="circle"
+                size="sm"
+                variant="ghost"
+                type="neutral"
+                data-aria-label=${t("nav.menu")}
+                title=${t("nav.menu")}
+              >
+                ${glIcon("menu", { size: "lg" })}
+              </sonic-button>
+              ${this.#mainNavMenu()}
+            </sonic-pop>
+
             <sonic-button
               class="brand shrink-0 gap-1.5 text-primary [&_.gl-brand-mark]:shrink-0 [&_.gl-brand-mark]:text-primary"
               variant="ghost"
@@ -388,114 +780,39 @@ export class GlApp extends LitElement {
               ?pushState=${true}
             >
               ${glBrandMark({ size: "1.35rem", slot: "prefix" })}
-              <span class="max-md:hidden">${APP_NAME}</span>
+              <span>${APP_NAME}</span>
             </sonic-button>
-            <div
-              class="mr-1 flex min-w-0 max-w-40 flex-1 items-center gap-1 max-md:max-w-[min(9rem,42vw)] md:flex-[0_1_auto]"
-              title=${t("project.switch")}
-            >
-              <gl-pop-select
-                class="w-full max-w-full"
-                size="sm"
-                variant="ghost"
-                .value=${this.pickProjectId || this.currentProjectId}
-                .options=${this.projects.map((p) => ({
-                  value: p.id,
-                  label: p.title,
-                }))}
-                .actions=${[
-                  {
-                    id: "new",
-                    label: t("project.new"),
-                    icon: "plus",
-                  },
-                  {
-                    id: "rename",
-                    label: t("project.rename"),
-                    icon: "pencil",
-                  },
-                  {
-                    id: "duplicate",
-                    label: t("project.duplicate"),
-                    icon: "copy",
-                  },
-                  {
-                    id: "delete",
-                    label: t("project.delete"),
-                    icon: "trash-2",
-                  },
-                ]}
-                placeholder=${t("project.switch")}
-                @gl-change=${(e: CustomEvent<{ value: string }>) =>
-                  set(projectPickKey.projectId, e.detail.value)}
-                @gl-action=${(e: CustomEvent<{ id: string }>) => {
-                  if (e.detail.id === "new") void this.#createProject();
-                  if (e.detail.id === "rename") void this.#renameProject();
-                  if (e.detail.id === "duplicate") void this.#duplicateProject();
-                  if (e.detail.id === "delete") void this.#deleteProject();
-                }}
-              ></gl-pop-select>
-            </div>
-            ${this.proc.remaining > 0
-              ? html`<sonic-badge type="info" size="sm">
-                  ${glIcon("loader", { size: "xs" })}
-                  ${this.proc.running > 0 ? "●" : "○"}
-                  ${this.proc.remaining}
-                </sonic-badge>`
-              : nothing}
-            ${this.proc.error > 0
-              ? html`<sonic-button
-                  size="sm"
-                  variant="outline"
-                  type="warning"
-                  title=${tf("process.retryAll", {
-                    n: String(this.proc.error),
-                  })}
-                  data-aria-label=${tf("process.retryAll", {
-                    n: String(this.proc.error),
-                  })}
-                  @click=${() => void processQueue.retryUnfinished()}
-                >
-                  ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
-                  ${this.proc.error}
-                </sonic-button>`
-              : nothing}
-            <nav class="hidden md:block" aria-label="Principal">
-              <sonic-menu direction="row" align="left" size="sm">
-                ${links.map(
-                  (l) => html`
-                    <sonic-menu-item
-                      href=${l.href}
-                      ?pushState=${true}
-                      ?active=${this.#navActive(l)}
-                      variant="ghost"
-                    >
-                      ${glIcon(l.icon, { slot: "prefix", size: "xs" })}
-                      ${l.label}
-                    </sonic-menu-item>
-                  `,
-                )}
-              </sonic-menu>
-            </nav>
+
             <div class="ml-auto inline-flex shrink-0 items-center gap-1">
+              ${this.proc.remaining > 0
+                ? html`<sonic-badge type="info" size="sm">
+                    ${glIcon("loader", { size: "xs" })}
+                    ${this.proc.running > 0 ? "●" : "○"}
+                    ${this.proc.remaining}
+                  </sonic-badge>`
+                : nothing}
+              ${this.proc.error > 0
+                ? html`<sonic-button
+                    size="sm"
+                    variant="outline"
+                    type="warning"
+                    title=${tf("process.retryAll", {
+                      n: String(this.proc.error),
+                    })}
+                    data-aria-label=${tf("process.retryAll", {
+                      n: String(this.proc.error),
+                    })}
+                    @click=${() => void processQueue.retryUnfinished()}
+                  >
+                    ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+                    ${this.proc.error}
+                  </sonic-button>`
+                : nothing}
               <sonic-button
-                shape="square"
+                class="ml-0.5"
                 size="sm"
                 variant="ghost"
                 type="neutral"
-                icon
-                data-aria-label=${t("theme.menu")}
-                title=${t("theme.menu")}
-                @click=${() => (this.mobileOpen = true)}
-              >
-                ${glIcon("menu", { size: "sm" })}
-              </sonic-button>
-              <sonic-button
-                shape="square"
-                size="sm"
-                variant="ghost"
-                type="neutral"
-                icon
                 title="Alt+K"
                 data-aria-label=${t("cmd.palette")}
                 @click=${() => {
@@ -503,7 +820,10 @@ export class GlApp extends LitElement {
                   set(paletteKey, { q: "" });
                 }}
               >
-                ${glIcon("command", { size: "sm" })}
+                ${glIcon("search", { slot: "prefix", size: "sm" })}
+                <span class="hidden text-neutral-500 sm:inline"
+                  >${t("nav.search")}</span
+                >
               </sonic-button>
             </div>
           </header>
@@ -526,85 +846,15 @@ export class GlApp extends LitElement {
                 ></i>
               </div>`
             : nothing}
-          <main>${this.#page()}</main>
-          ${this.mobileOpen
-            ? html`
-                <div
-                  class="mobile-nav fixed inset-0 z-40 flex flex-col gap-2 overflow-auto bg-neutral-0 p-3"
-                >
-                  <sonic-menu
-                    class="md:hidden"
-                    direction="column"
-                    align="left"
-                    size="md"
-                  >
-                    ${links.map(
-                      (l) => html`
-                        <sonic-menu-item
-                          href=${l.href}
-                          ?pushState=${true}
-                          ?active=${this.#navActive(l)}
-                          @click=${() => (this.mobileOpen = false)}
-                        >
-                          ${glIcon(l.icon, { slot: "prefix", size: "sm" })}
-                          ${l.label}
-                        </sonic-menu-item>
-                      `,
-                    )}
-                  </sonic-menu>
-                  <sonic-menu direction="column" align="left" size="md">
-                    <sonic-divider
-                      label=${t("theme.section")}
-                      align="left"
-                      size="sm"
-                    ></sonic-divider>
-                    ${APP_THEMES.map(
-                      (meta) => html`
-                        <sonic-menu-item
-                          ?active=${this.themeId === meta.id}
-                          @click=${() => {
-                            void this.#setTheme(meta.id);
-                            this.mobileOpen = false;
-                          }}
-                        >
-                          ${t(meta.labelKey)}
-                        </sonic-menu-item>
-                      `,
-                    )}
-                    <sonic-divider
-                      label=${t("theme.language")}
-                      align="left"
-                      size="sm"
-                    ></sonic-divider>
-                    <div class="px-1 py-1">
-                      <gl-locale-switch size="sm"></gl-locale-switch>
-                    </div>
-                    <sonic-divider></sonic-divider>
-                    ${this.#accessLinks().map(
-                      (l) => html`
-                        <sonic-menu-item
-                          href=${l.href}
-                          ?pushState=${true}
-                          ?active=${this.#navActive(l)}
-                          @click=${() => (this.mobileOpen = false)}
-                        >
-                          ${glIcon(l.icon, { slot: "prefix", size: "sm" })}
-                          ${l.label}
-                        </sonic-menu-item>
-                      `,
-                    )}
-                  </sonic-menu>
-                  <sonic-button
-                    variant="outline"
-                    type="neutral"
-                    @click=${() => (this.mobileOpen = false)}
-                  >
-                    ${glIcon("x", { slot: "prefix", size: "sm" })}
-                    ${t("export.close")}
-                  </sonic-button>
-                </div>
-              `
-            : nothing}
+          <main>
+            <div
+              class="mb-1 flex min-h-7 shrink-0 items-center gap-2 overflow-visible px-3 pt-3 sm:px-4"
+            >
+              ${this.#breadcrumb()}
+              <div class="ml-auto shrink-0">${this.#breadcrumbMore()}</div>
+            </div>
+            ${this.#page()}
+          </main>
           ${this.paletteOpen ? this.#palette(links) : nothing}
         </sonic-scope>
       </sonic-theme>
@@ -627,9 +877,7 @@ export class GlApp extends LitElement {
       case "sample":
         return html`<gl-editor-page .sampleId=${this.route.id}></gl-editor-page>`;
       case "synth":
-        return html`<gl-synth-page
-          .sampleId=${this.route.id ?? ""}
-        ></gl-synth-page>`;
+        return html`<gl-synth-page></gl-synth-page>`;
       case "project":
         return html`<gl-sequencer-page
           .projectId=${this.route.id ?? this.currentProjectId}
@@ -781,8 +1029,12 @@ export class GlApp extends LitElement {
     });
     if (!ok) return;
     const next = await projectWorkspace.remove(cur.id);
-    this.currentProjectId = next.id;
+    this.currentProjectId = next?.id ?? "";
     await this.#refreshProjects();
+    if (!next) {
+      navigate({ name: "landing" });
+      return;
+    }
     if (this.route.name === "project") {
       navigate({ name: "project", id: next.id });
     }

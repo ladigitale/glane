@@ -168,6 +168,17 @@ export class GlaneDb extends Dexie {
 
         let projectId = active[0]?.id;
         if (!projectId) {
+          const sessionRows = (await sessions.toArray()) as Array<
+            Session & { projectId?: string }
+          >;
+          const sampleRows = (await samples.toArray()) as Array<
+            Sample & { projectId?: string }
+          >;
+          const needsWorkspace =
+            sessionRows.some((s) => !s.projectId) ||
+            sampleRows.some((s) => !s.projectId);
+          if (!needsWorkspace) return;
+
           projectId = createEntityId();
           const now = nowIso();
           await projects.put({
@@ -204,16 +215,17 @@ export class GlaneDb extends Dexie {
           await tracksTbl.bulkPut(trackRows);
         }
 
+        const workspaceId = projectId;
         await sessions.toCollection().modify((s: Session & { projectId?: string }) => {
-          if (!s.projectId) s.projectId = projectId!;
+          if (!s.projectId) s.projectId = workspaceId;
         });
         await samples.toCollection().modify((s: Sample & { projectId?: string }) => {
-          if (!s.projectId) s.projectId = projectId!;
+          if (!s.projectId) s.projectId = workspaceId;
         });
 
         const pref = (await prefsTbl.get("default")) as UserPrefs | undefined;
         if (pref && !pref.currentProjectId) {
-          await prefsTbl.put({ ...pref, currentProjectId: projectId });
+          await prefsTbl.put({ ...pref, currentProjectId: workspaceId });
         }
       });
   }

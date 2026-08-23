@@ -34,10 +34,9 @@ export type SynthUiSnapshot = {
   freeFmRatios: boolean;
 };
 
-/** Per-project synth prefs — blank kit vs last library referent. */
+/** Per-project synth prefs (blank kit). */
 export type SynthUiState = {
   blank?: SynthUiSnapshot;
-  referent?: SynthUiSnapshot & { sampleId: string };
 };
 
 const KEY_PREFIX = `${STORAGE_PREFIX}.synthUi.`;
@@ -268,23 +267,15 @@ function parse(raw: string): SynthUiState | null {
     const o = JSON.parse(raw) as Partial<SynthUiState> & Partial<SynthUiSnapshot>;
     if (!o || typeof o !== "object") return null;
 
-    // Legacy flat snapshot (pre blank/referent split).
-    if (Array.isArray(o.cards) && !o.blank && !o.referent) {
+    // Legacy flat snapshot (pre blank split).
+    if (Array.isArray(o.cards) && !o.blank) {
       const snap = parseSnapshot(o);
       return snap ? { blank: snap } : null;
     }
 
     const blank = o.blank ? parseSnapshot(o.blank) : undefined;
-    let referent: SynthUiState["referent"];
-    if (o.referent && typeof o.referent === "object") {
-      const r = o.referent as Record<string, unknown>;
-      const sampleId = typeof r.sampleId === "string" ? r.sampleId.trim() : "";
-      const snap = parseSnapshot(r);
-      if (sampleId && snap) referent = { ...snap, sampleId };
-    }
-
-    if (!blank && !referent) return null;
-    return { blank: blank ?? undefined, referent };
+    if (!blank) return null;
+    return { blank };
   } catch {
     return null;
   }

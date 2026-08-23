@@ -27,6 +27,7 @@ import {
 } from "./db.js";
 import { processQueue } from "./process-queue.js";
 import { cullExcessProcessedSamples } from "./sample-interest-cull.js";
+import { buildAutoSampleName } from "./sample-auto-name.js";
 import {
   decodeAudioFileToPcm,
   isImportableAudio,
@@ -109,7 +110,6 @@ async function persistSample(opts: {
   loopEndMs?: number;
   loopXfadeMs?: number;
   loopScore?: number;
-  nameExtra?: string;
   /** When false, score+save only — caller culls then enqueues (file hunt). */
   polishNow?: boolean;
 }): Promise<Sample | null> {
@@ -142,9 +142,13 @@ async function persistSample(opts: {
     class: opts.class,
     tags,
     confidence: opts.confidence,
-    name:
-      opts.nameExtra ??
-      `${opts.captureName} · ${opts.kind} · ${durationMs}ms`,
+    name: buildAutoSampleName({
+      captureName: opts.captureName,
+      class: opts.class,
+      durationMs,
+      loopProposed: opts.loopProposed,
+      tags,
+    }),
     favorite: false,
     originVersion: DSP_THRESHOLDS.version,
     loopStartMs: opts.loopStartMs,
@@ -402,7 +406,12 @@ async function processSong(
       session,
       captureName,
       class: "rhythmic",
-      tags: ["song-slice", bpmTag, gridTag],
+      tags: [
+        "song-slice",
+        bpmTag,
+        gridTag,
+        `slice:${i + 1}/${sliced.slices.length}`,
+      ],
       confidence: 0.85,
       kind: "texture",
       sourceOffsetMs,
@@ -411,7 +420,6 @@ async function processSong(
       loopEndMs: durationMs,
       loopXfadeMs: 40,
       loopScore: 0.7,
-      nameExtra: `${captureName} · slice ${i + 1}/${sliced.slices.length} · ${durationMs}ms`,
     });
     if (!saved) continue;
     samples.push(saved);
@@ -470,11 +478,10 @@ async function processWhole(
     session,
     captureName,
     class: "texture",
-    tags,
+    tags: [...tags, "whole"],
     confidence: tempo?.confidence ?? 0.5,
     kind: "texture",
     sourceOffsetMs: 0,
-    nameExtra: `${captureName} · whole · ${durationMs}ms`,
   });
 
   await finishSession(session, {

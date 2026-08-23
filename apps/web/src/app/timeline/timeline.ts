@@ -8,7 +8,10 @@ import { WaveformRenderer, type WaveformView } from "@glane/waveform";
 import type { PeakPyramid } from "@glane/audio-io";
 import { css } from "lit";
 
+/** Legacy wide left gutter (kept for shared chrome defaults). */
 export const TRACK_LABEL_PX = 176;
+/** Narrow arrangement-style gutter (conf + settings) — editor + sequencer. */
+export const TRACK_GUTTER_PX = 72;
 export const RULER_H = 28;
 export const CANCEL_ZONE_H = 36;
 export const LANE_PAD_UNITS = 64;
@@ -213,6 +216,49 @@ export function scrollLeftToCenterUnit(
   const ideal = playheadX - clientWidth / 2;
   const maxScroll = Math.max(0, scrollWidth - clientWidth);
   return Math.min(maxScroll, Math.max(0, ideal));
+}
+
+/** Hot zone width (px) for edge auto-pan while dragging selection / loop. */
+export const EDGE_SCROLL_ZONE_PX = 56;
+/** Max scroll step per frame at the extreme edge (px). */
+export const EDGE_SCROLL_MAX_STEP_PX = 24;
+
+/**
+ * If `clientX` is near the left/right of the usable viewport, pan `el`.
+ * Returns signed pixels applied (0 = no scroll). `rightInsetPx` excludes a sticky gutter.
+ */
+export function edgeScrollAtClientX(
+  el: HTMLElement,
+  clientX: number,
+  opts?: {
+    rightInsetPx?: number;
+    zonePx?: number;
+    maxStepPx?: number;
+  },
+): number {
+  const rect = el.getBoundingClientRect();
+  const rightInset = Math.max(0, opts?.rightInsetPx ?? 0);
+  const left = rect.left;
+  const right = rect.right - rightInset;
+  const usableW = Math.max(1, right - left);
+  const zone = Math.min(opts?.zonePx ?? EDGE_SCROLL_ZONE_PX, usableW / 3);
+  const maxStep = opts?.maxStepPx ?? EDGE_SCROLL_MAX_STEP_PX;
+
+  let want = 0;
+  if (clientX < left + zone) {
+    const t = 1 - Math.max(0, (clientX - left) / zone);
+    want = -Math.ceil(maxStep * t * t);
+  } else if (clientX > right - zone) {
+    const t = 1 - Math.max(0, (right - clientX) / zone);
+    want = Math.ceil(maxStep * t * t);
+  }
+  if (want === 0) return 0;
+
+  const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+  const next = Math.max(0, Math.min(maxScroll, el.scrollLeft + want));
+  const applied = next - el.scrollLeft;
+  if (applied !== 0) el.scrollLeft = next;
+  return applied;
 }
 
 /** Map timeline sample t → source index for stretch modes (null = silence). */
@@ -508,6 +554,7 @@ export const timelineChromeCss = css`
 
 export const timeline = {
   TRACK_LABEL_PX,
+  TRACK_GUTTER_PX,
   RULER_H,
   formatClock,
   zoomAtClientX,
@@ -515,6 +562,9 @@ export const timeline = {
   sampleRulerMarks,
   fitPxPerUnit,
   scrollLeftToCenterUnit,
+  edgeScrollAtClientX,
+  EDGE_SCROLL_ZONE_PX,
+  EDGE_SCROLL_MAX_STEP_PX,
   paintStretchedWave,
   paintViewportWave,
   timelineChromeCss,

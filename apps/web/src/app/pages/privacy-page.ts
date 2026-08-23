@@ -2,6 +2,9 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
+import "@supersoniks/concorde/fieldset";
+import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/form-actions";
 import { t } from "../i18n/messages.js";
 import tailwind from "../../css/tailwind";
 import { db, ensurePrefs, type UserPrefs } from "../db.js";
@@ -84,75 +87,87 @@ export class GlPrivacyPage extends LitElement {
         <h1 class="font-display">${t("privacy.title")}</h1>
         <p>${t("privacy.body")}</p>
 
-        <div formDataProvider=${prefsFormKey.path}>
-          <span class="mt-4 block text-[0.85rem] font-semibold"
-            >${t("privacy.voicePolicy")}</span
-          >
-          <div class="my-3 mb-5 flex flex-wrap gap-2">
-            ${(["exclude", "mark_keep_local", "keep"] as const).map(
-              (v) => html`
-                <sonic-button unique name="voicePolicy" value=${v} variant="outline">
-                  ${v}
-                </sonic-button>
-              `,
-            )}
-          </div>
+        <div class="mt-4 flex flex-col gap-4" formDataProvider=${prefsFormKey.path}>
+          <sonic-fieldset label=${t("privacy.voicePolicy")}>
+            <sonic-form-layout>
+              <div class="flex flex-wrap gap-2">
+                ${(["exclude", "mark_keep_local", "keep"] as const).map(
+                  (v) => html`
+                    <sonic-button
+                      unique
+                      name="voicePolicy"
+                      value=${v}
+                      variant="outline"
+                    >
+                      ${v}
+                    </sonic-button>
+                  `,
+                )}
+              </div>
+            </sonic-form-layout>
+          </sonic-fieldset>
 
-          <span class="mt-4 block text-[0.85rem] font-semibold"
-            >${t("privacy.sync")}</span
-          >
-          <div class="my-3 mb-5 flex flex-wrap gap-2">
-            ${(["local_only", "metadata_only", "full"] as const).map(
-              (v) => html`
-                <sonic-button unique name="syncPolicy" value=${v} variant="outline">
-                  ${v}
-                </sonic-button>
-              `,
-            )}
-          </div>
-
-          <sonic-switch unique name="wifiOnly" value="1">
-            ${t("privacy.wifiOnly")}
-          </sonic-switch>
-
-          <div
-            class="mt-4 flex flex-col gap-1.5 rounded-lg bg-neutral-100 p-3 font-mono text-[0.8rem]"
-          >
-            <div>
-              ${t("privacy.queue")} : ${this.sync?.pending ?? "…"}
-              ${t("privacy.ops")}
-            </div>
-            <div>
-              ${t("privacy.api")} :
-              ${this.sync?.apiConfigured
-                ? t("privacy.apiOk")
-                : t("privacy.apiMissing")}
-            </div>
-            <div>
-              ${t("privacy.network")} :
-              ${this.sync?.online
-                ? t("privacy.online")
-                : t("privacy.offline")}
-            </div>
-            ${this.sync?.lastFlushAt
-              ? html`<div>
-                  ${t("privacy.lastFlush")} : ${this.sync.lastFlushAt}
-                </div>`
-              : nothing}
-            ${this.sync?.lastError
-              ? html`<sonic-alert status="error" label=${t("privacy.error")}>
-                  ${this.sync.lastError}
-                </sonic-alert>`
-              : nothing}
-            <sonic-button
-              type="primary"
-              ?loading=${this.flushing}
-              ?disabled=${this.flushing || this.syncPolicy === "local_only"}
-              @click=${() => void this.#flushNow()}
+          <sonic-fieldset label=${t("privacy.sync")}>
+            <sonic-form-layout>
+              <div class="flex flex-wrap gap-2">
+                ${(["local_only", "metadata_only", "full"] as const).map(
+                  (v) => html`
+                    <sonic-button
+                      unique
+                      name="syncPolicy"
+                      value=${v}
+                      variant="outline"
+                    >
+                      ${v}
+                    </sonic-button>
+                  `,
+                )}
+              </div>
+              <sonic-switch unique name="wifiOnly" value="1">
+                ${t("privacy.wifiOnly")}
+              </sonic-switch>
+            </sonic-form-layout>
+            <div
+              class="mt-2 flex flex-col gap-1.5 rounded-lg bg-neutral-100 p-3 font-mono text-[0.8rem]"
             >
-              ${t("privacy.syncNow")}
-            </sonic-button>
-          </div>
+              <div>
+                ${t("privacy.queue")} : ${this.sync?.pending ?? "…"}
+                ${t("privacy.ops")}
+              </div>
+              <div>
+                ${t("privacy.api")} :
+                ${this.sync?.apiConfigured
+                  ? t("privacy.apiOk")
+                  : t("privacy.apiMissing")}
+              </div>
+              <div>
+                ${t("privacy.network")} :
+                ${this.sync?.online
+                  ? t("privacy.online")
+                  : t("privacy.offline")}
+              </div>
+              ${this.sync?.lastFlushAt
+                ? html`<div>
+                    ${t("privacy.lastFlush")} : ${this.sync.lastFlushAt}
+                  </div>`
+                : nothing}
+              ${this.sync?.lastError
+                ? html`<sonic-alert status="error" label=${t("privacy.error")}>
+                    ${this.sync.lastError}
+                  </sonic-alert>`
+                : nothing}
+            </div>
+            <sonic-form-actions>
+              <sonic-button
+                type="primary"
+                ?loading=${this.flushing}
+                ?disabled=${this.flushing || this.syncPolicy === "local_only"}
+                @click=${() => void this.#flushNow()}
+              >
+                ${t("privacy.syncNow")}
+              </sonic-button>
+            </sonic-form-actions>
+          </sonic-fieldset>
         </div>
       </div>
     `;

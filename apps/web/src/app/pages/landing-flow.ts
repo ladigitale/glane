@@ -30,14 +30,19 @@ export class GlLandingFlow extends LitElement {
   static override styles = css`
     :host {
       display: block;
+      box-sizing: border-box;
       width: 100%;
+      max-width: 100%;
       height: 100%;
       min-height: 12rem;
+      overflow: hidden;
       pointer-events: none;
     }
     canvas {
       display: block;
+      box-sizing: border-box;
       width: 100%;
+      max-width: 100%;
       height: 100%;
     }
   `;
@@ -116,8 +121,11 @@ export class GlLandingFlow extends LitElement {
     if (!c) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const r = this.getBoundingClientRect();
-    this.#cssW = Math.max(1, r.width);
-    this.#cssH = Math.max(1, r.height);
+    this.#cssW = Math.max(1, Math.floor(r.width));
+    this.#cssH = Math.max(1, Math.floor(r.height));
+    // Bitmap attrs must not drive layout; pin CSS size to the host box.
+    c.style.width = `${this.#cssW}px`;
+    c.style.height = `${this.#cssH}px`;
     c.width = Math.floor(this.#cssW * dpr);
     c.height = Math.floor(this.#cssH * dpr);
     const ctx = c.getContext("2d");

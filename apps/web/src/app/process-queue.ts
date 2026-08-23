@@ -13,6 +13,7 @@ import {
 } from "./sample-interest-cull.js";
 import { enqueueYamnetEnrich } from "./ml/enrich-queue.js";
 import { enqueueClapEmbed } from "./ml/clap-queue.js";
+import { buildAutoSampleName } from "./sample-auto-name.js";
 
 export type { ProcessJob, ProcessJobStatus } from "./db.js";
 
@@ -114,7 +115,10 @@ function inferKind(sample: {
 }): ProcessJob["kind"] {
   if (sample.class === "texture" || sample.class === "noise") return "texture";
   if ((sample.tags ?? []).includes("texture")) return "texture";
-  if (sample.name?.includes(" · texture · ")) return "texture";
+  if ((sample.tags ?? []).includes("song-slice")) return "texture";
+  if ((sample.tags ?? []).includes("whole") || (sample.tags ?? []).includes("file-whole")) {
+    return "texture";
+  }
   return "oneshot";
 }
 
@@ -259,8 +263,19 @@ export const processQueue = (() => {
         ...prevTags,
         ...msg.tags.filter((t) => !prevTags.includes(t)),
       ];
+      const name = buildAutoSampleName({
+        captureName: sample.captureName,
+        class: sample.class,
+        subclass: sample.subclass,
+        noteName: msg.analysis.noteName,
+        bpm: msg.analysis.bpm,
+        durationMs: msg.durationMs,
+        loopProposed: msg.loopProposed,
+        tags,
+      });
       await db.samples.update(msg.sampleId, {
         tags,
+        name,
         durationMs: msg.durationMs,
         loopProposed: msg.loopProposed,
         loopStartMs: msg.loopStartMs,

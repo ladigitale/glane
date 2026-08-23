@@ -1,7 +1,17 @@
 @tailwind utilities;
 
-/* No @tailwind base / preflight — resets break Concorde inside Lit shadows. */
+/*
+  No @tailwind base / preflight — full resets break Concorde inside Lit shadows.
+  Keep the one preflight rule that matters: without border-box, `w-full` + `px-*`
+  (content-box) overflows the viewport on mobile.
+*/
 :host {
+  box-sizing: border-box;
   line-height: 1.2;
   font-family: var(--gl-font-ui), var(--sc-font-family-base), sans-serif;
+}
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }

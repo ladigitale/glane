@@ -3,7 +3,7 @@ export type Route =
   | { name: "capture" }
   | { name: "library" }
   | { name: "sample"; id: string }
-  | { name: "synth"; id?: string }
+  | { name: "synth" }
   | { name: "project"; id?: string }
   | { name: "privacy" }
   | { name: "diagnostic" }
@@ -23,8 +23,7 @@ export function parsePath(pathname: string): Route {
   if (m?.[1]) return { name: "listen", token: m[1] };
   m = /^\/sample\/([^/]+)$/.exec(p);
   if (m?.[1]) return { name: "sample", id: m[1] };
-  m = /^\/synth(?:\/([^/]+))?$/.exec(p);
-  if (m) return { name: "synth", id: m[1] };
+  if (p === "/synth" || p.startsWith("/synth/")) return { name: "synth" };
   m = /^\/session\/([^/]+)$/.exec(p);
   if (m?.[1]) return { name: "session", id: m[1] };
   m = /^\/project(?:\/([^/]+))?$/.exec(p);
@@ -51,7 +50,7 @@ export function pathFor(route: Route): string {
     case "sample":
       return `/sample/${route.id}`;
     case "synth":
-      return route.id ? `/synth/${route.id}` : "/synth";
+      return "/synth";
     case "session":
       return `/session/${route.id}`;
     case "project":

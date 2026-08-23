@@ -4,7 +4,11 @@
  */
 import { buildPeakPyramid, type PeakPyramid } from "@glane/audio-io";
 import { WaveformRenderer } from "@glane/waveform";
-import { GestureFsm, type GestureKind } from "@glane/gestures";
+import {
+  GestureFsm,
+  LONGPRESS_MS,
+  type GestureKind,
+} from "@glane/gestures";
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { PropertyValues } from "lit";
@@ -12,7 +16,7 @@ import {
   LANE_PAD_UNITS,
   MAX_PX_PER_SAMPLE,
   MIN_PX_PER_SAMPLE,
-  TRACK_LABEL_PX,
+  TRACK_GUTTER_PX,
   bindTimelineWheel,
   fitPxPerUnit,
   lanePointerDistance,
@@ -24,6 +28,7 @@ import {
   timelineChromeCss,
   zoomAtClientX,
 } from "./timeline.js";
+import { glIcon } from "../icon.js";
 
 type DragMode =
   | "none"
@@ -70,51 +75,63 @@ export class GlEditTimeline extends LitElement {
         min-height: 180px;
         height: 180px;
       }
+      /* Arrangement-style: lane first, narrow sticky gutter on the right. */
+      .ruler-gutter,
       .track-label {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 0.25rem;
-        padding: 0.35rem 0.4rem;
-        font-size: 0.75rem;
-        color: var(--gl-fg-muted, var(--sc-base-500));
+        width: ${TRACK_GUTTER_PX}px;
+        flex-shrink: 0;
+        position: sticky;
+        right: 0;
+        left: auto;
+        z-index: 5;
+        background: var(--gl-ink);
+        box-shadow: -4px 0 10px color-mix(in srgb, #000 28%, transparent);
         box-sizing: border-box;
       }
-      .track-label .name {
-        color: var(--gl-fg, var(--sc-base-content));
+      .ruler-gutter {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 0.25rem;
+        font-family: var(--gl-font-mono);
+        font-size: 0.55rem;
+        color: var(--gl-fg-muted, var(--sc-base-500));
+        z-index: 3;
+      }
+      .track-label {
+        display: flex;
+        position: sticky;
+        flex-direction: column;
+        justify-content: center;
+        gap: 1px;
+        padding: 0.25rem 1.65rem 0.25rem 0.25rem;
+        font-family: var(--gl-font-mono);
+        font-size: 0.6rem;
+        line-height: 1.25;
+        color: var(--gl-fg-muted, var(--sc-base-500));
+        overflow: visible;
+      }
+      .track-label .conf-line {
+        display: block;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .track-label .swatch {
-        display: inline-block;
-        width: 0.65rem;
-        height: 0.65rem;
-        border-radius: 2px;
-      }
-      .track-label .meta {
-        font-family: var(--gl-font-mono);
-        font-size: 0.6rem;
-        opacity: 0.75;
+      .track-label .settings {
+        position: absolute;
+        top: 2px;
+        right: 2px;
       }
       .lane {
         min-height: 180px;
         height: 180px;
       }
-      .ruler-gutter {
-        display: flex;
-        align-items: center;
-        padding: 0 0.35rem;
-        font-family: var(--gl-font-mono);
-        font-size: 0.6rem;
-        color: var(--gl-fg-muted, var(--sc-base-500));
-      }
       canvas.wave {
         position: sticky;
-        left: ${TRACK_LABEL_PX}px;
+        left: 0;
         display: block;
         height: 180px;
-        width: calc(var(--gl-tl-view-w, 100%) - ${TRACK_LABEL_PX}px);
+        width: calc(var(--gl-tl-view-w, 100%) - ${TRACK_GUTTER_PX}px);
         max-width: none;
         pointer-events: none;
         z-index: 1;
@@ -153,6 +170,9 @@ export class GlEditTimeline extends LitElement {
   @property({ type: Boolean }) playing = false;
   /** When true, lane drag circular-shifts the waveform instead of pan/zoom. */
   @property({ type: Boolean }) rotateMode = false;
+  /** Condensed conf lines (duration / stretch / FX) — arrangement gutter. */
+  @property({ attribute: false }) confLines: string[] = [];
+  @property({ type: String }) settingsHint = "Réglages";
 
   @state() private pxPerSample = 0.02;
   @state() private viewW = 800;
@@ -178,6 +198,11 @@ export class GlEditTimeline extends LitElement {
   #lanePtrs = new Map<number, { x: number; y: number }>();
   #lanePinchDist = 0;
   #laneLastY = 0;
+  #holdTimer = 0;
+  /** Long-press opened a host menu — ignore tap-seek / pan until pointer up. */
+  #longpressOpened = false;
+  #holdLastX = 0;
+  #holdLastY = 0;
 
   override firstUpdated(): void {
     const canvas = this.renderRoot.querySelector("canvas.wave");
@@ -263,7 +288,7 @@ export class GlEditTimeline extends LitElement {
     if (!tl) return;
     this.#unsubWheel = bindTimelineWheel(tl, {
       getPxPerUnit: () => this.pxPerSample,
-      contentOriginPx: TRACK_LABEL_PX,
+      contentOriginPx: 0,
       minPx: MIN_PX_PER_SAMPLE,
       maxPx: MAX_PX_PER_SAMPLE,
       onZoom: (next) => {
@@ -297,7 +322,7 @@ export class GlEditTimeline extends LitElement {
     const tl = this.#timelineEl();
     if (!tl) return;
     const max = this.#length();
-    const usableW = Math.max(64, tl.clientWidth - TRACK_LABEL_PX);
+    const usableW = Math.max(64, tl.clientWidth - TRACK_GUTTER_PX);
     const start = tl.scrollLeft / this.pxPerSample;
     const end = (tl.scrollLeft + usableW) / this.pxPerSample;
     this.dispatchEvent(
@@ -324,7 +349,7 @@ export class GlEditTimeline extends LitElement {
       this.playheadSample,
       this.pxPerSample,
       tl.clientWidth,
-      TRACK_LABEL_PX,
+      0,
       tl.scrollWidth,
     );
     if (tl.scrollLeft !== next) {
@@ -366,7 +391,7 @@ export class GlEditTimeline extends LitElement {
     this.pxPerSample = fitPxPerUnit(
       len,
       viewW,
-      TRACK_LABEL_PX,
+      TRACK_GUTTER_PX,
       MIN_PX_PER_SAMPLE,
       MAX_PX_PER_SAMPLE,
     );
@@ -378,7 +403,7 @@ export class GlEditTimeline extends LitElement {
     if (!tl) return 0;
     const rect = tl.getBoundingClientRect();
     const contentX =
-      tl.scrollLeft + (clientX - rect.left) - TRACK_LABEL_PX;
+      tl.scrollLeft + (clientX - rect.left);
     return Math.max(
       0,
       Math.min(this.#length(), Math.round(contentX / this.pxPerSample)),
@@ -391,7 +416,7 @@ export class GlEditTimeline extends LitElement {
     const canvas = this.#renderer.canvas;
     const viewportW = Math.max(
       64,
-      (tl?.clientWidth ?? this.viewW) - TRACK_LABEL_PX,
+      (tl?.clientWidth ?? this.viewW) - TRACK_GUTTER_PX,
     );
     const scrollLeft = tl?.scrollLeft ?? 0;
     const scrollSample = scrollLeft / this.pxPerSample;
@@ -456,12 +481,11 @@ export class GlEditTimeline extends LitElement {
     const trimL = Math.min(this.startSample, this.endSample);
     const trimR = Math.max(this.startSample, this.endSample);
 
-    const canvasMinW = TRACK_LABEL_PX + laneW;
+    const canvasMinW = TRACK_GUTTER_PX + laneW;
     return html`
       <div class="timeline">
         <div class="timeline-canvas" style="min-width:${canvasMinW}px">
           <div class="time-ruler">
-            <div class="ruler-gutter">temps</div>
             <div
               class="ruler-lane"
               style="min-width:${laneW}px"
@@ -497,19 +521,9 @@ export class GlEditTimeline extends LitElement {
                   ></div>`
                 : nothing}
             </div>
+            <div class="ruler-gutter" aria-hidden="true"></div>
           </div>
           <div class="track">
-            <div class="track-label">
-              <span class="name">${this.label}</span>
-              <span
-                class="swatch"
-                style="background:${this.color}"
-                aria-hidden="true"
-              ></span>
-              <span class="meta"
-                >${len} smp · ${(len / this.sampleRate).toFixed(2)}s</span
-              >
-            </div>
             <div
               class="lane"
               style="min-width:${laneW}px;cursor:${this.rotateMode
@@ -586,10 +600,44 @@ export class GlEditTimeline extends LitElement {
                   this.#beginHandle(e, "scrub")}
               ></div>
             </div>
+            <div
+              class="track-label"
+              title=${this.confLines.join(" · ") || this.label}
+            >
+              <div>
+                ${this.confLines.length
+                  ? this.confLines.map(
+                      (line) => html`<span class="conf-line">${line}</span>`,
+                    )
+                  : html`<span class="conf-line">${this.label}</span>`}
+              </div>
+              <sonic-button
+                shape="circle"
+                variant="ghost"
+                type="neutral"
+                size="xs"
+                icon
+                class="settings"
+                data-aria-label=${this.settingsHint}
+                title=${this.settingsHint}
+                @click=${this.#onSettings}
+              >
+                ${glIcon("sliders", { size: "xs" })}
+              </sonic-button>
+            </div>
           </div>
         </div>
       </div>
     `;
+  }
+
+  #onSettings = (): void => {
+    this.dispatchEvent(
+      new CustomEvent("gl-settings", {
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   #beginHandle(e: PointerEvent, mode: DragMode): void {
@@ -627,6 +675,13 @@ export class GlEditTimeline extends LitElement {
     this.#emitSel(false);
   };
 
+  #clearHoldTimer(): void {
+    if (this.#holdTimer) {
+      window.clearTimeout(this.#holdTimer);
+      this.#holdTimer = 0;
+    }
+  }
+
   #laneDown = (e: PointerEvent): void => {
     if ((e.target as HTMLElement).closest(".handle")) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -637,6 +692,8 @@ export class GlEditTimeline extends LitElement {
       /* already captured */
     }
 
+    this.#clearHoldTimer();
+    this.#longpressOpened = false;
     this.#lanePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (this.rotateMode && this.#lanePtrs.size === 1) {
@@ -669,22 +726,53 @@ export class GlEditTimeline extends LitElement {
       target: "background",
     });
 
-    // Lane: pan / zoom / tap-seek only — never establish a loop here.
+    // Lane: pan / zoom / tap-seek / longpress — never establish a loop here.
     this.#drag = "none";
     this.#panOriginX = e.clientX;
     this.#panScroll0 = this.#timelineEl()?.scrollLeft ?? 0;
     this.#laneLastY = e.clientY;
     this.#lanePinchDist = 0;
+    this.#holdLastX = e.clientX;
+    this.#holdLastY = e.clientY;
+    const t0 = e.timeStamp;
+    const pointerId = e.pointerId;
+    this.#holdTimer = window.setTimeout(() => {
+      this.#holdTimer = 0;
+      const resolved = this.#fsm.push({
+        type: "hold",
+        pointerId,
+        x: this.#holdLastX,
+        y: this.#holdLastY,
+        t: t0 + LONGPRESS_MS,
+        target: "background",
+      });
+      if (resolved.status === "resolved" && resolved.kind === "longpress") {
+        this.#longpressOpened = true;
+        this.#drag = "none";
+        this.dispatchEvent(
+          new CustomEvent("gl-lane-longpress", {
+            detail: { x: this.#holdLastX, y: this.#holdLastY },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        if (navigator.vibrate) navigator.vibrate(8);
+      }
+    }, LONGPRESS_MS);
   };
 
   #laneMove = (e: PointerEvent): void => {
     if (this.#lanePtrs.has(e.pointerId)) {
       this.#lanePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
     }
+    this.#holdLastX = e.clientX;
+    this.#holdLastY = e.clientY;
 
+    if (this.#longpressOpened) return;
     if (this.#drag === "pinch-done") return;
 
     if (this.#lanePtrs.size >= 2 || this.#drag === "pinch") {
+      this.#clearHoldTimer();
       if (this.#lanePtrs.size < 2) {
         if (this.#drag === "pinch") this.#drag = "pinch-done";
         return;
@@ -705,7 +793,7 @@ export class GlEditTimeline extends LitElement {
         dist0,
         dist1,
         mid.x,
-        TRACK_LABEL_PX,
+        0,
         MIN_PX_PER_SAMPLE,
         MAX_PX_PER_SAMPLE,
       );
@@ -817,7 +905,7 @@ export class GlEditTimeline extends LitElement {
         this.pxPerSample,
         dy,
         e.clientX,
-        TRACK_LABEL_PX,
+        0,
         MIN_PX_PER_SAMPLE,
         MAX_PX_PER_SAMPLE,
       );
@@ -842,6 +930,7 @@ export class GlEditTimeline extends LitElement {
       if (st.status === "resolved") {
         const kind: GestureKind = st.kind;
         if (kind === "scroll" || kind === "zoom") {
+          this.#clearHoldTimer();
           this.#drag = kind;
           this.#laneLastY = e.clientY;
           if (kind === "scroll") {
@@ -854,6 +943,7 @@ export class GlEditTimeline extends LitElement {
   };
 
   #laneUp = (e: PointerEvent): void => {
+    this.#clearHoldTimer();
     if (this.#lanePtrs.has(e.pointerId)) {
       this.#lanePtrs.delete(e.pointerId);
     }
@@ -873,20 +963,20 @@ export class GlEditTimeline extends LitElement {
     }
 
     const mode = this.#drag;
+    const longpressOpened = this.#longpressOpened;
+    this.#longpressOpened = false;
     if (mode === "rotate") {
       const offset = this.rotateOffsetSamples;
       this.#drag = "none";
-      if (offset !== 0) {
-        this.dispatchEvent(
-          new CustomEvent("gl-rotate", {
-            detail: { offsetSamples: offset },
-            bubbles: true,
-            composed: true,
-          }),
-        );
-      } else {
-        this.rotateOffsetSamples = 0;
-      }
+      // Always notify host so one-shot rotate tool can disarm (seq parity).
+      this.dispatchEvent(
+        new CustomEvent("gl-rotate", {
+          detail: { offsetSamples: offset },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      if (offset === 0) this.rotateOffsetSamples = 0;
       return;
     }
     if (mode === "pinch" || mode === "pinch-done") {
@@ -895,7 +985,7 @@ export class GlEditTimeline extends LitElement {
       this.#fsm.reset();
       return;
     }
-    if (mode === "none" && e.type === "pointerup") {
+    if (mode === "none" && e.type === "pointerup" && !longpressOpened) {
       const st = this.#fsm.push({
         type: "up",
         pointerId: e.pointerId,

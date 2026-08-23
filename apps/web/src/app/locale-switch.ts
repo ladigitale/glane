@@ -46,10 +46,12 @@ export class GlLocaleSwitch extends LitElement {
         ${APP_LOCALES.map(
           (locale) => html`
             <sonic-button
+              shape="circle"
               size=${this.size}
               type=${this.locale === locale ? "primary" : "default"}
+              data-aria-label=${localeLabel(locale)}
               @click=${() => void this.#pick(locale)}
-              >${localeLabel(locale)}</sonic-button
+              >${locale}</sonic-button
             >
           `,
         )}

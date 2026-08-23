@@ -16,6 +16,12 @@ export class GlTransportBar extends LitElement {
     css`
       :host {
         display: block;
+        overflow: visible;
+      }
+      .toolbar,
+      .end,
+      .end ::slotted(*) {
+        overflow: visible;
       }
       /* Right-pointing triangle reads left-heavy; nudge for optical center. */
       .play-glyph {
@@ -39,7 +45,7 @@ export class GlTransportBar extends LitElement {
     const title = `${label} (Espace)`;
     return html`
       <div
-        class="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5 px-3.5 py-2"
+        class="toolbar grid min-h-[5.5rem] grid-cols-[1fr_auto_1fr] items-center gap-2.5 overflow-visible px-3.5 py-3"
         role="toolbar"
         aria-label="Transport"
       >
@@ -74,7 +80,9 @@ export class GlTransportBar extends LitElement {
                   >`}
           </sonic-button>
         </div>
-        <div class="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
+        <div
+          class="end flex items-center justify-end gap-x-2.5 overflow-visible"
+        >
           <slot></slot>
         </div>
       </div>

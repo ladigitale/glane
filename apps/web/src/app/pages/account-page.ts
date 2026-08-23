@@ -2,6 +2,9 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
+import "@supersoniks/concorde/fieldset";
+import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/form-actions";
 import tailwind from "../../css/tailwind";
 import { auth } from "../auth.js";
 import { accountFormKey, type AccountForm } from "../dp-keys.js";
@@ -121,36 +124,40 @@ export class GlAccountPage extends LitElement {
               </sonic-button>
             `
           : html`
-              <div class="flex flex-col gap-3" formDataProvider=${accountFormKey.path}>
-                <sonic-input
-                  name="username"
-                  label=${t("account.username")}
-                  autocomplete="username"
-                ></sonic-input>
-                <sonic-input
-                  name="password"
-                  label=${t("account.password")}
-                  type="password"
-                  autocomplete="current-password"
-                ></sonic-input>
-                <div class="flex flex-wrap gap-2">
-                  <sonic-button
-                    type="primary"
-                    ?disabled=${this.busy}
-                    ?loading=${this.busy}
-                    @click=${() => void this.#login()}
-                  >
-                    ${t("account.login")}
-                  </sonic-button>
-                  <sonic-button
-                    variant="outline"
-                    type="neutral"
-                    ?disabled=${this.busy}
-                    @click=${() => void this.#register()}
-                  >
-                    ${t("account.register")}
-                  </sonic-button>
-                </div>
+              <div formDataProvider=${accountFormKey.path}>
+                <sonic-fieldset>
+                  <sonic-form-layout>
+                    <sonic-input
+                      name="username"
+                      label=${t("account.username")}
+                      autocomplete="username"
+                    ></sonic-input>
+                    <sonic-input
+                      name="password"
+                      label=${t("account.password")}
+                      type="password"
+                      autocomplete="current-password"
+                    ></sonic-input>
+                  </sonic-form-layout>
+                  <sonic-form-actions>
+                    <sonic-button
+                      type="primary"
+                      ?disabled=${this.busy}
+                      ?loading=${this.busy}
+                      @click=${() => void this.#login()}
+                    >
+                      ${t("account.login")}
+                    </sonic-button>
+                    <sonic-button
+                      variant="outline"
+                      type="neutral"
+                      ?disabled=${this.busy}
+                      @click=${() => void this.#register()}
+                    >
+                      ${t("account.register")}
+                    </sonic-button>
+                  </sonic-form-actions>
+                </sonic-fieldset>
               </div>
             `}
         ${this.error

@@ -363,33 +363,38 @@ export class GlDialogHost extends LitElement {
         />
         ${t("dialog.selectAll")}
       </label>
-      <div
-        class="flex max-h-[min(50vh,22rem)] flex-col gap-1 overflow-y-auto"
+      <sonic-table
+        size="sm"
+        bordered
+        rounded
+        maxHeight="min(50vh, 22rem)"
         role="group"
         aria-label=${p.title}
       >
-        ${p.options.map(
-          (o) => html`
-            <label
-              class="inline-flex cursor-pointer select-none items-center gap-2 rounded-md px-1 py-1 text-sm leading-[1.35]"
-            >
-              <input
-                type="checkbox"
-                class="h-[18px] w-[18px] shrink-0 cursor-pointer accent-primary"
-                .checked=${picked.has(o.value)}
-                @change=${(e: Event) => {
-                  const on = (e.target as HTMLInputElement).checked;
-                  const next = new Set(this.picked);
-                  if (on) next.add(o.value);
-                  else next.delete(o.value);
-                  this.picked = [...next];
-                }}
-              />
-              <span>${o.label}</span>
-            </label>
-          `,
-        )}
-      </div>
+        <sonic-tbody>
+          ${p.options.map(
+            (o) => html`
+              <sonic-tr>
+                <sonic-td width="2.5rem" align="center" vAlign="middle">
+                  <input
+                    type="checkbox"
+                    class="h-[18px] w-[18px] cursor-pointer accent-primary"
+                    .checked=${picked.has(o.value)}
+                    @change=${(e: Event) => {
+                      const on = (e.target as HTMLInputElement).checked;
+                      const next = new Set(this.picked);
+                      if (on) next.add(o.value);
+                      else next.delete(o.value);
+                      this.picked = [...next];
+                    }}
+                  />
+                </sonic-td>
+                <sonic-td minWidth="10rem" vAlign="middle">${o.label}</sonic-td>
+              </sonic-tr>
+            `,
+          )}
+        </sonic-tbody>
+      </sonic-table>
     `;
   }
 

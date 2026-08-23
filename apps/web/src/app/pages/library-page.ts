@@ -2,7 +2,6 @@ import {
   CLASS_COLORS,
   type Sample,
   type SampleClass,
-  type Session,
 } from "@glane/core-model";
 import { interleavedToAudioBuffer } from "@glane/audio-dsp";
 import { TransportEngine } from "@glane/audio-engine";
@@ -66,15 +65,31 @@ import {
   PROJECT_CHANGE_EVENT,
   projectWorkspace,
 } from "../project-workspace.js";
-import { libraryFiltersKey } from "../dp-keys.js";
+import { libraryFiltersKey, libraryQueueKey } from "../dp-keys.js";
+import {
+  filteredSamples,
+  getSampleListOrder,
+  listSampleIds,
+  sampleFacets,
+  setSampleListOrder,
+  type SampleFacets,
+  type SampleListQuery,
+} from "../local-api/index.js";
 import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
-import type { MoreMenuItem } from "../more-menu.js";
-import { renderMoreMenu } from "../more-menu.js";
+import type { MoreMenuEntry } from "../more-menu.js";
+import { chromeMore, renderMoreMenu } from "../more-menu.js";
 import "../pop-select.js";
 import "../sample-info.js";
+import "@supersoniks/concorde/fieldset";
+import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/queue";
+import "@supersoniks/concorde/table";
+import "@supersoniks/concorde/table-tbody";
+import "@supersoniks/concorde/table-tr";
+import "@supersoniks/concorde/table-td";
+import "@supersoniks/concorde/table-caption";
 
-const ROW_H = 56;
 
 const SAMPLE_CLASSES: Array<SampleClass | "all"> = [
   "all",
@@ -102,18 +117,17 @@ export class GlLibraryPage extends LitElement {
         max-width: 100%;
         overflow-x: hidden;
       }
-      .row.playing {
-        outline: 1px solid var(--sc-primary);
-      }
-      .row.selected {
-        outline: 1px solid color-mix(in srgb, var(--sc-primary) 70%, transparent);
-        background: color-mix(in srgb, var(--sc-primary) 12%, var(--sc-base-100));
+      /* sonic-queue forces display:block — stay in table flow */
+      sonic-queue.table-queue {
+        display: contents !important;
       }
     `,
   ];
 
-  @state() private samples: Sample[] = [];
-  @state() private sessions: Session[] = [];
+  @state() private projectId = "";
+  @state() private facets: SampleFacets = { sessions: [], tags: [] };
+  /** Stay false until project + filters are ready — avoids sonic-queue double fetch. */
+  @state() private queueMounted = false;
 
   @subscribe(libraryFiltersKey.classFilter)
   @state()
@@ -132,20 +146,27 @@ export class GlLibraryPage extends LitElement {
   @state()
   captureQuery = "";
 
+  @subscribe(libraryFiltersKey.semantic)
+  @state()
+  semantic: "" | "1" = "";
+
+  @subscribe(libraryQueueKey.lastFetchedData.total)
+  @state()
+  listTotal = 0;
+
   @state() private selected = new Set<string>();
   @state() private sieve = false;
   @state() private sieveIndex = 0;
-  @state() private listScrollTop = 0;
-  @state() private viewportH = 600;
+  @state() private sieveIds: string[] = [];
+  @state() private sieveSample: Sample | null = null;
   @state() private playingId: string | null = null;
   @state() private batchBusy = false;
   @state() private separatingId: string | null = null;
   @state() private separateProgress = "";
-  /** CLAP semantic rank (id → score); null = classic filter only. */
-  @state() private clapScores: Map<string, number> | null = null;
   @state() private clapBusy = false;
   @state() private clapStatus = "";
   @state() private infoId: string | null = null;
+  @state() private filtersModalOpen = false;
   #clapTimer: number | null = null;
   /** Keep status visible while similar / backfill owns the run. */
   #clapOp = false;
@@ -165,11 +186,13 @@ export class GlLibraryPage extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    setSampleListOrder(null);
     set(libraryFiltersKey, {
       classFilter: "all",
       sessionFilter: "",
       tagFilter: [],
       q: "",
+      semantic: "",
     });
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.addEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
@@ -195,6 +218,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    chromeMore.clear();
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.removeEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
     window.removeEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
@@ -212,14 +236,129 @@ export class GlLibraryPage extends LitElement {
   }
 
   override updated(changed: PropertyValues): void {
-    if (changed.has("captureQuery") || changed.has("samples")) {
+    if (changed.has("captureQuery")) {
       this.#scheduleClapSearch();
     }
+    this.#syncChromeMore();
+  }
+
+  #filterQuery(extra?: Partial<SampleListQuery>): SampleListQuery {
+    return {
+      projectId: this.projectId || undefined,
+      sessionId: this.sessionFilter || undefined,
+      classFilter: this.classFilter ?? undefined,
+      tagFilter: this.tagFilter,
+      q: this.captureQuery,
+      orderIds: this.semantic === "1" ? getSampleListOrder() : null,
+      ...extra,
+    };
+  }
+
+  #batchMoreItems(): MoreMenuEntry[] {
+    const selectedCount = this.selected.size;
+    const noSel = selectedCount === 0 || this.batchBusy;
+    const noExport = this.listTotal === 0 || this.batchBusy;
+    const batchItems: MoreMenuEntry[] = [
+      {
+        label: t("library.import"),
+        icon: "upload",
+        disabled: this.batchBusy,
+        onClick: () =>
+          this.renderRoot
+            .querySelector<HTMLInputElement>("#import-audio")
+            ?.click(),
+      },
+      "divider",
+      {
+        label: t("library.batchFav"),
+        icon: "star",
+        disabled: noSel,
+        onClick: () => void this.#batchFavorite(true),
+      },
+      {
+        label: t("library.batchUnfav"),
+        icon: "star",
+        disabled: noSel,
+        onClick: () => void this.#batchFavorite(false),
+      },
+      {
+        label: t("library.batchDuplicate"),
+        icon: "copy",
+        disabled: noSel,
+        onClick: () => void this.#batchDuplicate(),
+      },
+      {
+        label: t("library.batchCopyToProject"),
+        icon: "folder-plus",
+        disabled: noSel,
+        onClick: () => void this.#batchCopyToProject(),
+      },
+      {
+        label: t("library.batchSeparate"),
+        icon: "layers",
+        disabled: noSel,
+        onClick: () => void this.#batchSeparate(),
+      },
+      {
+        label: t("library.batchRemoveVocals"),
+        icon: "mic-off",
+        disabled: noSel,
+        onClick: () => void this.#batchRemoveVocals(),
+      },
+      {
+        label: t("library.batchDenoise"),
+        icon: "audio-lines",
+        disabled: noSel,
+        onClick: () => void this.#batchDenoise(),
+      },
+      {
+        label: t("library.batchAutoCrop"),
+        icon: "crop",
+        disabled: noSel,
+        onClick: () => void this.#batchAutoCrop(),
+      },
+      {
+        label: t("library.batchAnalyze"),
+        icon: "activity",
+        disabled: noSel,
+        onClick: () => void this.#batchAnalyze(),
+      },
+      {
+        label: t("library.exportMachine"),
+        icon: "download",
+        disabled: noExport,
+        onClick: () => void this.#exportMachine(),
+      },
+      {
+        label: t("library.batchDelete"),
+        icon: "trash-2",
+        disabled: noSel,
+        onClick: () => void this.#batchDelete(),
+      },
+    ];
+    if (selectedCount > 0) {
+      batchItems.push("divider", {
+        label: t("library.clearSelection"),
+        onClick: () => {
+          this.selected = new Set();
+        },
+      });
+    }
+    return batchItems;
+  }
+
+  #syncChromeMore(): void {
+    chromeMore.set({
+      ariaLabel: t("library.batchMore"),
+      items: this.#batchMoreItems(),
+    });
   }
 
   #onProjectChange = (): void => {
     set(libraryFiltersKey.sessionFilter, "");
     set(libraryFiltersKey.tagFilter, []);
+    setSampleListOrder(null);
+    set(libraryFiltersKey.semantic, "");
     void this.#reload();
   };
 
@@ -331,54 +470,6 @@ export class GlLibraryPage extends LitElement {
     }
   };
 
-  get #filtered(): Sample[] {
-    let list = this.samples;
-    if (this.sessionFilter) {
-      list = list.filter((s) => s.sessionId === this.sessionFilter);
-    }
-    // FormCheckable `unique` can write null when sibling buttons mount; treat as all.
-    if (this.classFilter && this.classFilter !== "all") {
-      list = list.filter((s) => s.class === this.classFilter);
-    }
-    if (this.tagFilter.length > 0) {
-      list = list.filter((s) =>
-        this.tagFilter.some((tag) => (s.tags ?? []).includes(tag)),
-      );
-    }
-    const q = this.captureQuery.trim().toLowerCase();
-    const scores = this.clapScores;
-    if (q) {
-      if (scores && scores.size > 0) {
-        const classic = new Set(
-          list
-            .filter(
-              (s) =>
-                (s.captureName ?? "").toLowerCase().includes(q) ||
-                s.name.toLowerCase().includes(q) ||
-                (s.userName ?? "").toLowerCase().includes(q) ||
-                (s.tags ?? []).some((tag) => tag.toLowerCase().includes(q)),
-            )
-            .map((s) => s.id),
-        );
-        list = list.filter((s) => classic.has(s.id) || scores.has(s.id));
-        list = [...list].sort((a, b) => {
-          const sa = scores.get(a.id) ?? (classic.has(a.id) ? 0.05 : 0);
-          const sb = scores.get(b.id) ?? (classic.has(b.id) ? 0.05 : 0);
-          return sb - sa;
-        });
-      } else {
-        list = list.filter(
-          (s) =>
-            (s.captureName ?? "").toLowerCase().includes(q) ||
-            s.name.toLowerCase().includes(q) ||
-            (s.userName ?? "").toLowerCase().includes(q) ||
-            (s.tags ?? []).some((tag) => tag.toLowerCase().includes(q)),
-        );
-      }
-    }
-    return list;
-  }
-
   #scheduleClapSearch(): void {
     if (this.#clapTimer != null) window.clearTimeout(this.#clapTimer);
     this.#clapTimer = window.setTimeout(() => {
@@ -390,162 +481,314 @@ export class GlLibraryPage extends LitElement {
   async #runClapSearch(): Promise<void> {
     const q = this.captureQuery.trim();
     if (q.length < 3) {
-      this.clapScores = null;
+      setSampleListOrder(null);
+      if (this.semantic) set(libraryFiltersKey.semantic, "");
       return;
     }
     const prefs = await ensurePrefs();
-    // Auto semantic only when opt-in; otherwise classic text filter only.
     if (prefs.mlClap !== true) {
-      this.clapScores = null;
+      setSampleListOrder(null);
+      if (this.semantic) set(libraryFiltersKey.semantic, "");
       return;
     }
     this.clapBusy = true;
     try {
-      const ranked = await rankLibraryByText(
-        q,
-        this.samples.filter((s) => !s.deletedAt).map((s) => s.id),
-      );
-      this.clapScores =
-        ranked.length > 0
-          ? new Map(ranked.map((r) => [r.id, r.score]))
-          : null;
+      const poolIds = await listSampleIds({
+        projectId: this.projectId || undefined,
+      });
+      const ranked = await rankLibraryByText(q, poolIds);
+      if (ranked.length > 0) {
+        setSampleListOrder(ranked.map((r) => r.id));
+        set(libraryFiltersKey.semantic, "1");
+      } else {
+        setSampleListOrder(null);
+        set(libraryFiltersKey.semantic, "");
+      }
     } catch {
-      this.clapScores = null;
+      setSampleListOrder(null);
+      set(libraryFiltersKey.semantic, "");
     } finally {
       this.clapBusy = false;
     }
   }
 
   get #sessionOptions(): { id: string; label: string; count: number }[] {
-    const counts = new Map<string, number>();
-    for (const s of this.samples) {
-      counts.set(s.sessionId, (counts.get(s.sessionId) ?? 0) + 1);
-    }
-    const byId = new Map(this.sessions.map((s) => [s.id, s]));
-    const opts: { id: string; label: string; count: number }[] = [];
-    for (const [id, count] of counts) {
-      const sess = byId.get(id);
-      const label =
-        sess?.title?.trim() ||
-        this.samples.find((s) => s.sessionId === id)?.captureName ||
-        id.slice(0, 8);
-      opts.push({ id, label, count });
-    }
-    opts.sort((a, b) => a.label.localeCompare(b.label, "fr"));
-    return opts;
+    return this.facets.sessions;
   }
 
   get #tagOptions(): { value: string; label: string }[] {
-    const counts = new Map<string, number>();
-    for (const s of this.samples) {
-      for (const tag of s.tags ?? []) {
-        if (!tag || tag.startsWith("processing:")) continue;
-        counts.set(tag, (counts.get(tag) ?? 0) + 1);
-      }
-    }
-    return [...counts.entries()]
-      .map(([value, count]) => ({ value, label: `${value} (${count})` }))
-      .sort((a, b) => a.value.localeCompare(b.value, "fr"));
+    return this.facets.tags;
   }
 
-  override render() {
-    const filtered = this.#filtered;
-    const start = Math.max(0, Math.floor(this.listScrollTop / ROW_H) - 2);
-    const visible = Math.ceil(this.viewportH / ROW_H) + 4;
-    const end = Math.min(filtered.length, start + visible);
-    const slice = filtered.slice(start, end);
-    const selectedCount = [...this.selected].filter((id) =>
-      filtered.some((s) => s.id === id),
-    ).length;
-    const allFilteredSelected =
-      filtered.length > 0 && filtered.every((s) => this.selected.has(s.id));
-    const classActive = !!(this.classFilter && this.classFilter !== "all");
-    const noSel = selectedCount === 0 || this.batchBusy;
-    const noExport = filtered.length === 0 || this.batchBusy;
-    const batchItems: Array<MoreMenuItem | "divider"> = [
-      {
-        label: t("library.batchFav"),
-        icon: "star",
-        disabled: noSel,
-        onClick: () => void this.#batchFavorite(true),
-      },
-      {
-        label: t("library.batchUnfav"),
-        icon: "star",
-        disabled: noSel,
-        onClick: () => void this.#batchFavorite(false),
-      },
-      {
-        label: t("library.batchDuplicate"),
-        icon: "copy",
-        disabled: noSel,
-        onClick: () => void this.#batchDuplicate(),
-      },
-      {
-        label: t("library.batchCopyToProject"),
-        icon: "folder-plus",
-        disabled: noSel,
-        onClick: () => void this.#batchCopyToProject(),
-      },
-      {
-        label: t("library.batchSeparate"),
-        icon: "layers",
-        disabled: noSel,
-        onClick: () => void this.#batchSeparate(),
-      },
-      {
-        label: t("library.batchRemoveVocals"),
-        icon: "mic-off",
-        disabled: noSel,
-        onClick: () => void this.#batchRemoveVocals(),
-      },
-      {
-        label: t("library.batchDenoise"),
-        icon: "audio-lines",
-        disabled: noSel,
-        onClick: () => void this.#batchDenoise(),
-      },
-      {
-        label: t("library.batchAutoCrop"),
-        icon: "crop",
-        disabled: noSel,
-        onClick: () => void this.#batchAutoCrop(),
-      },
-      {
-        label: t("library.batchAnalyze"),
-        icon: "activity",
-        disabled: noSel,
-        onClick: () => void this.#batchAnalyze(),
-      },
-      {
-        label: t("library.exportMachine"),
-        icon: "download",
-        disabled: noExport,
-        onClick: () => void this.#exportMachine(),
-      },
-      {
-        label: t("library.batchDelete"),
-        icon: "trash-2",
-        disabled: noSel,
-        onClick: () => void this.#batchDelete(),
-      },
-    ];
-    if (selectedCount > 0) {
-      batchItems.push("divider", {
-        label: t("library.clearSelection"),
-        onClick: () => {
-          this.selected = new Set();
-        },
-      });
+  /** Active class / session / tag filters (search query excluded). */
+  #filterCount(): number {
+    let n = 0;
+    if (this.classFilter && this.classFilter !== "all") n += 1;
+    if (this.sessionFilter) n += 1;
+    n += this.tagFilter.length;
+    return n;
+  }
+
+  #filterCaption(): string {
+    const parts: string[] = [];
+    if (this.classFilter && this.classFilter !== "all") {
+      parts.push(this.classFilter);
     }
+    if (this.sessionFilter) {
+      const sess = this.#sessionOptions.find(
+        (o) => o.id === this.sessionFilter,
+      );
+      parts.push(sess?.label ?? this.sessionFilter.slice(0, 8));
+    }
+    if (this.tagFilter.length > 0) {
+      parts.push(this.tagFilter.join(", "));
+    }
+    return parts.join(" · ");
+  }
+
+  #renderFilterModal() {
+    const classActive = !!(this.classFilter && this.classFilter !== "all");
+    const filtersActive =
+      classActive || !!this.sessionFilter || this.tagFilter.length > 0;
+    return html`
+      <sonic-modal
+        align="left"
+        maxWidth="22rem"
+        .visible=${this.filtersModalOpen}
+        @hide=${() => {
+          this.filtersModalOpen = false;
+        }}
+      >
+        <sonic-modal-title>${t("library.filters")}</sonic-modal-title>
+        <sonic-modal-content>
+          <sonic-fieldset>
+            <sonic-form-layout>
+              <gl-pop-select
+                class="w-full max-w-full"
+                size="sm"
+                label=${t("library.filterClass")}
+                .value=${this.classFilter && this.classFilter !== "all"
+                  ? this.classFilter
+                  : "all"}
+                .options=${SAMPLE_CLASSES.map((c) => ({
+                  value: c,
+                  label: c === "all" ? t("library.allClasses") : c,
+                }))}
+                placeholder=${t("library.allClasses")}
+                searchPlaceholder=${t("library.popSearch")}
+                ?active=${classActive}
+                @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                  set(
+                    libraryFiltersKey.classFilter,
+                    e.detail.value as SampleClass | "all",
+                  );
+                  this.selected = new Set();
+                }}
+              ></gl-pop-select>
+              <gl-pop-select
+                class="w-full max-w-full"
+                size="sm"
+                label=${t("library.filterSession")}
+                .value=${this.sessionFilter}
+                .options=${[
+                  { value: "", label: t("library.allSessions") },
+                  ...this.#sessionOptions.map((o) => ({
+                    value: o.id,
+                    label: `${o.label} (${o.count})`,
+                  })),
+                ]}
+                placeholder=${t("library.allSessions")}
+                searchPlaceholder=${t("library.popSearch")}
+                ?active=${!!this.sessionFilter}
+                @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                  set(libraryFiltersKey.sessionFilter, e.detail.value);
+                  this.selected = new Set();
+                }}
+              ></gl-pop-select>
+              <gl-pop-select
+                class="w-full max-w-full"
+                size="sm"
+                multiple
+                label=${t("library.filterTag")}
+                .values=${this.tagFilter}
+                .options=${[
+                  { value: "", label: t("library.allTags") },
+                  ...this.#tagOptions,
+                ]}
+                placeholder=${t("library.allTags")}
+                searchPlaceholder=${t("library.popSearch")}
+                ?active=${this.tagFilter.length > 0}
+                @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
+                  set(libraryFiltersKey.tagFilter, e.detail.values);
+                  this.selected = new Set();
+                }}
+              ></gl-pop-select>
+            </sonic-form-layout>
+          </sonic-fieldset>
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button
+            variant="outline"
+            type="neutral"
+            ?disabled=${!filtersActive}
+            @click=${this.#resetFilters}
+            >${t("library.resetFilters")}</sonic-button
+          >
+          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
+  }
+
+  #resetFilters = (): void => {
+    set(libraryFiltersKey.classFilter, "all");
+    set(libraryFiltersKey.sessionFilter, "");
+    set(libraryFiltersKey.tagFilter, []);
+    setSampleListOrder(null);
+    set(libraryFiltersKey.semantic, "");
+    this.selected = new Set();
+  };
+
+  #renderSampleRow = (s: Sample) => {
+    const isSel = this.selected.has(s.id);
+    const playing = this.playingId === s.id;
+    return html`
+      <sonic-tr type=${playing ? "info" : nothing}>
+        <sonic-td width="2.5rem" vAlign="middle" align="center">
+          <input
+            type="checkbox"
+            class="h-[18px] w-[18px] cursor-pointer accent-primary"
+            .checked=${isSel}
+            @change=${(e: Event) => {
+              e.stopPropagation();
+              this.#toggleOne(s.id);
+            }}
+            @click=${(e: Event) => e.stopPropagation()}
+          />
+        </sonic-td>
+        <sonic-td
+          minWidth="12rem"
+          vAlign="middle"
+          @click=${() => void this.#onRowClick(s)}
+        >
+          <div>${s.userName ?? s.name}</div>
+          <div class="font-mono text-xs text-neutral-500">
+            ${s.captureName ? `${s.captureName} · ` : ""}${s.class}
+            · ${s.durationMs}ms
+            ${s.loopProposed ? " · boucle" : ""}${
+              isProcessingBusy(s.tags)
+                ? ` · ${t("library.processing")}`
+                : isProcessingError(s.tags)
+                  ? ` · ${t("library.processingError")}`
+                  : ""
+            }
+            ${(s.tags ?? []).length
+              ? ` · ${(s.tags ?? []).slice(0, 3).join(", ")}`
+              : ""}
+          </div>
+        </sonic-td>
+        <sonic-td
+          width="2.5rem"
+          align="right"
+          vAlign="middle"
+          @click=${(e: Event) => e.stopPropagation()}
+        >
+          ${renderMoreMenu({
+            ariaLabel: t("library.more"),
+            size: "sm",
+            icon: "horizontal",
+            items: [
+              {
+                label: t("sample.info"),
+                icon: "info",
+                onClick: () => {
+                  this.infoId = s.id;
+                },
+              },
+              {
+                label: s.favorite ? t("library.unfav") : t("library.fav"),
+                icon: "star",
+                onClick: () => void this.#fav(s),
+              },
+              {
+                label: t("library.rename"),
+                icon: "pencil",
+                onClick: () => void this.#rename(s),
+              },
+              {
+                label: t("library.duplicate"),
+                icon: "copy",
+                onClick: () => void this.#duplicate(s),
+              },
+              {
+                label: t("library.similar"),
+                icon: "audio-lines",
+                onClick: () => void this.#similar(s),
+              },
+              {
+                label: t("library.separate"),
+                icon: "layers",
+                onClick: () => void this.#separate(s),
+              },
+              {
+                label: t("library.removeVocals"),
+                icon: "mic-off",
+                onClick: () => void this.#removeVocals(s),
+              },
+              {
+                label: t("library.denoise"),
+                icon: "audio-lines",
+                onClick: () => void this.#denoise(s),
+              },
+              {
+                label: t("library.analyze"),
+                icon: "activity",
+                onClick: () => void processQueue.reanalyzeSample(s.id),
+              },
+              {
+                label: t("library.copyToProject"),
+                icon: "folder-plus",
+                onClick: () => void this.#copyToProject(s),
+              },
+              {
+                label: t("library.delete"),
+                icon: "trash-2",
+                onClick: () => void this.#remove(s),
+              },
+            ],
+          })}
+        </sonic-td>
+      </sonic-tr>
+    `;
+  };
+
+  #noSampleItems = () => html`
+    <sonic-tr>
+      <sonic-td .colSpan=${3}>${t("library.empty")}</sonic-td>
+    </sonic-tr>
+  `;
+
+  override render() {
+    const selectedCount = this.selected.size;
+    const allFilteredSelected =
+      this.listTotal > 0 &&
+      selectedCount >= this.listTotal &&
+      this.listTotal > 0;
+    const filterCaption = this.#filterCaption();
+    const filterCount = this.#filterCount();
+    const filtersActive = filterCount > 0;
+    const endpoint = this.projectId
+      ? `samples?projectId=${encodeURIComponent(this.projectId)}&offset=$offset&limit=$limit`
+      : "";
 
     return html`
       <div
-        class="mb-3 flex flex-wrap items-center gap-2"
+        class="mb-3 flex flex-nowrap items-center gap-2"
         formDataProvider=${libraryFiltersKey.path}
+        dataFilterProvider=${libraryFiltersKey.path}
       >
         <sonic-input
-          class="capture-q min-w-[min(10rem,100%)] flex-[1_1_10rem] max-[480px]:min-w-0 max-[480px]:flex-[1_1_100%]"
+          class="capture-q min-w-0 flex-1"
           name="q"
           type="search"
           size="sm"
@@ -555,76 +798,32 @@ export class GlLibraryPage extends LitElement {
         >
           ${glIcon("search", { slot: "prefix", size: "sm" })}
         </sonic-input>
-        <gl-pop-select
-          class="max-w-64 max-[480px]:max-w-full max-[480px]:flex-[1_1_auto]"
-          size="sm"
-          .value=${this.classFilter && this.classFilter !== "all"
-            ? this.classFilter
-            : "all"}
-          .options=${SAMPLE_CLASSES.map((c) => ({
-            value: c,
-            label: c === "all" ? t("library.allClasses") : c,
-          }))}
-          placeholder=${t("library.allClasses")}
-          searchPlaceholder=${t("library.popSearch")}
-          ?active=${classActive}
-          @gl-change=${(e: CustomEvent<{ value: string }>) => {
-            set(
-              libraryFiltersKey.classFilter,
-              e.detail.value as SampleClass | "all",
-            );
-            this.selected = new Set();
-          }}
-        ></gl-pop-select>
-        <gl-pop-select
-          class="max-w-64 max-[480px]:max-w-full max-[480px]:flex-[1_1_auto]"
-          size="sm"
-          .value=${this.sessionFilter}
-          .options=${[
-            { value: "", label: t("library.allSessions") },
-            ...this.#sessionOptions.map((o) => ({
-              value: o.id,
-              label: `${o.label} (${o.count})`,
-            })),
-          ]}
-          placeholder=${t("library.allSessions")}
-          searchPlaceholder=${t("library.popSearch")}
-          ?active=${!!this.sessionFilter}
-          @gl-change=${(e: CustomEvent<{ value: string }>) => {
-            set(libraryFiltersKey.sessionFilter, e.detail.value);
-            this.selected = new Set();
-          }}
-        ></gl-pop-select>
-        <gl-pop-select
-          class="max-w-64 max-[480px]:max-w-full max-[480px]:flex-[1_1_auto]"
-          size="sm"
-          multiple
-          .values=${this.tagFilter}
-          .options=${[
-            { value: "", label: t("library.allTags") },
-            ...this.#tagOptions,
-          ]}
-          placeholder=${t("library.allTags")}
-          searchPlaceholder=${t("library.popSearch")}
-          ?active=${this.tagFilter.length > 0}
-          @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
-            set(libraryFiltersKey.tagFilter, e.detail.values);
-            this.selected = new Set();
-          }}
-        ></gl-pop-select>
-        <sonic-button
-          type="neutral"
-          variant="outline"
-          size="sm"
-          ?disabled=${this.batchBusy}
-          @click=${() =>
-            this.renderRoot
-              .querySelector<HTMLInputElement>("#import-audio")
-              ?.click()}
-        >
-          ${glIcon("upload", { slot: "prefix", size: "xs" })}
-          ${t("library.import")}
-        </sonic-button>
+        <div class="relative inline-block shrink-0 overflow-visible p-1 -m-1">
+          <sonic-button
+            shape="circle"
+            variant="ghost"
+            type=${filtersActive ? "primary" : "neutral"}
+            size="sm"
+            icon
+            ?active=${filtersActive}
+            data-aria-label=${t("library.filters")}
+            title=${filterCaption || t("library.filters")}
+            @click=${() => {
+              this.filtersModalOpen = true;
+            }}
+          >
+            ${glIcon("filter", { size: "sm" })}
+          </sonic-button>
+          ${filterCount > 0
+            ? html`<sonic-badge
+                type="danger"
+                size="2xs"
+                class="pointer-events-none absolute right-1 bottom-1 z-[1] translate-x-1/2 translate-y-1/2 transform"
+                >${filterCount}</sonic-badge
+              >`
+            : nothing}
+        </div>
+        ${this.#renderFilterModal()}
         <input
           id="import-audio"
           class="sr-only"
@@ -633,10 +832,6 @@ export class GlLibraryPage extends LitElement {
           multiple
           @change=${(e: Event) => void this.#onImportFiles(e)}
         />
-        ${renderMoreMenu({
-          ariaLabel: t("library.batchMore"),
-          items: batchItems,
-        })}
       </div>
 
       ${this.separateProgress
@@ -652,169 +847,57 @@ export class GlLibraryPage extends LitElement {
           </p>`
         : nothing}
 
-      <div
-        class="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-neutral-100 px-[0.65rem] py-2"
+      <sonic-table
+        size="sm"
+        bordered
+        rounded
+        maxHeight="calc(100dvh - 14rem)"
       >
-        <label
-          class="inline-flex cursor-pointer select-none items-center gap-1.5 font-mono text-xs text-neutral-500"
+        <sonic-tbody
+          formDataProvider=${libraryFiltersKey.path}
+          dataFilterProvider=${libraryFiltersKey.path}
+        >
+          ${this.queueMounted && endpoint
+            ? html`
+                <sonic-queue
+                  class="table-queue"
+                  lazyload
+                  dataProvider=${libraryQueueKey.path}
+                  dataProviderExpression=${endpoint}
+                  dataFilterProvider=${libraryFiltersKey.path}
+                  key="data"
+                  limit="15"
+                  idKey="id"
+                  .items=${this.#renderSampleRow}
+                  .noItems=${this.#noSampleItems}
+                ></sonic-queue>
+              `
+            : nothing}
+        </sonic-tbody>
+        <sonic-caption
+          class="flex items-center justify-between gap-2"
+          title=${filterCaption || undefined}
         >
           <input
             type="checkbox"
-            class="h-[18px] w-[18px] cursor-pointer accent-primary"
+            class="h-[18px] w-[18px] shrink-0 cursor-pointer accent-primary"
+            title=${t("library.selectAll")}
+            data-aria-label=${t("library.selectAll")}
             .checked=${allFilteredSelected}
             .indeterminate=${selectedCount > 0 && !allFilteredSelected}
-            @change=${() => this.#toggleSelectAll(filtered)}
+            ?disabled=${this.listTotal === 0}
+            @change=${() => void this.#toggleSelectAll()}
           />
-          ${t("library.selectAll")}
-        </label>
-        <span
-          class="ml-auto font-mono text-xs text-neutral-500 max-[480px]:ml-0 max-[480px]:flex-[1_1_100%]"
-          >${filtered.length} sons</span
-        >
-      </div>
-
-      ${filtered.length === 0
-        ? html`<p>${t("library.empty")}</p>`
-        : html`
-            <div
-              class="relative h-[calc(100dvh-14rem)] overflow-auto [-webkit-overflow-scrolling:touch] [contain:strict]"
-              @scroll=${this.#onScroll}
-            >
-              <div
-                class="relative w-full"
-                style="height:${filtered.length * ROW_H}px"
-              >
-                ${slice.map((s, i) => {
-                  const idx = start + i;
-                  const isSel = this.selected.has(s.id);
-                  return html`
-                    <div
-                      class="row absolute inset-x-0 box-border grid grid-cols-[28px_8px_1fr_auto] items-center gap-[0.45rem] rounded-md bg-neutral-100 px-2 py-[0.35rem] ${this.playingId === s.id ? "playing" : ""} ${isSel
-                        ? "selected"
-                        : ""}"
-                      style="top:${idx * ROW_H}px;height:${ROW_H - 4}px"
-                    >
-                      <input
-                        type="checkbox"
-                        class="h-[18px] w-[18px] cursor-pointer accent-primary"
-                        .checked=${isSel}
-                        @change=${(e: Event) => {
-                          e.stopPropagation();
-                          this.#toggleOne(s.id);
-                        }}
-                        @click=${(e: Event) => e.stopPropagation()}
-                      />
-                      <span
-                        class="h-full min-h-7 w-2 rounded-sm"
-                        style="background:${CLASS_COLORS[s.class]}"
-                        aria-label="${s.class}"
-                      ></span>
-                      <button
-                        class="min-w-0 cursor-pointer border-0 bg-transparent p-0 text-left font-inherit text-inherit"
-                        type="button"
-                        @click=${() => void this.#onRowClick(s)}
-                      >
-                        <div>${s.userName ?? s.name}</div>
-                        <div class="font-mono text-xs text-neutral-500">
-                          ${s.captureName ? `${s.captureName} · ` : ""}${s.class}
-                          · ${s.durationMs}ms
-                          ${s.loopProposed ? " · boucle" : ""}${
-                            isProcessingBusy(s.tags)
-                              ? ` · ${t("library.processing")}`
-                              : isProcessingError(s.tags)
-                                ? ` · ${t("library.processingError")}`
-                                : ""
-                          }
-                          ${(s.tags ?? []).length
-                            ? ` · ${(s.tags ?? []).slice(0, 3).join(", ")}`
-                            : ""}
-                        </div>
-                      </button>
-                      <div
-                        class="flex items-center"
-                        @click=${(e: Event) => e.stopPropagation()}
-                      >
-                        ${renderMoreMenu({
-                          ariaLabel: t("library.more"),
-                          size: "sm",
-                          icon: "horizontal",
-                          items: [
-                            {
-                              label: t("sample.info"),
-                              icon: "info",
-                              onClick: () => {
-                                this.infoId = s.id;
-                              },
-                            },
-                            {
-                              label: s.favorite
-                                ? t("library.unfav")
-                                : t("library.fav"),
-                              icon: "star",
-                              onClick: () => void this.#fav(s),
-                            },
-                            {
-                              label: t("library.rename"),
-                              icon: "pencil",
-                              onClick: () => void this.#rename(s),
-                            },
-                            {
-                              label: t("library.duplicate"),
-                              icon: "copy",
-                              onClick: () => void this.#duplicate(s),
-                            },
-                            {
-                              label: t("library.createVariations"),
-                              icon: "sliders",
-                              onClick: () =>
-                                navigate({ name: "synth", id: s.id }),
-                            },
-                            {
-                              label: t("library.similar"),
-                              icon: "audio-lines",
-                              onClick: () => void this.#similar(s),
-                            },
-                            {
-                              label: t("library.separate"),
-                              icon: "layers",
-                              onClick: () => void this.#separate(s),
-                            },
-                            {
-                              label: t("library.removeVocals"),
-                              icon: "mic-off",
-                              onClick: () => void this.#removeVocals(s),
-                            },
-                            {
-                              label: t("library.denoise"),
-                              icon: "audio-lines",
-                              onClick: () => void this.#denoise(s),
-                            },
-                            {
-                              label: t("library.analyze"),
-                              icon: "activity",
-                              onClick: () =>
-                                void processQueue.reanalyzeSample(s.id),
-                            },
-                            {
-                              label: t("library.copyToProject"),
-                              icon: "folder-plus",
-                              onClick: () => void this.#copyToProject(s),
-                            },
-                            {
-                              label: t("library.delete"),
-                              icon: "trash-2",
-                              onClick: () => void this.#remove(s),
-                            },
-                          ],
-                        })}
-                      </div>
-                    </div>
-                  `;
-                })}
-              </div>
-            </div>
-          `}
-      ${!this.sieve && filtered.length > 0
+          <span class="min-w-0 truncate text-right"
+            >${filterCaption
+              ? html`${filterCaption} · `
+              : nothing}${tf("common.soundCount", {
+              n: this.listTotal,
+            })}</span
+          >
+        </sonic-caption>
+      </sonic-table>
+      ${!this.sieve && this.listTotal > 0
         ? html`
             <div
               class="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] z-20 rounded-full shadow-[0_4px_18px_color-mix(in_srgb,#000_35%,transparent)]"
@@ -825,18 +908,15 @@ export class GlLibraryPage extends LitElement {
                 size="lg"
                 icon
                 data-aria-label=${t("library.sieve")}
-                @click=${() => {
-                  this.sieveIndex = 0;
-                  this.sieve = true;
-                }}
+                @click=${() => void this.#openSieve()}
               >
-                ${glIcon("filter", { size: "md" })}
+                ${glIcon("move-horizontal", { size: "md" })}
               </sonic-button>
             </div>
           `
         : nothing}
-      ${this.sieve && filtered[this.sieveIndex]
-        ? this.#renderSieve(filtered)
+      ${this.sieve && this.sieveSample
+        ? this.#renderSieve()
         : nothing}
       <gl-sample-info
         .sampleId=${this.infoId ?? ""}
@@ -855,26 +935,46 @@ export class GlLibraryPage extends LitElement {
     this.selected = next;
   }
 
-  #toggleSelectAll(filtered: Sample[]): void {
-    const allOn = filtered.length > 0 && filtered.every((s) => this.selected.has(s.id));
-    if (allOn) {
-      const next = new Set(this.selected);
-      for (const s of filtered) next.delete(s.id);
-      this.selected = next;
-    } else {
-      const next = new Set(this.selected);
-      for (const s of filtered) next.add(s.id);
-      this.selected = next;
+  async #toggleSelectAll(): Promise<void> {
+    if (this.listTotal === 0) return;
+    if (this.selected.size >= this.listTotal) {
+      this.selected = new Set();
+      return;
     }
+    const ids = await listSampleIds(this.#filterQuery());
+    this.selected = new Set(ids);
   }
 
-  #selectedInView(): string[] {
-    const filteredIds = new Set(this.#filtered.map((s) => s.id));
-    return [...this.selected].filter((id) => filteredIds.has(id));
+  #selectedIds(): string[] {
+    return [...this.selected];
+  }
+
+  async #samplesByIds(ids: string[]): Promise<Sample[]> {
+    if (ids.length === 0) return [];
+    const rows = await db.samples.bulkGet(ids);
+    return rows.filter((s): s is Sample => !!s && !s.deletedAt);
+  }
+
+  async #openSieve(): Promise<void> {
+    const ids = await listSampleIds(this.#filterQuery());
+    if (ids.length === 0) return;
+    this.sieveIds = ids;
+    this.sieveIndex = 0;
+    this.sieve = true;
+    await this.#loadSieveSample();
+  }
+
+  async #loadSieveSample(): Promise<void> {
+    const id = this.sieveIds[this.sieveIndex];
+    if (!id) {
+      this.sieveSample = null;
+      return;
+    }
+    this.sieveSample = (await db.samples.get(id)) ?? null;
   }
 
   async #batchFavorite(favorite: boolean): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
     this.batchBusy = true;
     try {
@@ -886,7 +986,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchDelete(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
     const ok = await glDialog.confirm({
       message: `Supprimer ${ids.length} son(s) ?`,
@@ -909,7 +1009,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchDuplicate(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
     this.batchBusy = true;
     try {
@@ -926,6 +1026,7 @@ export class GlLibraryPage extends LitElement {
     input.value = "";
     if (files.length === 0) return;
     const projectId = await projectWorkspace.currentId();
+    if (!projectId) return;
     this.batchBusy = true;
     try {
       const { imported, failed } = await importAudioFiles(files, projectId);
@@ -961,7 +1062,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchCopyToProject(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
     const targetId = await this.#pickTargetProject();
     if (!targetId) return;
@@ -977,13 +1078,12 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #exportMachine(): Promise<void> {
-    const filtered = this.#filtered;
-    if (filtered.length === 0) return;
-    const selectedIds = new Set(this.#selectedInView());
+    const selectedIds = this.#selectedIds();
     const samples =
-      selectedIds.size > 0
-        ? filtered.filter((s) => selectedIds.has(s.id))
-        : filtered;
+      selectedIds.length > 0
+        ? await this.#samplesByIds(selectedIds)
+        : await filteredSamples(this.#filterQuery());
+    if (samples.length === 0) return;
     const target = (await glDialog.choose({
       title: t("library.exportMachineTitle"),
       message: `${t("library.exportMachineMsg")} (${samples.length})`,
@@ -1002,6 +1102,7 @@ export class GlLibraryPage extends LitElement {
         return;
       }
       const project = await projectWorkspace.ensure();
+      if (!project) return;
       libraryMachineExport.download(project.title, target, blob);
       if (skipped > 0) {
         await glDialog.alert(
@@ -1012,12 +1113,6 @@ export class GlLibraryPage extends LitElement {
       this.batchBusy = false;
     }
   }
-
-  #onScroll = (e: Event): void => {
-    const el = e.target as HTMLElement;
-    this.listScrollTop = el.scrollTop;
-    this.viewportH = el.clientHeight;
-  };
 
   async #onRowClick(s: Sample): Promise<void> {
     const now = performance.now();
@@ -1049,8 +1144,9 @@ export class GlLibraryPage extends LitElement {
     this.#engine.audition(buf, 5);
   }
 
-  #renderSieve(filtered: Sample[]) {
-    const s = filtered[this.sieveIndex]!;
+  #renderSieve() {
+    const s = this.sieveSample;
+    if (!s) return nothing;
     return html`
       <div
         class="sieve fixed inset-0 z-30 flex touch-none flex-col items-center justify-center bg-neutral-0 p-6"
@@ -1059,7 +1155,7 @@ export class GlLibraryPage extends LitElement {
           this.#pointerStartY = e.clientY;
           (e.target as HTMLElement).setPointerCapture(e.pointerId);
         }}
-        @pointerup=${(e: PointerEvent) => void this.#sieveGesture(e, filtered)}
+        @pointerup=${(e: PointerEvent) => void this.#sieveGesture(e)}
       >
         <h2 class="font-display">${s.userName ?? s.name}</h2>
         <p class="font-mono text-xs text-neutral-500">
@@ -1083,30 +1179,47 @@ export class GlLibraryPage extends LitElement {
     `;
   }
 
-  async #reload(): Promise<void> {
-    const projectId = await projectWorkspace.currentId();
-    const [samples, sessions] = await Promise.all([
-      db.samples
-        .where("projectId")
-        .equals(projectId)
-        .filter((s) => !s.deletedAt)
-        .reverse()
-        .sortBy("createdAt"),
-      db.sessions.where("projectId").equals(projectId).sortBy("startedAt"),
-    ]);
-    this.samples = samples;
-    this.sessions = sessions
-      .filter((s) => !s.deletedAt)
-      .reverse();
-    // Drop selection of deleted ids
-    const alive = new Set(samples.map((s) => s.id));
-    this.selected = new Set([...this.selected].filter((id) => alive.has(id)));
+  #publishLibraryFilters(): void {
+    set(libraryFiltersKey, {
+      classFilter: this.classFilter ?? "all",
+      sessionFilter: this.sessionFilter,
+      tagFilter: [...this.tagFilter],
+      q: this.captureQuery,
+      semantic: this.semantic,
+    });
   }
 
-  async #sieveGesture(e: PointerEvent, filtered: Sample[]): Promise<void> {
+  async #reload(): Promise<void> {
+    // Unmount first so assigning projectId cannot mount the queue mid-await.
+    this.queueMounted = false;
+    await this.updateComplete;
+
+    const projectId = await projectWorkspace.currentId();
+    if (!projectId) {
+      this.projectId = "";
+      this.facets = { sessions: [], tags: [] };
+      this.selected = new Set();
+      return;
+    }
+    this.projectId = projectId;
+    this.facets = await sampleFacets(projectId);
+    const alive = new Set(await listSampleIds({ projectId }));
+    this.selected = new Set([...this.selected].filter((id) => alive.has(id)));
+
+    // Settle filters (and form writers) while the queue is still absent.
+    this.#publishLibraryFilters();
+    await this.updateComplete;
+
+    this.queueMounted = true;
+    await this.updateComplete;
+    // sonic-queue only loads on filter mutation after connect — one publish.
+    this.#publishLibraryFilters();
+  }
+
+  async #sieveGesture(e: PointerEvent): Promise<void> {
     const dx = e.clientX - this.#pointerStartX;
     const dy = e.clientY - this.#pointerStartY;
-    const s = filtered[this.sieveIndex];
+    const s = this.sieveSample;
     if (!s) return;
     if (Math.hypot(dx, dy) < 24) {
       await this.#audition(s);
@@ -1115,14 +1228,33 @@ export class GlLibraryPage extends LitElement {
     if (Math.abs(dx) > Math.abs(dy)) {
       if (dx < 0) {
         await deleteSample(s.id);
+        this.sieveIds = this.sieveIds.filter((id) => id !== s.id);
+        if (this.sieveIndex >= this.sieveIds.length) {
+          this.sieveIndex = Math.max(0, this.sieveIds.length - 1);
+        }
+      } else {
+        this.sieveIndex = Math.min(
+          this.sieveIndex + 1,
+          Math.max(0, this.sieveIds.length - 1),
+        );
       }
-      this.sieveIndex = Math.min(this.sieveIndex + 1, filtered.length - 1);
     } else if (dy < 0) {
       await toggleFavorite(s.id);
-      this.sieveIndex = Math.min(this.sieveIndex + 1, filtered.length - 1);
+      this.sieveIndex = Math.min(
+        this.sieveIndex + 1,
+        Math.max(0, this.sieveIds.length - 1),
+      );
     }
-    await this.#reload();
-    if (this.sieveIndex >= filtered.length - 1) this.sieve = false;
+    if (this.sieveIds.length === 0) {
+      this.sieve = false;
+      this.sieveSample = null;
+      await this.#reload();
+      return;
+    }
+    await this.#loadSieveSample();
+    if (this.sieveIndex >= this.sieveIds.length - 1 && dx >= 0 && dy >= 0) {
+      /* keep last */
+    }
   }
 
   async #fav(s: Sample): Promise<void> {
@@ -1165,17 +1297,18 @@ export class GlLibraryPage extends LitElement {
     this.clapBusy = true;
     this.clapStatus = t("library.clapLoadingModel");
     try {
-      const ranked = await rankSimilarSamples(
-        s.id,
-        this.samples.filter((x) => !x.deletedAt).map((x) => x.id),
-      );
+      const poolIds = await listSampleIds({
+        projectId: this.projectId || undefined,
+      });
+      const ranked = await rankSimilarSamples(s.id, poolIds);
       if (ranked.length === 0) {
         await glDialog.alert(t("library.similarEmpty"));
         return;
       }
       this.clapBusy = false;
       this.clapStatus = "";
-      const byId = new Map(this.samples.map((x) => [x.id, x]));
+      const rows = await this.#samplesByIds(ranked.map((r) => r.id));
+      const byId = new Map(rows.map((x) => [x.id, x]));
       const picked = await glDialog.chooseMany({
         title: t("library.similarTitle"),
         message: t("library.similarPickHint"),
@@ -1268,13 +1401,12 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchSeparate(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
-    const byId = new Map(this.samples.map((s) => [s.id, s]));
-    const eligible = ids.filter((id) => {
-      const s = byId.get(id);
-      return s ? this.#eligibleForSeparate(s) : false;
-    });
+    const rows = await this.#samplesByIds(ids);
+    const eligible = rows
+      .filter((s) => this.#eligibleForSeparate(s))
+      .map((s) => s.id);
     if (eligible.length === 0) {
       await glDialog.alert(t("library.separateNoneEligible"));
       return;
@@ -1288,13 +1420,12 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchRemoveVocals(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
-    const byId = new Map(this.samples.map((s) => [s.id, s]));
-    const eligible = ids.filter((id) => {
-      const s = byId.get(id);
-      return s ? this.#eligibleForRemoveVocals(s) : false;
-    });
+    const rows = await this.#samplesByIds(ids);
+    const eligible = rows
+      .filter((s) => this.#eligibleForRemoveVocals(s))
+      .map((s) => s.id);
     if (eligible.length === 0) {
       await glDialog.alert(t("library.removeVocalsNoneEligible"));
       return;
@@ -1325,13 +1456,12 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchDenoise(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
-    const byId = new Map(this.samples.map((s) => [s.id, s]));
-    const eligible = ids.filter((id) => {
-      const s = byId.get(id);
-      return s ? this.#eligibleForDenoise(s) : false;
-    });
+    const rows = await this.#samplesByIds(ids);
+    const eligible = rows
+      .filter((s) => this.#eligibleForDenoise(s))
+      .map((s) => s.id);
     if (eligible.length === 0) {
       await glDialog.alert(t("library.denoiseNoneEligible"));
       return;
@@ -1345,7 +1475,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchAnalyze(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
     const ok = await glDialog.confirm({
       title: t("library.batchAnalyze"),
@@ -1362,7 +1492,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #batchAutoCrop(): Promise<void> {
-    const ids = this.#selectedInView();
+    const ids = this.#selectedIds();
     if (ids.length === 0) return;
     this.batchBusy = true;
     try {

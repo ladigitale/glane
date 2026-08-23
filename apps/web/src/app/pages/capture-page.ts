@@ -1,5 +1,4 @@
 import {
-  CLASS_COLORS,
   createEntityId,
   nowIso,
   type Sample,
@@ -19,7 +18,7 @@ import {
   toMonoPcm,
   type CaptureLiveState,
 } from "@glane/audio-dsp";
-import { LitElement, css, html, nothing, type PropertyValues } from "lit";
+import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import tailwind from "../../css/tailwind";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
@@ -60,17 +59,27 @@ import {
   isProcessingError,
   processQueue,
 } from "../process-queue.js";
+import { buildAutoSampleName } from "../sample-auto-name.js";
 import { SAMPLES_CULLED_EVENT, cullExcessProcessedSamples } from "../sample-interest-cull.js";
 import {
   PROJECT_CHANGE_EVENT,
   projectWorkspace,
 } from "../project-workspace.js";
-import { captureFormKey } from "../dp-keys.js";
-import { captureToast } from "../capture-toast.js";
+import { captureFormKey, captureFeedKey, captureQueueKey } from "../dp-keys.js";
 import { glIcon } from "../icon.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
-import { renderMoreMenu } from "../more-menu.js";
+import { chromeMore } from "../more-menu.js";
 import "../pop-select.js";
+import "@supersoniks/concorde/fieldset";
+import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/queue";
+import "@supersoniks/concorde/table";
+import "@supersoniks/concorde/table-tbody";
+import "@supersoniks/concorde/table-tr";
+import "@supersoniks/concorde/table-td";
+import "@supersoniks/concorde/table-caption";
+
+type CaptureAlertStatus = "info" | "success" | "error" | "warning";
 
 function songGridCaption(targetPerMin: number): string {
   const beats = songSlice.beatsPerSliceFromTarget(
@@ -85,11 +94,13 @@ function songGridCaption(targetPerMin: number): string {
 }
 type AudioInputOption = { value: string; label: string };
 
-type ExtractedRow = {
+type FeedRow = {
   id: string;
+  name?: string;
+  userName?: string;
   class: Sample["class"];
-  tags: string[];
-  loopProposed: boolean;
+  tags?: string[];
+  loopProposed?: boolean;
   interestScore?: number;
 };
 
@@ -108,7 +119,7 @@ export class GlCapturePage extends LitElement {
       :host {
         display: flex;
         flex-direction: column;
-        gap: 1.25rem;
+        gap: 0.75rem;
         padding: 1.75rem 1rem 1.25rem;
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
@@ -147,38 +158,19 @@ export class GlCapturePage extends LitElement {
         line-height: 0;
         vertical-align: 0;
       }
-      .vu {
-        display: none;
-        flex-direction: column;
-        gap: 0.45rem;
-        padding: 0.85rem 1rem;
-        border-radius: 10px;
-        background: var(--gl-ink-elevated);
-        border: 1px solid color-mix(in srgb, var(--gl-fg-muted) 35%, transparent);
+      .capture-config-modal sonic-fieldset {
+        --sc-fieldset-mb: 0;
       }
-      .vu.on {
-        display: flex;
+      .capture-config-modal input[type="range"] {
+        width: 100%;
+        accent-color: var(--sc-primary, #3d7ea6);
       }
       .vu-track {
         position: relative;
-        height: 28px;
-        border-radius: 6px;
-        background: color-mix(in srgb, var(--gl-ink) 55%, var(--gl-ink-elevated));
+        height: 0.75rem;
+        border-radius: 3px;
+        background: color-mix(in srgb, var(--gl-fg-muted) 22%, var(--gl-ink));
         overflow: hidden;
-      }
-      .vu-track::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background: repeating-linear-gradient(
-          90deg,
-          transparent 0,
-          transparent calc(10% - 1px),
-          color-mix(in srgb, var(--gl-fg-muted) 25%, transparent) calc(10% - 1px),
-          color-mix(in srgb, var(--gl-fg-muted) 25%, transparent) 10%
-        );
-        pointer-events: none;
-        opacity: 0.5;
       }
       .vu-rms,
       .vu-peak {
@@ -186,7 +178,7 @@ export class GlCapturePage extends LitElement {
         left: 0;
         top: 0;
         bottom: 0;
-        border-radius: 6px;
+        border-radius: 3px;
         max-width: 100%;
         transition: width 40ms linear;
       }
@@ -194,15 +186,15 @@ export class GlCapturePage extends LitElement {
         background: color-mix(in srgb, var(--gl-accent) 75%, transparent);
       }
       .vu-peak {
-        width: 3px;
+        width: 2px;
         background: var(--gl-fg);
         border-radius: 1px;
         transition: left 30ms linear;
       }
-      .vu.hot .vu-rms {
+      .vu-track.hot .vu-rms {
         background: color-mix(in srgb, var(--gl-danger) 80%, var(--gl-accent));
       }
-      .vu.hot .vu-peak {
+      .vu-track.hot .vu-peak {
         background: var(--gl-danger);
       }
       .economy {
@@ -222,6 +214,9 @@ export class GlCapturePage extends LitElement {
         background: radial-gradient(circle, #2a4 0%, #000 70%);
         opacity: 0.5;
       }
+      sonic-queue.table-queue {
+        display: contents !important;
+      }
     `,
   ];
 
@@ -238,8 +233,14 @@ export class GlCapturePage extends LitElement {
   captureName = "";
 
   @state() private liveState: CaptureLiveState = "idle";
-  @state() private extracted: ExtractedRow[] = [];
-  @state() private sampleCount = 0;
+  @state() private feedProjectId = "";
+  @state() private feedSessionId = "";
+  @state() private queueMounted = true;
+
+  @subscribe(captureQueueKey.lastFetchedData.total)
+  @state()
+  sampleCount = 0;
+
   @state() private clockMs = 0;
   @state() private statusText = "";
   @state() private autoGain = false;
@@ -259,7 +260,6 @@ export class GlCapturePage extends LitElement {
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
   @state() private fileProcessMode: FileProcessMode = "hunt";
   @state() private measuredRatePerMin = 0;
-  @state() private rateModalOpen = false;
   @state() private configModalOpen = false;
   @state() private scoutBlocked = false;
   @state() private audioDeviceId = "";
@@ -296,29 +296,49 @@ export class GlCapturePage extends LitElement {
     void this.#persistCapturePrefs();
   }
 
-  #toggleAutoGain = (): void => {
-    const on = !this.autoGain;
-    this.autoGain = on;
-    this.#live?.setAutoGain(on);
-    this.#syncCaptureForm();
-    void this.#persistCapturePrefs();
-  };
-
-  #openRateModal = (): void => {
-    this.rateModalOpen = true;
-  };
-
   #openConfigModal = (): void => {
     this.configModalOpen = true;
     void this.#refreshAudioInputs();
   };
 
-  #onRateModalHide = (): void => {
-    this.rateModalOpen = false;
-  };
+  #syncChromeMore(): void {
+    chromeMore.set({
+      ariaLabel: t("capture.more"),
+      items: [
+        {
+          label: t("capture.config"),
+          icon: "settings",
+          onClick: this.#openConfigModal,
+        },
+        "divider",
+        {
+          label: t("capture.economyAction"),
+          icon: "moon",
+          onClick: () => {
+            this.economy = true;
+          },
+        },
+        {
+          label: t("capture.importFile"),
+          icon: "upload",
+          disabled: this.importBusy || this.listening,
+          onClick: this.#pickImportFile,
+        },
+      ],
+    });
+  }
 
   #onConfigModalHide = (): void => {
     this.configModalOpen = false;
+  };
+
+  #onAutoGainChange = (e: Event): void => {
+    const on = (e.target as HTMLInputElement).checked;
+    if (on === this.autoGain) return;
+    this.autoGain = on;
+    this.#live?.setAutoGain(on);
+    this.#syncCaptureForm();
+    void this.#persistCapturePrefs();
   };
 
   #syncCaptureForm(): void {
@@ -339,13 +359,19 @@ export class GlCapturePage extends LitElement {
       this.#onDeviceChange,
     );
     this.#unsubProc = processQueue.subscribe(() => {
-      void this.#refreshExtractedTags();
+      this.#bumpFeed();
     });
     await Promise.all([this.#loadLastCaptureName(), this.#loadCapturePrefs()]);
+    this.#syncChromeMore();
     void this.#startScout();
   }
 
+  override updated(): void {
+    this.#syncChromeMore();
+  }
+
   override disconnectedCallback(): void {
+    chromeMore.clear();
     window.removeEventListener("keydown", this.#onKey);
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.removeEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
@@ -358,59 +384,118 @@ export class GlCapturePage extends LitElement {
     this.#unsubProc = null;
     this.#importAbort?.abort();
     this.#importAbort = null;
-    captureToast.clear();
     void this.#shutdownMic();
     super.disconnectedCallback();
   }
 
-  override updated(changed: PropertyValues): void {
-    if (
-      changed.has("listening") ||
-      changed.has("micOpen") ||
-      changed.has("liveState") ||
-      changed.has("statusText") ||
-      changed.has("importBusy")
-    ) {
-      this.#syncCaptureToast();
+  #captureStatusAlert(): {
+    status: CaptureAlertStatus;
+    label: string;
+    text: string;
+  } | null {
+    if (this.warnings.length > 0) {
+      return {
+        status: "warning",
+        label: "Attention",
+        text: this.warnings[0] ?? "",
+      };
     }
+    if (this.importBusy) {
+      return {
+        status: "info",
+        label: t("capture.importBusy"),
+        text: "",
+      };
+    }
+    if (this.listening || this.micOpen) {
+      const live = stateLabel(this.liveState, this.listening);
+      const hint = this.listening
+        ? t("capture.hintRecording")
+        : t("capture.hintScout");
+      const statusExtra =
+        this.statusText && !isLiveCaptureDeviceState(this.statusText)
+          ? this.statusText
+          : "";
+      return {
+        status: this.listening ? "error" : "info",
+        label: this.listening ? t("capture.recording") : t("capture.scout"),
+        text: live || statusExtra || hint,
+      };
+    }
+    return {
+      status: "info",
+      label: this.scoutBlocked
+        ? t("capture.hintScoutBlocked")
+        : t("capture.empty"),
+      text: "",
+    };
   }
 
-  #syncCaptureToast(): void {
-    if (this.importBusy || (!this.listening && !this.micOpen)) {
-      captureToast.clear();
-      return;
-    }
-    const label = stateLabel(this.liveState, this.listening);
-    const hint = this.listening
-      ? t("capture.hintRecording")
-      : t("capture.hintScout");
-    const statusExtra =
-      this.statusText && !isLiveCaptureDeviceState(this.statusText)
-        ? this.statusText
-        : "";
-    captureToast.show({
-      title: this.listening ? t("capture.recording") : t("capture.scout"),
-      text: label || statusExtra || hint,
-      status: this.listening ? "error" : "info",
-    });
+  #renderStatusSlot() {
+    const alert = this.#captureStatusAlert();
+    return html`
+      <div
+        class="box-border flex h-14 shrink-0 items-center overflow-hidden"
+        aria-live="polite"
+      >
+        ${alert
+          ? html`<sonic-alert
+              class="w-full min-w-0"
+              size="xs"
+              status=${alert.status}
+              label=${alert.label}
+              >${alert.text || nothing}</sonic-alert
+            >`
+          : nothing}
+      </div>
+    `;
   }
 
   #onSamplesCulled = (ev: Event): void => {
     const ids = (ev as CustomEvent<{ culledIds?: string[] }>).detail?.culledIds;
     if (!ids?.length) return;
-    const drop = new Set(ids);
-    this.extracted = this.extracted.filter((r) => !drop.has(r.id));
-    this.sampleCount = this.extracted.length;
+    this.#bumpFeed();
   };
+
+  #bumpFeed(): void {
+    if (!this.feedSessionId) return;
+    set(captureFeedKey.bump, String(Date.now()));
+  }
+
+  #bindFeed(sessionId: string, projectId: string): void {
+    this.feedSessionId = sessionId;
+    this.feedProjectId = projectId;
+    set(captureFeedKey, {
+      projectId,
+      sessionId,
+      bump: String(Date.now()),
+    });
+    void this.#remountFeed();
+  }
+
+  async #remountFeed(): Promise<void> {
+    this.queueMounted = false;
+    await this.updateComplete;
+    this.queueMounted = true;
+    await this.updateComplete;
+    if (this.feedSessionId && this.feedProjectId) {
+      set(captureFeedKey, {
+        projectId: this.feedProjectId,
+        sessionId: this.feedSessionId,
+        bump: String(Date.now()),
+      });
+    }
+  }
+
+  #clearFeed(): void {
+    this.feedSessionId = "";
+    this.feedProjectId = "";
+    set(captureFeedKey, { projectId: "", sessionId: "", bump: "" });
+  }
 
   #onKey = (e: KeyboardEvent): void => {
     if (this.importBusy) return;
-    if (
-      !isSpaceKey(e) ||
-      shouldIgnoreShortcut(e) ||
-      this.rateModalOpen ||
-      this.configModalOpen
-    ) {
+    if (!isSpaceKey(e) || shouldIgnoreShortcut(e) || this.configModalOpen) {
       return;
     }
     e.preventDefault();
@@ -424,24 +509,6 @@ export class GlCapturePage extends LitElement {
   #onProjectChange = (): void => {
     void this.#loadLastCaptureName();
   };
-
-  async #refreshExtractedTags(): Promise<void> {
-    if (this.extracted.length === 0) return;
-    const next: ExtractedRow[] = [];
-    for (const row of this.extracted) {
-      const s = await db.samples.get(row.id);
-      if (!s || s.deletedAt) continue;
-      next.push({
-        id: row.id,
-        class: s.class,
-        tags: s.tags ?? [],
-        loopProposed: Boolean(s.loopProposed),
-        interestScore: s.interestScore,
-      });
-    }
-    this.extracted = next;
-    this.sampleCount = this.extracted.length;
-  }
 
   async #loadCapturePrefs(): Promise<void> {
     const prefs = await ensurePrefs();
@@ -530,6 +597,7 @@ export class GlCapturePage extends LitElement {
 
   async #loadLastCaptureName(): Promise<void> {
     const projectId = await projectWorkspace.currentId();
+    if (!projectId) return;
     const last =
       (await db.sessions
         .orderBy("startedAt")
@@ -549,60 +617,6 @@ export class GlCapturePage extends LitElement {
     const hot = peak > 0.9;
 
     return html`
-      <div class="-mt-2 flex items-center justify-end">
-        ${renderMoreMenu({
-          ariaLabel: t("capture.more"),
-          items: [
-            {
-              label: t("capture.config"),
-              icon: "settings",
-              onClick: this.#openConfigModal,
-            },
-            {
-              label: t("capture.autoGain"),
-              icon: "volume-2",
-              active: this.autoGain,
-              onClick: this.#toggleAutoGain,
-            },
-            {
-              label: t("capture.targetRate"),
-              icon: "gauge",
-              hint:
-                this.fileProcessMode === "whole"
-                  ? t("capture.fileModeWhole")
-                  : this.fileProcessMode === "song"
-                    ? tf("capture.targetRateGrid", {
-                        grid: songGridCaption(this.targetCapturesPerMin),
-                      })
-                    : `${this.targetCapturesPerMin}/min${
-                        this.micOpen
-                          ? ` · ≈${formatRate(this.measuredRatePerMin)}`
-                          : ""
-                      }`,
-              onClick: this.#openRateModal,
-            },
-            "divider",
-            {
-              label: t("capture.economyAction"),
-              icon: "moon",
-              onClick: () => {
-                this.economy = true;
-              },
-            },
-            {
-              label: t("capture.importFile"),
-              icon: "upload",
-              disabled: this.importBusy || this.listening,
-              onClick: this.#pickImportFile,
-            },
-            {
-              label: t("capture.toLibrary"),
-              icon: "library",
-              onClick: () => navigate({ name: "library" }),
-            },
-          ],
-        })}
-      </div>
       <input
         id="import-hunt-audio"
         class="sr-only"
@@ -611,7 +625,7 @@ export class GlCapturePage extends LitElement {
         @change=${(e: Event) => void this.#onImportFile(e)}
       />
       <div
-        class="rec-wrap flex min-h-[7.5rem] items-center justify-center py-6 pb-5"
+        class="rec-wrap flex min-h-[7.5rem] items-center justify-center py-5"
       >
         <sonic-button
           type=${this.listening ? "danger" : "primary"}
@@ -632,67 +646,57 @@ export class GlCapturePage extends LitElement {
           >
         </sonic-button>
       </div>
-      <div class="flex flex-col gap-2">
-        <div class="flex items-center gap-2.5">
-          <span class="font-mono tabular-nums">${formatClock(this.clockMs)}</span>
+      <div class="flex flex-col gap-1.5">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="flex items-center gap-2.5">
+            <span class="font-mono tabular-nums">${formatClock(this.clockMs)}</span>
+            ${this.micOpen
+              ? html`<span
+                  class="font-mono text-[0.75rem] tabular-nums text-neutral-500"
+                  >≈${formatRate(this.measuredRatePerMin)}</span
+                >`
+              : nothing}
+          </div>
           ${this.micOpen
-            ? html`<span class="font-mono text-[0.75rem] tabular-nums text-neutral-500"
-                >≈${formatRate(this.measuredRatePerMin)}</span
+            ? html`<span
+                class="font-mono text-[0.8rem] tabular-nums text-content ${hot
+                  ? "text-danger"
+                  : "text-neutral-500"}"
+                >${peakDb}</span
               >`
             : nothing}
         </div>
-        <div
-          class="vu ${this.micOpen ? "on" : ""} ${hot ? "hot" : ""}"
-          role="meter"
-          aria-label="Niveau micro"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow=${Math.round(peakPct)}
-        >
-          <div
-            class="flex items-baseline justify-between gap-3 font-mono text-xs uppercase tracking-wide text-neutral-500"
-          >
-            <span>Niveau micro</span>
-            <span
-              class="tabular-nums text-[0.95rem] normal-case tracking-normal text-content ${hot
-                ? "hot text-danger"
-                : ""}"
-              >${peakDb}</span
-            >
-          </div>
-          <div class="vu-track">
-            <i class="vu-rms" style="width:${rmsPct}%"></i>
-            <i class="vu-peak" style="left:calc(${peakPct}% - 2px)"></i>
-          </div>
-          <div
-            class="flex justify-between font-mono text-[0.65rem] text-neutral-500"
-          >
-            <span>−∞</span>
-            <span>−12</span>
-            <span>−6</span>
-            <span>0</span>
-          </div>
-        </div>
-        <div
-          class="h-2 overflow-hidden rounded bg-neutral-100 ${this.micOpen
-            ? "hidden"
-            : ""}"
-        >
-          <i
-            class="block h-full ${hot ? "bg-danger" : "bg-primary"}"
-            style="width:${peakPct}%"
-          ></i>
-        </div>
+        ${this.micOpen
+          ? html`
+              <div
+                class="vu-track ${hot ? "hot" : ""}"
+                role="meter"
+                aria-label="Niveau micro"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow=${Math.round(peakPct)}
+              >
+                <i class="vu-rms" style="width:${rmsPct}%"></i>
+                <i class="vu-peak" style="left:calc(${peakPct}% - 1px)"></i>
+              </div>
+            `
+          : html`
+              <div
+                class="h-2 overflow-hidden rounded bg-neutral-100"
+                role="meter"
+                aria-label="Niveau micro"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow=${Math.round(peakPct)}
+              >
+                <i
+                  class="block h-full ${hot ? "bg-danger" : "bg-primary"}"
+                  style="width:${peakPct}%"
+                ></i>
+              </div>
+            `}
       </div>
-      ${this.importBusy
-        ? html`<p>${t("capture.importBusy")}</p>`
-        : !this.listening && !this.micOpen
-          ? html`<p>
-              ${this.scoutBlocked
-                ? t("capture.hintScoutBlocked")
-                : t("capture.empty")}
-            </p>`
-          : nothing}
+      ${this.#renderStatusSlot()}
       ${this.importBusy
         ? html`
             <div class="flex flex-col gap-2">
@@ -724,87 +728,64 @@ export class GlCapturePage extends LitElement {
             </div>
           `
         : nothing}
-      ${this.#renderRateModal()}
       ${this.#renderConfigModal()}
-      ${this.warnings.map(
-        (w) =>
-          html`<sonic-alert status="warning" label="Attention">${w}</sonic-alert>`,
-      )}
-      <div class="flex flex-col gap-1.5" formDataProvider=${captureFormKey.path}>
-        <sonic-input
-          class="w-full"
-          name="captureName"
-          type="text"
-          label=${t("capture.name")}
-          ?disabled=${this.listening}
-        ></sonic-input>
-        <span class="font-mono text-[0.8rem] text-neutral-500"
-          >${this.sampleCount} sons</span
-        >
-        <div class="feed flex flex-col gap-1.5">
-          ${this.extracted.length === 0
-            ? html`<p class="font-mono text-[0.7rem] text-neutral-500">
+      <div
+        class="mt-1 flex flex-col"
+        formDataProvider=${captureFormKey.path}
+      >
+        <sonic-form-layout>
+          <sonic-input
+            class="w-full max-w-md opacity-90"
+            name="captureName"
+            type="text"
+            size="sm"
+            label=${t("capture.name")}
+            description=${t("capture.nameHint")}
+            ?disabled=${this.listening}
+          ></sonic-input>
+        </sonic-form-layout>
+      </div>
+      <div
+        class="mt-6 flex flex-col gap-2"
+        formDataProvider=${captureFeedKey.path}
+        dataFilterProvider=${captureFeedKey.path}
+      >
+        <div class="feed">
+          ${this.sampleCount === 0
+            ? html`<p class="sr-only">
                 ${this.listening
                   ? "Aucun son extrait pour l’instant."
                   : this.micOpen
                     ? t("capture.scoutFeedEmpty")
                     : "Aucun son extrait pour l’instant."}
               </p>`
-            : this.extracted.map(
-                (row) => html`
-                  <div
-                    class="grid grid-cols-[8px_1fr_auto] items-center gap-2 rounded-md border-0 bg-neutral-100 py-1.5 px-2.5 text-left font-inherit text-inherit"
-                  >
-                    <span
-                      class="h-7 w-2 rounded-sm"
-                      style="background:${CLASS_COLORS[row.class]}"
-                    ></span>
-                    <button
-                      class="min-w-0 cursor-pointer border-0 bg-transparent p-0 text-left font-inherit text-inherit"
-                      type="button"
-                      @click=${() => navigate({ name: "sample", id: row.id })}
-                    >
-                      <div>${row.class}${row.loopProposed ? " · boucle" : ""}${
-                        isProcessingBusy(row.tags)
-                          ? ` · ${t("library.processing")}`
-                          : isProcessingError(row.tags)
-                            ? ` · ${t("library.processingError")}`
-                            : row.tags.includes("processing:done")
-                              ? " · ok"
-                              : ""
-                      }${
-                        row.interestScore != null
-                          ? ` · ★${Math.round(row.interestScore * 100)}`
-                          : ""
-                      }</div>
-                      <div class="font-mono text-[0.7rem] text-neutral-500">
-                        ${row.tags.join(" · ")}
-                      </div>
-                    </button>
-                    <div class="flex items-center">
-                      ${isProcessingError(row.tags)
-                        ? html`<button
-                            class="min-h-touch min-w-touch cursor-pointer rounded-md border-0 bg-transparent font-inherit text-warning hover:text-primary"
-                            type="button"
-                            title=${t("library.retryProcess")}
-                            @click=${() =>
-                              void processQueue.reanalyzeSample(row.id)}
-                          >
-                            ${glIcon("refresh-cw", { size: "sm" })}
-                          </button>`
-                        : nothing}
-                      <button
-                        class="min-h-touch min-w-touch cursor-pointer rounded-md border-0 bg-transparent font-inherit text-neutral-500 hover:text-danger"
-                        type="button"
-                        title="Supprimer"
-                        @click=${() => void this.#removeExtracted(row.id)}
-                      >
-                        ${glIcon("x", { size: "sm" })}
-                      </button>
-                    </div>
-                  </div>
-                `,
-              )}
+            : nothing}
+          <sonic-table size="sm" bordered rounded maxHeight="min(40vh, 22rem)">
+            <sonic-tbody>
+              ${this.queueMounted && this.feedSessionId && this.feedProjectId
+                ? html`
+                    <sonic-queue
+                      class="table-queue"
+                      lazyload
+                      dataProvider=${captureQueueKey.path}
+                      dataProviderExpression=${`samples?projectId=${encodeURIComponent(this.feedProjectId)}&sessionId=${encodeURIComponent(this.feedSessionId)}&offset=$offset&limit=$limit`}
+                      dataFilterProvider=${captureFeedKey.path}
+                      key="data"
+                      limit="15"
+                      idKey="id"
+                      .items=${this.#renderFeedRow}
+                      .noItems=${this.#noFeedItems}
+                      .skeleton=${this.#feedSkeleton}
+                    ></sonic-queue>
+                  `
+                : this.#feedSkeleton()}
+            </sonic-tbody>
+            <sonic-caption class="text-right"
+              >${tf("common.soundCount", {
+                n: this.sampleCount,
+              })}</sonic-caption
+            >
+          </sonic-table>
         </div>
       </div>
       <div class="sr-only" aria-live="polite">${this.statusText}</div>
@@ -829,7 +810,83 @@ export class GlCapturePage extends LitElement {
     `;
   }
 
-  #renderRateModal() {
+  #renderFeedRow = (row: FeedRow) => {
+    const tags = row.tags ?? [];
+    const name = row.userName?.trim() || row.name || row.id.slice(0, 8);
+    return html`
+      <sonic-tr>
+        <sonic-td
+          minWidth="10rem"
+          vAlign="middle"
+          @click=${() => navigate({ name: "sample", id: row.id })}
+        >
+          <div>
+            ${name}${
+              isProcessingBusy(tags)
+                ? ` · ${t("library.processing")}`
+                : isProcessingError(tags)
+                  ? ` · ${t("library.processingError")}`
+                  : tags.includes("processing:done")
+                    ? " · ok"
+                    : ""
+            }${
+              row.interestScore != null
+                ? ` · ★${Math.round(row.interestScore * 100)}`
+                : ""
+            }
+          </div>
+          <div class="font-mono text-[0.7rem] text-neutral-500">
+            ${row.class}${row.loopProposed ? " · boucle" : ""}${
+              tags.length ? ` · ${tags.slice(0, 4).join(" · ")}` : ""
+            }
+          </div>
+        </sonic-td>
+        <sonic-td width="4.5rem" align="right" vAlign="middle">
+          ${isProcessingError(tags)
+            ? html`<sonic-button
+                shape="circle"
+                variant="ghost"
+                type="warning"
+                size="sm"
+                icon
+                data-aria-label=${t("library.retryProcess")}
+                @click=${() => void processQueue.reanalyzeSample(row.id)}
+              >
+                ${glIcon("refresh-cw", { size: "sm" })}
+              </sonic-button>`
+            : nothing}
+          <sonic-button
+            shape="circle"
+            variant="ghost"
+            type="neutral"
+            size="sm"
+            icon
+            data-aria-label=${t("dialog.delete")}
+            @click=${() => void this.#removeExtracted(row.id)}
+          >
+            ${glIcon("x", { size: "sm" })}
+          </sonic-button>
+        </sonic-td>
+      </sonic-tr>
+    `;
+  };
+
+  #noFeedItems = () => nothing;
+
+  #feedSkeleton = () => html`
+    ${[0, 1, 2].map(
+      () => html`
+        <sonic-tr>
+          <sonic-td minWidth="10rem">
+            <span class="block h-2.5 w-2/5 rounded bg-neutral-200"></span>
+          </sonic-td>
+          <sonic-td width="4.5rem" align="right"></sonic-td>
+        </sonic-tr>
+      `,
+    )}
+  `;
+
+  #renderTargetRateSection() {
     const songMode = this.fileProcessMode === "song";
     const wholeMode = this.fileProcessMode === "whole";
     const hint = wholeMode
@@ -848,50 +905,39 @@ export class GlCapturePage extends LitElement {
           }`;
 
     return html`
-      <sonic-modal
-        align="left"
-        maxWidth="22rem"
-        .visible=${this.rateModalOpen}
-        @hide=${this.#onRateModalHide}
-      >
-        <sonic-modal-title>${t("capture.targetRate")}</sonic-modal-title>
-        <sonic-modal-content>
-          <div class="flex w-full flex-col gap-1.5">
-            <span
-              class="font-mono text-[0.8rem] tabular-nums text-neutral-500"
-              >${valueLabel}</span
-            >
-            <p class="m-0 text-xs leading-snug text-neutral-500">${hint}</p>
-            <input
-              id="gl-target-rate"
-              class="w-full accent-primary ${wholeMode
-                ? "cursor-not-allowed opacity-40"
-                : "cursor-pointer"}"
-              type="range"
-              min=${CAPTURE_RATE.minPerMin}
-              max=${CAPTURE_RATE.maxPerMin}
-              step="1"
-              .value=${String(this.targetCapturesPerMin)}
-              ?disabled=${wholeMode}
-              @input=${this.#onTargetRateInput}
-              @change=${this.#onTargetRateChange}
-              aria-valuemin=${CAPTURE_RATE.minPerMin}
-              aria-valuemax=${CAPTURE_RATE.maxPerMin}
-              aria-valuenow=${this.targetCapturesPerMin}
-              aria-label=${t("capture.targetRate")}
-            />
-            <div
-              class="flex justify-between font-mono text-[0.7rem] text-neutral-500"
-            >
-              <span>${t("capture.targetLow")}</span>
-              <span>${t("capture.targetHigh")}</span>
-            </div>
-          </div>
-        </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
-        </sonic-modal-actions>
-      </sonic-modal>
+      <div class="flex w-full flex-col gap-1">
+        <span class="text-sm font-medium text-content"
+          >${t("capture.targetRate")}</span
+        >
+        <span class="font-mono text-[0.8rem] tabular-nums text-neutral-500"
+          >${valueLabel}</span
+        >
+        <p class="m-0 text-xs leading-snug text-neutral-500">${hint}</p>
+        <input
+          id="gl-target-rate"
+          class="w-full accent-primary ${wholeMode
+            ? "cursor-not-allowed opacity-40"
+            : "cursor-pointer"}"
+          type="range"
+          min=${CAPTURE_RATE.minPerMin}
+          max=${CAPTURE_RATE.maxPerMin}
+          step="1"
+          .value=${String(this.targetCapturesPerMin)}
+          ?disabled=${wholeMode}
+          @input=${this.#onTargetRateInput}
+          @change=${this.#onTargetRateChange}
+          aria-valuemin=${CAPTURE_RATE.minPerMin}
+          aria-valuemax=${CAPTURE_RATE.maxPerMin}
+          aria-valuenow=${this.targetCapturesPerMin}
+          aria-label=${t("capture.targetRate")}
+        />
+        <div
+          class="flex justify-between font-mono text-[0.7rem] text-neutral-500"
+        >
+          <span>${t("capture.targetLow")}</span>
+          <span>${t("capture.targetHigh")}</span>
+        </div>
+      </div>
     `;
   }
 
@@ -911,198 +957,238 @@ export class GlCapturePage extends LitElement {
     return html`
       <sonic-modal
         align="left"
-        maxWidth="22rem"
+        maxWidth="26rem"
         .visible=${this.configModalOpen}
         @hide=${this.#onConfigModalHide}
       >
         <sonic-modal-title>${t("capture.configTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="flex w-full flex-col gap-3">
-            <div class="flex flex-col gap-1.5">
-              <span class="text-[0.7rem] text-neutral-500"
-                >${t("capture.fileMode")}</span
-              >
-              <p class="m-0 text-xs leading-snug text-neutral-500">
-                ${t("capture.fileModeHint")}
-              </p>
-              ${this.#renderFileModeRadios()}
-            </div>
-            <div class="flex flex-col gap-1.5">
-              <span class="text-[0.7rem] text-neutral-500"
-                >${t("capture.audioSource")}</span
-              >
-              ${inputs.length === 0
-                ? html`<p class="m-0 text-xs leading-snug text-neutral-500">
-                    ${t("capture.audioSourceNone")}
-                  </p>`
-                : multi
+          <div class="capture-config-modal flex w-full flex-col gap-4">
+            <sonic-fieldset
+              label=${t("capture.sectionInput")}
+              description=${t("capture.sectionInputHint")}
+            >
+              <sonic-form-layout>
+                <div class="flex flex-col gap-1">
+                  <span class="text-sm font-medium text-content"
+                    >${t("capture.audioSource")}</span
+                  >
+                  ${inputs.length === 0
+                    ? html`<p class="m-0 text-xs leading-snug text-neutral-500">
+                        ${t("capture.audioSourceNone")}
+                      </p>`
+                    : multi
+                      ? html`
+                          <p class="m-0 text-xs leading-snug text-neutral-500">
+                            ${t("capture.audioSourceHint")}
+                          </p>
+                          <gl-pop-select
+                            class="w-full max-w-full"
+                            size="sm"
+                            variant="outline"
+                            .value=${this.audioDeviceId}
+                            .options=${options}
+                            placeholder=${t("capture.audioSourceDefault")}
+                            @gl-change=${this.#onAudioDeviceChange}
+                          ></gl-pop-select>
+                          <p
+                            class="m-0 text-[0.7rem] leading-snug text-neutral-500"
+                          >
+                            ${t("capture.audioSourceApplyHint")}
+                          </p>
+                        `
+                      : html`
+                          <p class="m-0 text-sm text-content">${selectedLabel}</p>
+                          <p class="m-0 text-xs leading-snug text-neutral-500">
+                            ${t("capture.audioSourceSingle")}
+                          </p>
+                        `}
+                </div>
+                <label class="flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    class="mt-0.5"
+                    .checked=${this.autoGain}
+                    @change=${this.#onAutoGainChange}
+                  />
+                  <span class="flex flex-col gap-0.5">
+                    <span class="text-sm text-content"
+                      >${t("capture.autoGain")}</span
+                    >
+                    <span class="text-xs leading-snug text-neutral-500"
+                      >${t("capture.autoGainHint")}</span
+                    >
+                  </span>
+                </label>
+              </sonic-form-layout>
+            </sonic-fieldset>
+
+            <sonic-fieldset
+              label=${t("capture.sectionSlice")}
+              description=${t("capture.sectionSliceHint")}
+            >
+              <sonic-form-layout>
+                <div class="flex flex-col gap-1.5">
+                  <span class="text-sm font-medium text-content"
+                    >${t("capture.fileMode")}</span
+                  >
+                  <p class="m-0 text-xs leading-snug text-neutral-500">
+                    ${t("capture.fileModeHint")}
+                  </p>
+                  ${this.#renderFileModeRadios()}
+                </div>
+                ${this.#renderTargetRateSection()}
+              </sonic-form-layout>
+            </sonic-fieldset>
+
+            <sonic-fieldset
+              label=${t("capture.mlYamnet")}
+              description=${t("capture.mlYamnetHint")}
+            >
+              <sonic-form-layout>
+                <label class="flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    class="mt-0.5"
+                    .checked=${this.mlYamnet}
+                    @change=${this.#onMlYamnetChange}
+                  />
+                  <span class="text-sm text-content">${t("capture.mlEnable")}</span>
+                </label>
+                ${this.mlYamnet
                   ? html`
-                      <p class="m-0 text-xs leading-snug text-neutral-500">
-                        ${t("capture.audioSourceHint")}
-                      </p>
-                      <gl-pop-select
-                        class="w-full max-w-full"
-                        size="sm"
-                        variant="outline"
-                        .value=${this.audioDeviceId}
-                        .options=${options}
-                        placeholder=${t("capture.audioSourceDefault")}
-                        @gl-change=${this.#onAudioDeviceChange}
-                      ></gl-pop-select>
-                      <p class="m-0 text-[0.7rem] leading-snug text-neutral-500">
-                        ${t("capture.audioSourceApplyHint")}
-                      </p>
+                      <label class="flex flex-col gap-1">
+                        <span class="text-xs text-neutral-500"
+                          >${t("capture.mlYamnetMinScore")}
+                          (${this.mlYamnetMinScore.toFixed(2)})</span
+                        >
+                        <input
+                          type="range"
+                          min="0.02"
+                          max="0.4"
+                          step="0.01"
+                          .value=${String(this.mlYamnetMinScore)}
+                          @input=${this.#onYamnetMinScoreInput}
+                          @change=${this.#onYamnetMinScoreChange}
+                        />
+                      </label>
+                      <label class="flex flex-col gap-1">
+                        <span class="text-xs text-neutral-500"
+                          >${t("capture.mlYamnetMaxLabels")}
+                          (${this.mlYamnetMaxLabels})</span
+                        >
+                        <input
+                          type="range"
+                          min="1"
+                          max="12"
+                          step="1"
+                          .value=${String(this.mlYamnetMaxLabels)}
+                          @input=${this.#onYamnetMaxLabelsInput}
+                          @change=${this.#onYamnetMaxLabelsChange}
+                        />
+                      </label>
+                      <label class="flex cursor-pointer items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          class="mt-0.5"
+                          .checked=${this.mlYamnetAutoClass}
+                          @change=${this.#onYamnetAutoClassChange}
+                        />
+                        <span class="flex flex-col gap-0.5">
+                          <span class="text-sm text-content"
+                            >${t("capture.mlYamnetAutoClass")}</span
+                          >
+                          <span class="text-xs leading-snug text-neutral-500"
+                            >${t("capture.mlYamnetAutoClassHint")}</span
+                          >
+                        </span>
+                      </label>
                     `
-                  : html`
-                      <p class="m-0 text-sm text-content">${selectedLabel}</p>
-                      <p class="m-0 text-xs leading-snug text-neutral-500">
-                        ${t("capture.audioSourceSingle")}
-                      </p>
-                    `}
-            </div>
-            <label class="flex cursor-pointer items-start gap-2.5">
-              <input
-                type="checkbox"
-                class="mt-0.5"
-                .checked=${this.mlYamnet}
-                @change=${this.#onMlYamnetChange}
-              />
-              <span class="flex flex-col gap-0.5">
-                <span class="text-sm text-content">${t("capture.mlYamnet")}</span>
-                <span class="text-xs leading-snug text-neutral-500"
-                  >${t("capture.mlYamnetHint")}</span
-                >
-              </span>
-            </label>
-            ${this.mlYamnet
-              ? html`
-                  <div class="ml-6 flex flex-col gap-2 border-l border-neutral-200 pl-3">
-                    <label class="flex flex-col gap-1">
-                      <span class="text-xs text-neutral-500"
-                        >${t("capture.mlYamnetMinScore")}
-                        (${this.mlYamnetMinScore.toFixed(2)})</span
-                      >
-                      <input
-                        type="range"
-                        min="0.02"
-                        max="0.4"
-                        step="0.01"
-                        .value=${String(this.mlYamnetMinScore)}
-                        @input=${this.#onYamnetMinScoreInput}
-                        @change=${this.#onYamnetMinScoreChange}
-                      />
-                    </label>
-                    <label class="flex flex-col gap-1">
-                      <span class="text-xs text-neutral-500"
-                        >${t("capture.mlYamnetMaxLabels")}
-                        (${this.mlYamnetMaxLabels})</span
-                      >
-                      <input
-                        type="range"
-                        min="1"
-                        max="12"
-                        step="1"
-                        .value=${String(this.mlYamnetMaxLabels)}
-                        @input=${this.#onYamnetMaxLabelsInput}
-                        @change=${this.#onYamnetMaxLabelsChange}
-                      />
-                    </label>
-                    <label class="flex cursor-pointer items-start gap-2.5">
-                      <input
-                        type="checkbox"
-                        class="mt-0.5"
-                        .checked=${this.mlYamnetAutoClass}
-                        @change=${this.#onYamnetAutoClassChange}
-                      />
-                      <span class="flex flex-col gap-0.5">
-                        <span class="text-sm text-content"
-                          >${t("capture.mlYamnetAutoClass")}</span
-                        >
-                        <span class="text-xs leading-snug text-neutral-500"
-                          >${t("capture.mlYamnetAutoClassHint")}</span
-                        >
-                      </span>
-                    </label>
-                  </div>
-                `
-              : nothing}
-            <label class="flex cursor-pointer items-start gap-2.5">
-              <input
-                type="checkbox"
-                class="mt-0.5"
-                .checked=${this.mlClap}
-                @change=${this.#onMlClapChange}
-              />
-              <span class="flex flex-col gap-0.5">
-                <span class="text-sm text-content">${t("capture.mlClap")}</span>
-                <span class="text-xs leading-snug text-neutral-500"
-                  >${t("capture.mlClapHint")}</span
-                >
-                ${this.clapStatus
-                  ? html`<span class="font-mono text-[0.7rem] text-neutral-500"
-                      >${this.clapStatus}</span
-                    >`
                   : nothing}
-              </span>
-            </label>
-            ${this.mlClap
-              ? html`
-                  <div class="ml-6 flex flex-col gap-2 border-l border-neutral-200 pl-3">
-                    <label class="flex flex-col gap-1">
-                      <span class="text-xs text-neutral-500"
-                        >${t("capture.mlClapMinScore")}
-                        (${this.mlClapMinScore.toFixed(2)})</span
-                      >
-                      <input
-                        type="range"
-                        min="0.02"
-                        max="0.5"
-                        step="0.01"
-                        .value=${String(this.mlClapMinScore)}
-                        @input=${this.#onClapMinScoreInput}
-                        @change=${this.#onClapMinScoreChange}
-                      />
-                    </label>
-                    <label class="flex flex-col gap-1">
-                      <span class="text-xs text-neutral-500"
-                        >${t("capture.mlClapLimit")} (${this.mlClapLimit})</span
-                      >
-                      <input
-                        type="range"
-                        min="3"
-                        max="40"
-                        step="1"
-                        .value=${String(this.mlClapLimit)}
-                        @input=${this.#onClapLimitInput}
-                        @change=${this.#onClapLimitChange}
-                      />
-                    </label>
-                  </div>
-                `
-              : nothing}
-            <div class="flex flex-col gap-1.5">
-              <span class="text-[0.7rem] text-neutral-500"
-                >${t("capture.mlDemucsStems")}</span
-              >
-              <p class="m-0 text-xs leading-snug text-neutral-500">
-                ${t("capture.mlDemucsStemsHint")}
-              </p>
-              <div class="flex flex-wrap gap-x-3 gap-y-1.5">
-                ${DEMUCS_STEMS.map(
-                  (stem) => html`
-                    <label class="flex cursor-pointer items-center gap-1.5">
-                      <input
-                        type="checkbox"
-                        .checked=${this.mlDemucsStems.includes(stem)}
-                        @change=${(e: Event) =>
-                          this.#onDemucsStemToggle(stem, e)}
-                      />
-                      <span class="text-sm text-content">${stem}</span>
-                    </label>
-                  `,
-                )}
-              </div>
-            </div>
+              </sonic-form-layout>
+            </sonic-fieldset>
+
+            <sonic-fieldset
+              label=${t("capture.mlClap")}
+              description=${t("capture.mlClapHint")}
+            >
+              <sonic-form-layout>
+                <label class="flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    class="mt-0.5"
+                    .checked=${this.mlClap}
+                    @change=${this.#onMlClapChange}
+                  />
+                  <span class="flex flex-col gap-0.5">
+                    <span class="text-sm text-content">${t("capture.mlEnable")}</span>
+                    ${this.clapStatus
+                      ? html`<span
+                          class="font-mono text-[0.7rem] text-neutral-500"
+                          >${this.clapStatus}</span
+                        >`
+                      : nothing}
+                  </span>
+                </label>
+                ${this.mlClap
+                  ? html`
+                      <label class="flex flex-col gap-1">
+                        <span class="text-xs text-neutral-500"
+                          >${t("capture.mlClapMinScore")}
+                          (${this.mlClapMinScore.toFixed(2)})</span
+                        >
+                        <input
+                          type="range"
+                          min="0.02"
+                          max="0.5"
+                          step="0.01"
+                          .value=${String(this.mlClapMinScore)}
+                          @input=${this.#onClapMinScoreInput}
+                          @change=${this.#onClapMinScoreChange}
+                        />
+                      </label>
+                      <label class="flex flex-col gap-1">
+                        <span class="text-xs text-neutral-500"
+                          >${t("capture.mlClapLimit")}
+                          (${this.mlClapLimit})</span
+                        >
+                        <input
+                          type="range"
+                          min="3"
+                          max="40"
+                          step="1"
+                          .value=${String(this.mlClapLimit)}
+                          @input=${this.#onClapLimitInput}
+                          @change=${this.#onClapLimitChange}
+                        />
+                      </label>
+                    `
+                  : nothing}
+              </sonic-form-layout>
+            </sonic-fieldset>
+
+            <sonic-fieldset
+              label=${t("capture.mlDemucsStems")}
+              description=${t("capture.mlDemucsStemsHint")}
+            >
+              <sonic-form-layout>
+                <div class="flex flex-wrap gap-x-3 gap-y-1.5">
+                  ${DEMUCS_STEMS.map(
+                    (stem) => html`
+                      <label class="flex cursor-pointer items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          .checked=${this.mlDemucsStems.includes(stem)}
+                          @change=${(e: Event) =>
+                            this.#onDemucsStemToggle(stem, e)}
+                        />
+                        <span class="text-sm text-content">${stem}</span>
+                      </label>
+                    `,
+                  )}
+                </div>
+              </sonic-form-layout>
+            </sonic-fieldset>
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
@@ -1346,8 +1432,7 @@ export class GlCapturePage extends LitElement {
     }
 
     this.warnings = [];
-    this.extracted = [];
-    this.sampleCount = 0;
+    this.#clearFeed();
     this.importBusy = true;
     this.importRatio = 0;
     this.importExtracted = 0;
@@ -1360,6 +1445,7 @@ export class GlCapturePage extends LitElement {
 
     try {
       const projectId = await projectWorkspace.currentId();
+      if (!projectId) return;
       const name =
         (this.captureName ?? "").trim() ||
         file.name.replace(/\.(wav|wave|mp3)$/i, "").trim() ||
@@ -1378,19 +1464,23 @@ export class GlCapturePage extends LitElement {
           this.importExtracted = p.extracted;
         },
         onSample: (sample) => {
-          this.extracted = [
-            {
-              id: sample.id,
-              class: sample.class,
-              tags: sample.tags ?? [],
-              loopProposed: Boolean(sample.loopProposed),
-            },
-            ...this.extracted,
-          ].slice(0, 40);
-          this.sampleCount = this.extracted.length;
-          this.importExtracted = this.sampleCount;
+          if (this.feedSessionId !== sample.sessionId) {
+            this.#bindFeed(sample.sessionId, projectId);
+          } else {
+            this.#bumpFeed();
+          }
+          this.importExtracted = Math.max(
+            this.importExtracted,
+            this.sampleCount,
+          );
         },
       });
+
+      if (result.sessionId && this.feedSessionId !== result.sessionId) {
+        this.#bindFeed(result.sessionId, projectId);
+      } else {
+        this.#bumpFeed();
+      }
 
       this.statusText = tf("capture.importDone", { n: String(result.extracted) });
       this.liveState = "characterized";
@@ -1438,13 +1528,16 @@ export class GlCapturePage extends LitElement {
     this.captureName = name;
     this.#syncCaptureForm();
     this.warnings = [];
-    this.extracted = [];
-    this.sampleCount = 0;
+    this.#clearFeed();
     this.statusText = "";
     this.economy = false;
 
     const ok = await this.#ensureMic({ scout: false, title: name });
     if (!ok) return;
+
+    if (this.#hunt) {
+      this.#bindFeed(this.#hunt.id, this.#hunt.projectId);
+    }
 
     this.scoutBlocked = false;
     this.listening = true;
@@ -1481,6 +1574,7 @@ export class GlCapturePage extends LitElement {
     if (this.#live && this.micOpen) {
       if (!opts.scout) {
         const projectId = await projectWorkspace.currentId();
+        if (!projectId) return false;
         const now = nowIso();
         this.#hunt = {
           id: createEntityId(),
@@ -1520,6 +1614,7 @@ export class GlCapturePage extends LitElement {
 
     try {
       const projectId = await projectWorkspace.currentId();
+      if (!projectId) return false;
       const title = opts.scout
         ? "Scout"
         : (opts.title ?? this.captureName).trim() || "Capture";
@@ -1641,7 +1736,13 @@ export class GlCapturePage extends LitElement {
         class: extraction.class,
         tags: extraction.tags,
         confidence: extraction.confidence,
-        name: `${this.captureName} · ${extraction.kind} · ${durationMs}ms`,
+        name: buildAutoSampleName({
+          captureName: hunt.title ?? this.captureName,
+          class: extraction.class,
+          durationMs,
+          loopProposed: extraction.loopProposed,
+          tags: extraction.tags,
+        }),
         favorite: false,
         originVersion: DSP_THRESHOLDS.version,
         loopStartMs: extraction.loopStartMs,
@@ -1665,17 +1766,11 @@ export class GlCapturePage extends LitElement {
       void processQueue.enqueue(id, extraction.kind);
       if (!opts.ignoreStop && this.#stopping) return;
 
-      this.extracted = [
-        {
-          id,
-          class: sample.class,
-          tags: sample.tags ?? [],
-          loopProposed: Boolean(sample.loopProposed),
-          interestScore: sample.interestScore,
-        },
-        ...this.extracted,
-      ].slice(0, 40);
-      this.sampleCount = this.extracted.length;
+      if (this.feedSessionId !== hunt.id) {
+        this.#bindFeed(hunt.id, hunt.projectId);
+      } else {
+        this.#bumpFeed();
+      }
       this.liveState = "characterized";
       this.statusText = `capturé · file processing`;
       if (navigator.vibrate) navigator.vibrate(10);
@@ -1770,8 +1865,7 @@ export class GlCapturePage extends LitElement {
 
   async #removeExtracted(id: string): Promise<void> {
     await deleteSample(id);
-    this.extracted = this.extracted.filter((r) => r.id !== id);
-    this.sampleCount = this.extracted.length;
+    this.#bumpFeed();
   }
 }
 

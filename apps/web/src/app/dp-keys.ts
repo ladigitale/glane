@@ -28,17 +28,59 @@ export type PrefsForm = {
 
 export const prefsFormKey = new DataProviderKey<PrefsForm>("glPrefsForm");
 
-/** Library toolbar filters. */
+/** Library toolbar filters (also `dataFilterProvider` for sonic-queue). */
 export type LibraryFilters = {
   classFilter: SampleClass | "all";
   sessionFilter: string;
   /** Exact tag matches (OR); empty = all. */
   tagFilter: string[];
   q: string;
+  /**
+   * `"1"` when a CLAP ordered list is active (`setSampleListOrder`).
+   * Sent as query param so sonic-queue refreshes; API reads module order.
+   */
+  semantic: "" | "1";
 };
 
 export const libraryFiltersKey = new DataProviderKey<LibraryFilters>(
   "glLibraryFilters",
+);
+
+/** sonic-queue publisher — `lastFetchedData.total` = filtered count. */
+export type LibraryQueueDp = {
+  resultCount?: number;
+  lastFetchedData?: {
+    total?: number;
+    meta?: { total?: number };
+  };
+};
+
+export const libraryQueueKey = new DataProviderKey<LibraryQueueDp>(
+  "glLibraryQueue",
+);
+
+/** Capture session feed filter for sonic-queue. */
+export type CaptureFeedFilters = {
+  projectId: string;
+  sessionId: string;
+  /** Bump to refresh the queue after a new extraction (API ignores). */
+  bump: string;
+};
+
+export const captureFeedKey = new DataProviderKey<CaptureFeedFilters>(
+  "glCaptureFeed",
+);
+
+export type CaptureQueueDp = {
+  resultCount?: number;
+  lastFetchedData?: {
+    total?: number;
+    meta?: { total?: number };
+  };
+};
+
+export const captureQueueKey = new DataProviderKey<CaptureQueueDp>(
+  "glCaptureQueue",
 );
 
 /** Capture session naming + toggles. */

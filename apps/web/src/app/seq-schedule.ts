@@ -139,13 +139,11 @@ export function applyOverlapFades(
   });
 }
 
-/** Tracks audible under mute/solo rules. */
+/** Tracks audible (not muted). Solo is unused for now. */
 export function audibleTrackIds(tracks: Track[]): Set<string> {
-  const anySolo = tracks.some((t) => t.solo);
   const ids = new Set<string>();
   for (const t of tracks) {
     if (t.mute) continue;
-    if (anySolo && !t.solo) continue;
     ids.add(t.id);
   }
   return ids;

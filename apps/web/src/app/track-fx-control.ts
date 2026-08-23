@@ -26,6 +26,7 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { glIcon } from "./icon.js";
+import "@supersoniks/concorde/fieldset";
 
 const FX_LABEL: Record<TrackFxType, string> = {
   none: "Aucun",
@@ -123,6 +124,30 @@ function triggerLabel(fx: TrackFx, hasWet: boolean): string {
   return bits.length > 0 ? bits.join(" + ") : "FX";
 }
 
+/** Condensed FX reminder for track / master gutters (empty if inactive). */
+export function formatTrackFxSummary(
+  fx: TrackFx,
+  wetOnly = false,
+): string {
+  return formatTrackFxSummaryLines(fx, wetOnly).join(" · ");
+}
+
+/** One line per FX family for track gutters (wet, then HP / LP / ADSR). */
+export function formatTrackFxSummaryLines(
+  fx: TrackFx,
+  wetOnly = false,
+): string[] {
+  const n = normalizeTrackFx(fx);
+  const lines: string[] = [];
+  if (n.type !== "none") lines.push(FX_LABEL[n.type]);
+  if (!wetOnly) {
+    if (trackFxHasHp(n)) lines.push("HP");
+    if (trackFxHasLp(n)) lines.push("LP");
+    if (trackFxHasEnvelope(n)) lines.push("ADSR");
+  }
+  return lines;
+}
+
 /**
  * Track FX — sonic-pop type picker + optional params modal. ADR-0016.
  * Wet insert is exclusive; HP, LP and ADSR are independent filters.
@@ -139,8 +164,16 @@ export class GlTrackFxControl extends LitElement {
         color: var(--gl-fg);
         vertical-align: middle;
       }
+      :host([inline]) {
+        display: block;
+        width: 100%;
+        font-size: 0.85rem;
+      }
       input[type="range"] {
         accent-color: var(--gl-accent);
+      }
+      :host([inline]) sonic-fieldset {
+        --sc-fieldset-mb: 0;
       }
     `,
   ];
@@ -159,6 +192,10 @@ export class GlTrackFxControl extends LitElement {
    * Master bus / wet-only: hide HP / LP / ADSR (tone + envelope stay track-only).
    */
   @property({ type: Boolean }) wetOnly = false;
+  /**
+   * Flat panel (arrangement modals): type + params in fieldsets, no pop / nested modal.
+   */
+  @property({ type: Boolean, reflect: true }) inline = false;
   /** Accessible name for the trigger button. */
   @property() fxAriaLabel = "Effet piste";
 
@@ -181,6 +218,7 @@ export class GlTrackFxControl extends LitElement {
     const canEdit = hasWet || hasFilters;
     const showActions =
       (this.showSettings && canEdit) || (this.showApply && (hasWet || active));
+    if (this.inline) return this.#renderInline(fx, hasHp, hasLp, hasEnv);
     return html`
       <sonic-pop
         placement="bottom-start"
@@ -296,6 +334,168 @@ export class GlTrackFxControl extends LitElement {
           </sonic-button>
         </sonic-modal-actions>
       </sonic-modal>
+    `;
+  }
+
+
+  #renderInline(
+    fx: TrackFx,
+    hasHp: boolean,
+    hasLp: boolean,
+    hasEnv: boolean,
+  ) {
+    return html`
+      <div class="flex w-full flex-col gap-3 text-content">
+        <sonic-fieldset label=${this.fxAriaLabel} tight>
+          <div class="flex flex-col gap-2">
+            <label
+              class="grid grid-cols-[1fr_auto] items-center gap-x-2 gap-y-1 text-sm text-neutral-500"
+            >
+              <span>Type</span>
+              <span class="font-mono text-xs">${FX_LABEL[fx.type]}</span>
+              <select
+                class="col-span-full m-0 w-full rounded border border-neutral-200 bg-neutral-0 px-2 py-1 text-sm text-content"
+                .value=${fx.type}
+                aria-label=${this.fxAriaLabel}
+                @change=${(e: Event) => {
+                  const v = (e.target as HTMLSelectElement)
+                    .value as TrackFxType;
+                  this.#setType(v);
+                }}
+              >
+                ${FX_TYPES.map(
+                  (k) => html`
+                    <option value=${k} ?selected=${fx.type === k}>
+                      ${FX_LABEL[k]}
+                    </option>
+                  `,
+                )}
+              </select>
+            </label>
+            ${this.#wetParams(fx)}
+          </div>
+        </sonic-fieldset>
+        ${this.wetOnly
+          ? nothing
+          : html`
+              <sonic-fieldset label="Passe-haut" tight>
+                <div class="flex flex-col gap-2">
+                  <label
+                    class="flex cursor-pointer items-center gap-2 text-sm text-content"
+                  >
+                    <input
+                      type="checkbox"
+                      class="m-0"
+                      .checked=${hasHp}
+                      @change=${() => this.#toggle(trackFxToggleHp)}
+                    />
+                    <span>Activer</span>
+                  </label>
+                  ${hasHp
+                    ? this.#slider(
+                        "Fréquence",
+                        fx.hpHz,
+                        TRACK_HP_HZ_MIN,
+                        TRACK_HP_HZ_MAX,
+                        1,
+                        (v) => this.#patch({ hpHz: v }, false),
+                        hzLabel(fx.hpHz),
+                      )
+                    : nothing}
+                </div>
+              </sonic-fieldset>
+              <sonic-fieldset label="Passe-bas" tight>
+                <div class="flex flex-col gap-2">
+                  <label
+                    class="flex cursor-pointer items-center gap-2 text-sm text-content"
+                  >
+                    <input
+                      type="checkbox"
+                      class="m-0"
+                      .checked=${hasLp}
+                      @change=${() => this.#toggle(trackFxToggleLp)}
+                    />
+                    <span>Activer</span>
+                  </label>
+                  ${hasLp
+                    ? this.#slider(
+                        "Fréquence",
+                        fx.lpHz,
+                        TRACK_LP_HZ_MIN,
+                        TRACK_LP_HZ_MAX,
+                        10,
+                        (v) => this.#patch({ lpHz: v }, false),
+                        hzLabel(fx.lpHz),
+                      )
+                    : nothing}
+                </div>
+              </sonic-fieldset>
+              <sonic-fieldset label="ADSR" tight>
+                <div class="flex flex-col gap-2">
+                  <label
+                    class="flex cursor-pointer items-center gap-2 text-sm text-content"
+                  >
+                    <input
+                      type="checkbox"
+                      class="m-0"
+                      .checked=${hasEnv}
+                      @change=${() => this.#toggle(trackFxToggleAdsr)}
+                    />
+                    <span>Activer</span>
+                  </label>
+                  ${hasEnv
+                    ? html`
+                        ${this.#slider(
+                          "Attaque (ms)",
+                          fx.attackMs,
+                          0,
+                          TRACK_ATTACK_MS_MAX,
+                          1,
+                          (v) => this.#patch({ attackMs: v }, false),
+                        )}
+                        ${this.#slider(
+                          "Decay (ms)",
+                          fx.decayMs,
+                          0,
+                          TRACK_DECAY_MS_MAX,
+                          1,
+                          (v) => this.#patch({ decayMs: v }, false),
+                        )}
+                        ${this.#slider(
+                          "Sustain",
+                          fx.sustain,
+                          0,
+                          1,
+                          0.01,
+                          (v) => this.#patch({ sustain: v }, false),
+                          `${Math.round(fx.sustain * 100)}%`,
+                        )}
+                        ${this.#slider(
+                          "Release (ms)",
+                          fx.releaseMs,
+                          0,
+                          TRACK_RELEASE_MS_MAX,
+                          1,
+                          (v) => this.#patch({ releaseMs: v }, false),
+                        )}
+                      `
+                    : nothing}
+                </div>
+              </sonic-fieldset>
+            `}
+        ${this.showApply
+          ? html`
+              <sonic-button
+                type="primary"
+                size="sm"
+                ?disabled=${this.applyDisabled}
+                @click=${this.#apply}
+              >
+                ${this.applyLabel}
+              </sonic-button>
+            `
+          : nothing}
+      </div>
     `;
   }
 
@@ -607,7 +807,7 @@ export class GlTrackFxControl extends LitElement {
   }
 
   #setType(type: TrackFxType) {
-    this.#hidePop();
+    if (!this.inline) this.#hidePop();
     const next = normalizeTrackFx({ ...this.fx, type });
     this.fx = next;
     this.#emit(next, true);

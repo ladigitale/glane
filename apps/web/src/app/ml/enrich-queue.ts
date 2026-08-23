@@ -10,6 +10,7 @@ import { nowIso } from "@glane/core-model";
 import { db, ensurePrefs } from "../db.js";
 import { mlOptsFromPrefs } from "./ml-prefs.js";
 import { getYamnetClassifier } from "./yamnet-mediapipe.js";
+import { buildAutoSampleName } from "../sample-auto-name.js";
 
 export const SAMPLE_ML_EVENT = "glane:sample-ml";
 
@@ -68,6 +69,7 @@ export async function enqueueYamnetEnrich(
         tags: string[];
         updatedAt: string;
         revision: number;
+        name?: string;
         subclass?: string;
         class?: SampleClass;
         confidence?: number;
@@ -98,6 +100,18 @@ export async function enqueueYamnetEnrich(
           result.classHintConfidence,
         );
       }
+
+      const analysis = await db.analyses.get(sampleId);
+      patch.name = buildAutoSampleName({
+        captureName: fresh.captureName,
+        class: patch.class ?? fresh.class,
+        subclass: patch.subclass ?? fresh.subclass,
+        noteName: analysis?.noteName,
+        bpm: analysis?.bpm,
+        durationMs: fresh.durationMs,
+        loopProposed: fresh.loopProposed,
+        tags: patch.tags,
+      });
 
       await db.samples.update(sampleId, patch);
       await upsertAnalysisLabels(sampleId, result.labels);
