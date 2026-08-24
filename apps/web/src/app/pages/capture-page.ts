@@ -58,7 +58,9 @@ import {
   isProcessingBusy,
   isProcessingError,
   processQueue,
+  SAMPLE_UPDATED_EVENT,
 } from "../process-queue.js";
+import { patchSampleInQueue } from "../sample-queue-patch.js";
 import { buildAutoSampleName } from "../sample-auto-name.js";
 import { SAMPLES_CULLED_EVENT, cullExcessProcessedSamples } from "../sample-interest-cull.js";
 import {
@@ -69,6 +71,7 @@ import { captureFormKey, captureFeedKey, captureQueueKey } from "../dp-keys.js";
 import { glIcon } from "../icon.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { chromeMore } from "../more-menu.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
 import "@supersoniks/concorde/fieldset";
 import "@supersoniks/concorde/form-layout";
@@ -77,7 +80,6 @@ import "@supersoniks/concorde/table";
 import "@supersoniks/concorde/table-tbody";
 import "@supersoniks/concorde/table-tr";
 import "@supersoniks/concorde/table-td";
-import "@supersoniks/concorde/table-caption";
 
 type CaptureAlertStatus = "info" | "success" | "error" | "warning";
 
@@ -354,12 +356,15 @@ export class GlCapturePage extends LitElement {
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.addEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
     window.addEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
+    window.addEventListener(SAMPLE_UPDATED_EVENT, this.#onSampleRowPatch);
     navigator.mediaDevices?.addEventListener?.(
       "devicechange",
       this.#onDeviceChange,
     );
-    this.#unsubProc = processQueue.subscribe(() => {
-      this.#bumpFeed();
+    this.#unsubProc = processQueue.subscribe((s) => {
+      if (s.currentSampleId) {
+        void patchSampleInQueue(captureQueueKey.path, s.currentSampleId);
+      }
     });
     await Promise.all([this.#loadLastCaptureName(), this.#loadCapturePrefs()]);
     this.#syncChromeMore();
@@ -376,6 +381,7 @@ export class GlCapturePage extends LitElement {
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     window.removeEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
     window.removeEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
+    window.removeEventListener(SAMPLE_UPDATED_EVENT, this.#onSampleRowPatch);
     navigator.mediaDevices?.removeEventListener?.(
       "devicechange",
       this.#onDeviceChange,
@@ -455,6 +461,12 @@ export class GlCapturePage extends LitElement {
     const ids = (ev as CustomEvent<{ culledIds?: string[] }>).detail?.culledIds;
     if (!ids?.length) return;
     this.#bumpFeed();
+  };
+
+  #onSampleRowPatch = (ev: Event): void => {
+    const sampleId = (ev as CustomEvent<{ sampleId?: string }>).detail?.sampleId;
+    if (!sampleId) return;
+    void patchSampleInQueue(captureQueueKey.path, sampleId);
   };
 
   #bumpFeed(): void {
@@ -760,32 +772,34 @@ export class GlCapturePage extends LitElement {
                     : "Aucun son extrait pour l’instant."}
               </p>`
             : nothing}
-          <sonic-table size="sm" bordered rounded maxHeight="min(40vh, 22rem)">
-            <sonic-tbody>
-              ${this.queueMounted && this.feedSessionId && this.feedProjectId
-                ? html`
-                    <sonic-queue
-                      class="table-queue"
-                      lazyload
-                      dataProvider=${captureQueueKey.path}
-                      dataProviderExpression=${`samples?projectId=${encodeURIComponent(this.feedProjectId)}&sessionId=${encodeURIComponent(this.feedSessionId)}&offset=$offset&limit=$limit`}
-                      dataFilterProvider=${captureFeedKey.path}
-                      key="data"
-                      limit="15"
-                      idKey="id"
-                      .items=${this.#renderFeedRow}
-                      .noItems=${this.#noFeedItems}
-                      .skeleton=${this.#feedSkeleton}
-                    ></sonic-queue>
-                  `
-                : this.#feedSkeleton()}
-            </sonic-tbody>
-            <sonic-caption class="text-right"
-              >${tf("common.soundCount", {
+          <div class="flex flex-col gap-1.5">
+            <p class="text-right text-xs text-neutral-500">
+              ${tf("common.soundCount", {
                 n: this.sampleCount,
-              })}</sonic-caption
-            >
-          </sonic-table>
+              })}
+            </p>
+            <sonic-table size="sm" bordered rounded maxHeight="min(40vh, 22rem)">
+              <sonic-tbody>
+                ${this.queueMounted && this.feedSessionId && this.feedProjectId
+                  ? html`
+                      <sonic-queue
+                        class="table-queue"
+                        lazyload
+                        dataProvider=${captureQueueKey.path}
+                        dataProviderExpression=${`samples?projectId=${encodeURIComponent(this.feedProjectId)}&sessionId=${encodeURIComponent(this.feedSessionId)}&offset=$offset&limit=$limit`}
+                        dataFilterProvider=${captureFeedKey.path}
+                        key="data"
+                        limit="15"
+                        idKey="id"
+                        .items=${this.#renderFeedRow}
+                        .noItems=${this.#noFeedItems}
+                        .skeleton=${this.#feedSkeleton}
+                      ></sonic-queue>
+                    `
+                  : this.#feedSkeleton()}
+              </sonic-tbody>
+            </sonic-table>
+          </div>
         </div>
       </div>
       <div class="sr-only" aria-live="polite">${this.statusText}</div>
@@ -954,16 +968,21 @@ export class GlCapturePage extends LitElement {
         : (options.find((o) => o.value === this.audioDeviceId)?.label ??
           t("capture.audioSourceDefault"));
 
+    const m = GL_MODAL_PRESETS.wide;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="26rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.configModalOpen}
         @hide=${this.#onConfigModalHide}
       >
         <sonic-modal-title>${t("capture.configTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="capture-config-modal flex w-full flex-col gap-4">
+          <div class="capture-config-modal flex w-full flex-col gap-5">
             <sonic-fieldset
               label=${t("capture.sectionInput")}
               description=${t("capture.sectionInputHint")}

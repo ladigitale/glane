@@ -4127,7 +4127,9 @@ export function planSequence(opts: {
     callResponseMode,
     energy,
     sparse: drumsVsTexture < 0.4,
+    musicStyle,
   });
+  const ensembleStyle = ensemblePlan.styleProfile;
   const hasMelodicRespond = ensemblePlan.relationByTrack.some(
     (r) => r === "respond",
   );
@@ -4211,6 +4213,15 @@ export function planSequence(opts: {
     const voiceRel = ensemblePlan.relationByTrack[ti] ?? "independent";
     const isPrimaryMelodic = ti === ensemblePlan.primaryLeadTrack;
     const sparseMel = drumsVsTexture < 0.4;
+    const coupleArp = ensemble.shouldCoupleArp(voiceRel, ensembleStyle);
+    const coupledArp =
+      ensemblePlan.leadCell != null
+        ? ensemble.melodyCellToArpCell(ensemblePlan.leadCell)
+        : null;
+    const coupledArpAlt =
+      ensemblePlan.leadCellAlt != null
+        ? ensemble.melodyCellToArpCell(ensemblePlan.leadCellAlt)
+        : coupledArp;
     const leadCell =
       !lockPitch && role === "lead"
         ? isPrimaryMelodic && ensemblePlan.leadCell
@@ -4227,10 +4238,16 @@ export function planSequence(opts: {
         : null;
     const arpCell =
       !lockPitch && role === "arp"
-        ? pickArpCell(rnd, sparseMel || energy < 0.4)
+        ? coupleArp && coupledArp
+          ? coupledArp
+          : pickArpCell(rnd, sparseMel || energy < 0.4)
         : null;
     const arpCellAlt =
-      !lockPitch && role === "arp" ? pickArpCell(rnd, true) : null;
+      !lockPitch && role === "arp"
+        ? coupleArp && coupledArpAlt
+          ? coupledArpAlt
+          : pickArpCell(rnd, true)
+        : null;
 
     const humanizeMs =
       (isDrumRole(role)
@@ -4358,6 +4375,30 @@ export function planSequence(opts: {
           continue;
         }
 
+        const sectionVoiceRel = ensemble.resolveSectionRelation(
+          voiceRel,
+          section.kind,
+          role,
+          rnd,
+          ensembleStyle,
+        );
+        const respondMode = ensemble.respondPlacementMode(
+          section.kind,
+          ensembleStyle,
+        );
+        const callBar =
+          respondMode === "alternateBars" && ensemble.isCallBar(absBar);
+
+        // Alternate-bar dialogue: followers rest on call bars.
+        if (
+          sectionVoiceRel === "respond" &&
+          !isPrimaryMelodic &&
+          isMelodicRole(role) &&
+          callBar
+        ) {
+          continue;
+        }
+
         let hits: MotifHit[];
         if (role === "arp" && (arpCell || arpCellAlt)) {
           // Library tonal oneshots sequenced on chord tones from the harmony timeline.
@@ -4372,7 +4413,11 @@ export function planSequence(opts: {
             hits = hits.filter((h) => h.accent || rnd() < 0.7 + energy * 0.2);
           }
         } else if (role === "lead" && (leadCell || leadCellAlt)) {
-          if (voiceRel === "respond" && ensemblePlan.responseCell) {
+          if (
+            sectionVoiceRel === "respond" &&
+            ensemblePlan.responseCell &&
+            respondMode === "halfBar"
+          ) {
             hits = ensemble.applyRespond(
               ensemblePlan.responseCell,
               beatsPerBar,
@@ -4419,20 +4464,28 @@ export function planSequence(opts: {
           isMelodicRole(role) &&
           ensemblePlan.sharedOnsets.length > 0
         ) {
-          if (voiceRel === "respond" && role !== "lead") {
+          if (
+            sectionVoiceRel === "respond" &&
+            !isPrimaryMelodic &&
+            role !== "lead"
+          ) {
             const cell =
               ensemblePlan.responseCell ?? ensemblePlan.leadCell;
             if (cell) {
-              hits = ensemble.applyRespond(cell, beatsPerBar, ppq);
+              hits =
+                respondMode === "alternateBars"
+                  ? ensemble.applyRespondFullBar(cell, beatsPerBar, ppq)
+                  : ensemble.applyRespond(cell, beatsPerBar, ppq);
             }
-          } else if (voiceRel === "lock") {
+          } else if (sectionVoiceRel === "lock") {
             hits = ensemble.applyLock(
               hits,
               ensemblePlan.sharedOnsets,
               beatsPerBar,
               ppq,
+              ensemble.lockDegreeOffset(role, rnd, ensembleStyle.family),
             );
-          } else if (voiceRel === "kinship") {
+          } else if (sectionVoiceRel === "kinship") {
             hits = ensemble.applyKinship(
               hits,
               ensemblePlan.sharedOnsets,
@@ -4441,7 +4494,11 @@ export function planSequence(opts: {
               rnd,
             );
           } else if (isPrimaryMelodic && hasMelodicRespond) {
-            hits = ensemble.thinCallHalf(hits, beatsPerBar, ppq, rnd);
+            if (respondMode === "alternateBars" && !callBar) {
+              hits = ensemble.thinAnswerBar(hits, rnd);
+            } else if (respondMode === "halfBar") {
+              hits = ensemble.thinCallHalf(hits, beatsPerBar, ppq, rnd);
+            }
           }
         }
 

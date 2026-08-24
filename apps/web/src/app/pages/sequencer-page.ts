@@ -125,6 +125,7 @@ import "../seek-bar.js";
 import "../transport-bar.js";
 import "../vu-meter.js";
 import { glIcon } from "../icon.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import type { TransportAction } from "../transport-bar.js";
@@ -1732,10 +1733,15 @@ export class GlSequencerPage extends LitElement {
   #renderTrackSettingsModal() {
     const tr = this.tracks.find((t) => t.id === this.trackSettingsId);
     const open = !!tr;
+    const m = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="28rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${open}
         @hide=${() => {
           this.trackSettingsId = null;
@@ -2177,10 +2183,15 @@ export class GlSequencerPage extends LitElement {
   #renderMasterSettingsModal() {
     const p = this.project;
     const [fx0, fx1] = p ? this.#masterFxPair() : [null, null];
+    const m = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="28rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.masterSettingsOpen && !!p}
         @hide=${() => {
           this.masterSettingsOpen = false;
@@ -2885,17 +2896,22 @@ export class GlSequencerPage extends LitElement {
   #renderExportModal() {
     const sc = this.scStatus;
     const busy = this.exportBusy;
+    const m = GL_MODAL_PRESETS.wide;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="36rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.exportOpen}
         @hide=${this.onExportHide}
       >
         <sonic-modal-title>${t("export.title")}</sonic-modal-title>
         <sonic-modal-content>
           <div
-            class="export-modal-body flex w-full flex-col gap-3"
+            class="export-modal-body flex w-full flex-col gap-4"
             formDataProvider=${exportFormKey.path}
           >
             <sonic-input
@@ -2903,7 +2919,7 @@ export class GlSequencerPage extends LitElement {
               label=${t("export.trackTitle")}
               type="text"
             ></sonic-input>
-            <div class="row flex flex-wrap items-center gap-2">
+            <sonic-form-actions>
               <sonic-button
                 type="primary"
                 ?disabled=${!!busy}
@@ -2934,9 +2950,9 @@ export class GlSequencerPage extends LitElement {
                 ${glIcon("download", { slot: "prefix", size: "xs" })}
                 ${t("export.octatrackSlices")}
               </sonic-button>
-            </div>
+            </sonic-form-actions>
             <p class="m-0 text-sm text-neutral-9">${t("export.octatrackHint")}</p>
-            <div class="row flex flex-wrap items-center gap-2">
+            <sonic-form-actions>
               <sonic-button
                 type="primary"
                 ?disabled=${!!busy}
@@ -2948,23 +2964,29 @@ export class GlSequencerPage extends LitElement {
                 ${glIcon("library", { slot: "prefix", size: "xs" })}
                 ${t("export.toLibrary")}
               </sonic-button>
-            </div>
+            </sonic-form-actions>
             <p class="m-0 text-sm text-neutral-9">${t("export.toLibraryHint")}</p>
-            <div class="row flex flex-wrap items-center gap-2">
-              <strong>${t("export.soundcloud")}</strong>
+            <strong>${t("export.soundcloud")}</strong>
+            ${sc?.connected
+              ? html`<sonic-badge type="success" size="sm"
+                    >${sc.displayName ?? "OK"}</sonic-badge
+                  >`
+              : sc?.available
+                ? nothing
+                : html`<span class="font-mono text-[0.7rem] text-neutral-500"
+                    >${t("export.soundcloudUnavailable")}</span
+                  >`}
+            <sonic-form-actions>
               ${sc?.connected
-                ? html`<sonic-badge type="success" size="sm"
-                      >${sc.displayName ?? "OK"}</sonic-badge
-                    >
-                    <sonic-button
-                      variant="outline"
-                      type="neutral"
-                      size="sm"
-                      ?disabled=${!!busy}
-                      @click=${() => void this.#scDisconnect()}
-                    >
-                      ${t("export.soundcloudDisconnect")}
-                    </sonic-button>`
+                ? html`<sonic-button
+                    variant="outline"
+                    type="neutral"
+                    size="sm"
+                    ?disabled=${!!busy}
+                    @click=${() => void this.#scDisconnect()}
+                  >
+                    ${t("export.soundcloudDisconnect")}
+                  </sonic-button>`
                 : sc?.available
                   ? html`<sonic-button
                       type="primary"
@@ -2974,39 +2996,35 @@ export class GlSequencerPage extends LitElement {
                     >
                       ${t("export.soundcloudConnect")}
                     </sonic-button>`
-                  : html`<span
-                        class="font-mono text-[0.7rem] text-neutral-500"
-                        >${t("export.soundcloudUnavailable")}</span
-                      >
-                      <sonic-button
-                        variant="outline"
-                        type="neutral"
-                        size="sm"
-                        @click=${() => exportPublish.openSoundCloudAssist()}
-                      >
-                        ${t("export.soundcloudAssist")}
-                      </sonic-button>`}
-            </div>
+                  : html`<sonic-button
+                      variant="outline"
+                      type="neutral"
+                      size="sm"
+                      @click=${() => exportPublish.openSoundCloudAssist()}
+                    >
+                      ${t("export.soundcloudAssist")}
+                    </sonic-button>`}
+            </sonic-form-actions>
             ${sc?.connected
               ? html`
-                  <div class="row flex flex-wrap items-center gap-2">
-                    <gl-pop-select
-                      label=${t("export.sharing")}
-                      size="sm"
-                      .value=${this.exportSharing || "private"}
-                      .options=${[
-                        {
-                          value: "private",
-                          label: t("export.private"),
-                        },
-                        {
-                          value: "public",
-                          label: t("export.public"),
-                        },
-                      ]}
-                      @gl-change=${(e: CustomEvent<{ value: string }>) =>
-                        set(exportFormKey.sharing, e.detail.value)}
-                    ></gl-pop-select>
+                  <gl-pop-select
+                    label=${t("export.sharing")}
+                    size="sm"
+                    .value=${this.exportSharing || "private"}
+                    .options=${[
+                      {
+                        value: "private",
+                        label: t("export.private"),
+                      },
+                      {
+                        value: "public",
+                        label: t("export.public"),
+                      },
+                    ]}
+                    @gl-change=${(e: CustomEvent<{ value: string }>) =>
+                      set(exportFormKey.sharing, e.detail.value)}
+                  ></gl-pop-select>
+                  <sonic-form-actions>
                     <sonic-button
                       type="primary"
                       ?disabled=${!!busy}
@@ -3014,11 +3032,11 @@ export class GlSequencerPage extends LitElement {
                     >
                       ${t("export.soundcloudUpload")}
                     </sonic-button>
-                  </div>
+                  </sonic-form-actions>
                 `
               : nothing}
-            <div class="row flex flex-wrap items-center gap-2">
-              <strong>${t("export.bandcamp")}</strong>
+            <strong>${t("export.bandcamp")}</strong>
+            <sonic-form-actions>
               <sonic-button
                 variant="outline"
                 type="neutral"
@@ -3027,7 +3045,7 @@ export class GlSequencerPage extends LitElement {
               >
                 ${t("export.bandcampAssist")}
               </sonic-button>
-            </div>
+            </sonic-form-actions>
             <div class="flex flex-col gap-2 border-t border-neutral-3 pt-3">
               <strong>${t("export.reel")}</strong>
               <div class="flex flex-col gap-1.5">
@@ -3059,7 +3077,7 @@ export class GlSequencerPage extends LitElement {
                   class="w-28"
                 ></sonic-input>
               </div>
-              <div class="row flex flex-wrap items-center gap-2">
+              <sonic-form-actions>
                 <sonic-button
                   type="primary"
                   ?disabled=${!!busy}
@@ -3087,7 +3105,7 @@ export class GlSequencerPage extends LitElement {
                       ${t("export.reelShare")}
                     </sonic-button>`
                   : nothing}
-              </div>
+              </sonic-form-actions>
               <p class="m-0 text-sm text-neutral-9">${t("export.reelHint")}</p>
               ${this.reelResult
                 ? html`<video
@@ -3102,8 +3120,10 @@ export class GlSequencerPage extends LitElement {
             <div class="flex flex-col gap-2 border-t border-neutral-3 pt-3">
               <strong>${t("export.listenLink")}</strong>
               ${!auth.getJwt()
-                ? html`<p class="text-sm text-neutral-9">
+                ? html`<p class="m-0 text-sm text-neutral-9">
                       ${t("export.listenNeedLogin")}
+                    </p>
+                    <sonic-form-actions>
                       <sonic-button
                         size="sm"
                         variant="outline"
@@ -3115,29 +3135,29 @@ export class GlSequencerPage extends LitElement {
                       >
                         ${t("nav.account")}
                       </sonic-button>
-                    </p>`
+                    </sonic-form-actions>`
                 : html`
-                    <div class="row flex flex-wrap items-center gap-2">
-                      <gl-pop-select
-                        size="sm"
-                        .value=${this.listenVisibility}
-                        .options=${[
-                          {
-                            value: "unlisted",
-                            label: t("export.listenUnlisted"),
-                          },
-                          {
-                            value: "private",
-                            label: t("export.listenPrivate"),
-                          },
-                        ]}
-                        @gl-change=${(e: CustomEvent<{ value: string }>) => {
-                          this.listenVisibility =
-                            e.detail.value === "private"
-                              ? "private"
-                              : "unlisted";
-                        }}
-                      ></gl-pop-select>
+                    <gl-pop-select
+                      size="sm"
+                      .value=${this.listenVisibility}
+                      .options=${[
+                        {
+                          value: "unlisted",
+                          label: t("export.listenUnlisted"),
+                        },
+                        {
+                          value: "private",
+                          label: t("export.listenPrivate"),
+                        },
+                      ]}
+                      @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                        this.listenVisibility =
+                          e.detail.value === "private"
+                            ? "private"
+                            : "unlisted";
+                      }}
+                    ></gl-pop-select>
+                    <sonic-form-actions>
                       <sonic-button
                         type="primary"
                         ?disabled=${!!busy}
@@ -3163,7 +3183,7 @@ export class GlSequencerPage extends LitElement {
                               ${t("export.listenRevoke")}
                             </sonic-button>`
                         : nothing}
-                    </div>
+                    </sonic-form-actions>
                     ${this.listenMeta
                       ? html`<sonic-alert status="success" label=${t("export.listenPublished")}>
                           <a href=${this.listenMeta.url} target="_blank" rel="noopener"
@@ -3237,16 +3257,23 @@ export class GlSequencerPage extends LitElement {
     const barsOpen = modal === "bars";
     const genOpen = modal === "generate";
     const docsOpen = modal === "docs";
+    const mForm = GL_MODAL_PRESETS.form;
+    const mGen = GL_MODAL_PRESETS.generate;
+    const mPanel = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="22rem"
+        align=${mForm.align}
+        paddingX=${mForm.paddingX}
+        paddingY=${mForm.paddingY}
+        maxWidth=${mForm.maxWidth}
+        maxHeight=${mForm.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${bpmOpen}
         @hide=${this.onSeqModalHide}
       >
         <sonic-modal-title>${t("seq.bpmTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-3 text-sm text-content">
+          <div class="seq-modal-body flex flex-col gap-4 text-sm text-content">
             <label class="flex flex-col gap-1.5 text-xs text-neutral-500">
               ${t("seq.bpm")} (${MIN_BPM}–${MAX_BPM})
               <input
@@ -3276,14 +3303,18 @@ export class GlSequencerPage extends LitElement {
       </sonic-modal>
 
       <sonic-modal
-        align="left"
-        maxWidth="22rem"
+        align=${mForm.align}
+        paddingX=${mForm.paddingX}
+        paddingY=${mForm.paddingY}
+        maxWidth=${mForm.maxWidth}
+        maxHeight=${mForm.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${barsOpen}
         @hide=${this.onSeqModalHide}
       >
         <sonic-modal-title>${t("seq.barsTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-3 text-sm text-content">
+          <div class="seq-modal-body flex flex-col gap-4 text-sm text-content">
             <label class="flex flex-col gap-1.5 text-xs text-neutral-500">
               ${t("seq.barsUnit")} (${MIN_BARS}–${MAX_BARS})
               <input
@@ -3316,8 +3347,12 @@ export class GlSequencerPage extends LitElement {
       </sonic-modal>
 
       <sonic-modal
-        align="left"
-        maxWidth="52rem"
+        align=${mGen.align}
+        paddingX=${mGen.paddingX}
+        paddingY=${mGen.paddingY}
+        maxWidth=${mGen.maxWidth}
+        maxHeight=${mGen.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${genOpen}
         @hide=${this.onSeqModalHide}
       >
@@ -3347,14 +3382,18 @@ export class GlSequencerPage extends LitElement {
       </sonic-modal>
 
       <sonic-modal
-        align="left"
-        maxWidth="28rem"
+        align=${mPanel.align}
+        paddingX=${mPanel.paddingX}
+        paddingY=${mPanel.paddingY}
+        maxWidth=${mPanel.maxWidth}
+        maxHeight=${mPanel.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${docsOpen}
         @hide=${this.onSeqModalHide}
       >
         <sonic-modal-title>${t("seq.docsTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-3 text-sm text-content">
+          <div class="seq-modal-body flex flex-col gap-4 text-sm text-content">
             <ul
               class="m-0 flex list-disc flex-col gap-1.5 pl-[1.1rem] text-[0.85rem] text-neutral-500"
             >
@@ -3496,34 +3535,32 @@ export class GlSequencerPage extends LitElement {
           <sonic-form-layout>
             <div class="form-item-container flex flex-col gap-1">
               <span class="form-label">${t("seq.genSeed")}</span>
-              <div class="flex flex-wrap items-center gap-2">
-                <sonic-input
-                  class="min-w-0 flex-1"
-                  type="number"
-                  size="sm"
-                  min="0"
-                  .value=${String(this.draftGenSeed)}
-                  @change=${(e: Event) => {
-                    this.draftGenSeed =
-                      Number((e.target as HTMLInputElement).value) >>> 0;
-                    this.#persistGenUi();
-                  }}
-                ></sonic-input>
-                <sonic-button
-                  variant="outline"
-                  type="neutral"
-                  size="sm"
-                  @click=${() => {
-                    this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
-                    this.#persistGenUi();
-                  }}
-                >
-                  ${t("seq.genSeedReroll")}
-                </sonic-button>
-              </div>
+              <sonic-input
+                class="min-w-0 flex-1"
+                type="number"
+                size="sm"
+                min="0"
+                .value=${String(this.draftGenSeed)}
+                @change=${(e: Event) => {
+                  this.draftGenSeed =
+                    Number((e.target as HTMLInputElement).value) >>> 0;
+                  this.#persistGenUi();
+                }}
+              ></sonic-input>
               <span class="form-description m-0">${t("seq.genSeedHint")}</span>
             </div>
             <sonic-form-actions>
+              <sonic-button
+                variant="outline"
+                type="neutral"
+                size="sm"
+                @click=${() => {
+                  this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+                  this.#persistGenUi();
+                }}
+              >
+                ${t("seq.genSeedReroll")}
+              </sonic-button>
               <sonic-button
                 size="sm"
                 variant="outline"
@@ -4031,18 +4068,20 @@ export class GlSequencerPage extends LitElement {
       <div class="form-item-container flex flex-col gap-1">
         <span class="form-label flex items-center justify-between gap-2 mb-0">
           <span>${opts.label}</span>
-          <sonic-button
-            size="sm"
-            variant="outline"
-            type="neutral"
-            ?active=${isAuto}
-            @click=${() => {
-              opts.onChange(isAuto ? opts.fallback : "auto");
-              this.#persistGenUi();
-            }}
+          <label
+            class="inline-flex cursor-pointer select-none items-center gap-1 text-xs text-neutral-500"
           >
+            <input
+              type="checkbox"
+              class="accent-primary"
+              .checked=${isAuto}
+              @change=${() => {
+                opts.onChange(isAuto ? opts.fallback : "auto");
+                this.#persistGenUi();
+              }}
+            />
             ${t("seq.genAuto")}
-          </sonic-button>
+          </label>
         </span>
         <input
           type="range"
@@ -5505,16 +5544,21 @@ export class GlSequencerPage extends LitElement {
           ((clip.contentOffsetMs % offsetMax) + offsetMax) % offsetMax,
         )
       : 0;
+    const m = GL_MODAL_PRESETS.form;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="22rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${open}
         @hide=${this.onClipOptsHide}
       >
         <sonic-modal-title>${t("seq.clipOptionsTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-3 text-sm text-content">
+          <div class="seq-modal-body flex flex-col gap-4 text-sm text-content">
             ${clip
               ? html`
                   <label
@@ -5589,20 +5633,22 @@ export class GlSequencerPage extends LitElement {
                       }}
                     ></gl-pop-select>
                   </div>
-                  <sonic-button
-                    variant="outline"
-                    type="primary"
-                    size="sm"
-                    @click=${() => this.#armRotateFromOpts()}
-                  >
-                    ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
-                    ${t("seq.rotate")}
-                  </sonic-button>
                 `
               : nothing}
           </div>
         </sonic-modal-content>
         <sonic-modal-actions>
+          ${clip
+            ? html`<sonic-button
+                variant="outline"
+                type="primary"
+                size="sm"
+                @click=${() => this.#armRotateFromOpts()}
+              >
+                ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+                ${t("seq.rotate")}
+              </sonic-button>`
+            : nothing}
           <sonic-button hideModal type="primary">
             ${t("dialog.ok")}
           </sonic-button>

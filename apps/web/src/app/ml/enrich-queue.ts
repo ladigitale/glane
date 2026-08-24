@@ -11,6 +11,7 @@ import { db, ensurePrefs } from "../db.js";
 import { mlOptsFromPrefs } from "./ml-prefs.js";
 import { getYamnetClassifier } from "./yamnet-mediapipe.js";
 import { buildAutoSampleName } from "../sample-auto-name.js";
+import { SAMPLE_UPDATED_EVENT } from "../process-queue.js";
 
 export const SAMPLE_ML_EVENT = "glane:sample-ml";
 
@@ -45,6 +46,9 @@ export async function enqueueYamnetEnrich(
       tags: [...stripMlTags(tags), ML_TAG.running],
       updatedAt: nowIso(),
     });
+    window.dispatchEvent(
+      new CustomEvent(SAMPLE_UPDATED_EVENT, { detail: { sampleId } }),
+    );
 
     const audio = await sampleOpfs.loadPcm(sampleId);
     if (!audio || audio.pcm.length === 0) {
@@ -115,6 +119,9 @@ export async function enqueueYamnetEnrich(
 
       await db.samples.update(sampleId, patch);
       await upsertAnalysisLabels(sampleId, result.labels);
+      window.dispatchEvent(
+        new CustomEvent(SAMPLE_UPDATED_EVENT, { detail: { sampleId } }),
+      );
       window.dispatchEvent(
         new CustomEvent(SAMPLE_ML_EVENT, { detail: { sampleId } }),
       );

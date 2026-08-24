@@ -20,6 +20,7 @@ import {
   parseStemFromTags,
   type YamnetLabelScore,
 } from "./generative-cues.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
 
 @customElement("gl-sample-info")
 export class GlSampleInfo extends LitElement {
@@ -104,10 +105,15 @@ export class GlSampleInfo extends LitElement {
   }
 
   override render() {
+    const m = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="28rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.visible}
         @hide=${this.#onHide}
       >

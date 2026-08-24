@@ -1,9 +1,9 @@
 import { APP_NAME, type Project } from "@glane/core-model";
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import "@supersoniks/concorde/fieldset";
-import "@supersoniks/concorde/form-actions";
-import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/button";
+import "@supersoniks/concorde/menu";
+import "@supersoniks/concorde/menu-item";
 import tailwind from "../../css/tailwind";
 import { glDialog } from "../dialog.js";
 import { t } from "../i18n/messages.js";
@@ -23,11 +23,11 @@ export class GlLandingPage extends LitElement {
     css`
       :host {
         display: block;
-        min-height: 100%;
+        position: relative;
+        height: 100%;
+        min-height: 0;
         min-width: 0;
-        max-width: 100%;
-        overflow-x: clip;
-        box-sizing: border-box;
+        overflow: hidden;
       }
       .hero-brand {
         --sc-font-family-base: var(--gl-font-display);
@@ -36,27 +36,54 @@ export class GlLandingPage extends LitElement {
         font-variation-settings: "wdth" var(--gl-font-display-wdth);
         letter-spacing: var(--gl-font-display-tracking);
       }
-      .flow-stage {
-        min-width: 0;
-        max-width: 100%;
+      .landing-stage {
+        position: fixed;
+        inset: 0;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: safe center;
+        box-sizing: border-box;
+        padding: max(1rem, env(safe-area-inset-top))
+          max(1rem, env(safe-area-inset-right))
+          max(1rem, env(safe-area-inset-bottom))
+          max(1rem, env(safe-area-inset-left));
+        pointer-events: none;
         overflow: hidden;
-        min-height: min(42dvh, 22rem);
       }
-      /* Tighten fieldset padding on narrow viewports (box-sizing via tailwind sheet). */
-      sonic-fieldset.workspace {
-        display: block;
-        width: 100%;
-        max-width: 100%;
-        min-width: 0;
-        --sc-fieldset-px: 0.75rem;
-        --sc-fieldset-py: 1rem;
-        --sc-fieldset-mb: 0;
+      .landing-copy {
+        position: relative;
+        z-index: 1;
+        width: min(100%, 32rem);
+        max-height: min(
+          calc(100dvh - 2rem),
+          calc(
+            100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) -
+              1.5rem
+          )
+        );
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-gutter: stable;
+        pointer-events: auto;
+        color: var(--sc-base-content);
+        background: color-mix(in srgb, var(--sc-base) 94%, transparent);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border: 1px solid
+          color-mix(in srgb, var(--sc-base-content) 14%, transparent);
+        border-radius: calc(var(--sc-rounded, 0.5rem) + 0.35rem);
+        padding: 1.5rem 1.25rem;
+        box-shadow: 0 12px 40px
+          color-mix(in srgb, var(--sc-base-content) 8%, transparent);
       }
       @media (min-width: 640px) {
-        sonic-fieldset.workspace {
-          max-width: 28rem;
-          --sc-fieldset-px: 1.25rem;
-          --sc-fieldset-py: 1.5rem;
+        .landing-copy {
+          padding: 2rem 1.75rem;
         }
       }
     `,
@@ -100,63 +127,54 @@ export class GlLandingPage extends LitElement {
     navigate({ name: "capture" });
   }
 
+  #goPrivacy(e: Event): void {
+    e.preventDefault();
+    navigate({ name: "privacy" });
+  }
+
   override render() {
     return html`
-      <div
-        class="relative flex min-h-[100dvh] w-full max-w-full min-w-0 flex-col bg-gradient-to-b from-neutral-100 via-neutral-0 to-neutral-100"
-      >
-        <div
-          class="absolute right-4 top-[max(0.75rem,env(safe-area-inset-top))] z-[2] md:right-6"
-        >
-          <gl-locale-switch size="sm"></gl-locale-switch>
-        </div>
-        <section
-          class="relative mx-auto flex w-full min-w-0 max-w-3xl flex-1 flex-col justify-center gap-6 px-4 pb-10 pt-[max(2rem,env(safe-area-inset-top))] sm:gap-8 sm:px-6"
-        >
-          <div class="flow-stage relative">
-            <gl-landing-flow class="absolute inset-0"></gl-landing-flow>
-          </div>
-          <div
-            class="relative z-[1] flex w-full min-w-0 flex-col items-stretch gap-4"
-          >
-            <div
-              class="hero-brand inline-flex max-w-full items-center gap-3 text-primary"
-            >
-              ${glBrandMark({ size: "2.75rem" })}
-              <span class="min-w-0 text-5xl leading-none md:text-6xl"
-                >${APP_NAME}</span
+      <div class="landing-stage">
+        <gl-landing-flow></gl-landing-flow>
+        <div class="landing-copy flex min-h-0 flex-col gap-6 sm:gap-8">
+          <div class="space-y-5">
+            <div class="flex items-start justify-between gap-3">
+              <div
+                class="hero-brand inline-flex min-w-0 items-center gap-3 text-primary"
               >
+                ${glBrandMark({ size: "2.75rem" })}
+                <span class="min-w-0 text-4xl leading-none sm:text-5xl"
+                  >${APP_NAME}</span
+                >
+              </div>
+              <gl-locale-switch
+                class="shrink-0"
+                size="sm"
+              ></gl-locale-switch>
             </div>
-            <p class="max-w-md text-base text-neutral-11 sm:text-lg">
-              ${t("landing.tagline")}
-            </p>
-            ${this.ready ? this.#workspaceBlock() : nothing}
+            <div class="space-y-3">
+              <p class="text-base leading-relaxed text-neutral-700 sm:text-lg">
+                ${t("landing.tagline")}
+              </p>
+              <p class="text-sm leading-relaxed text-neutral-500">
+                ${t("landing.localBody")}
+              </p>
+            </div>
           </div>
-        </section>
-        <section
-          class="mx-auto w-full min-w-0 max-w-3xl border-t border-neutral-3 px-4 py-10 sm:px-6"
-        >
-          <h2 class="font-display text-xl">${t("landing.localTitle")}</h2>
-          <p class="mt-2 max-w-prose text-neutral-11">
-            ${t("landing.localBody")}
-          </p>
-        </section>
-        <footer
-          class="mx-auto flex w-full min-w-0 max-w-3xl items-center justify-between gap-3 px-4 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-2 text-sm text-neutral-9 sm:px-6"
-        >
-          <span>${APP_NAME}</span>
-          <a
-            class="underline-offset-2 hover:underline"
-            href=${pathFor({ name: "privacy" })}
-            @click=${(e: Event) => {
-              e.preventDefault();
-              history.pushState({}, "", pathFor({ name: "privacy" }));
-              window.dispatchEvent(new PopStateEvent("popstate"));
-            }}
+          ${this.ready ? this.#workspaceBlock() : nothing}
+          <nav
+            class="flex items-center justify-between gap-3 text-sm text-neutral-500"
           >
-            ${t("nav.privacy")}
-          </a>
-        </footer>
+            <span>${APP_NAME}</span>
+            <a
+              class="underline-offset-2 hover:underline"
+              href=${pathFor({ name: "privacy" })}
+              @click=${this.#goPrivacy}
+            >
+              ${t("nav.privacy")}
+            </a>
+          </nav>
+        </div>
       </div>
     `;
   }
@@ -164,58 +182,55 @@ export class GlLandingPage extends LitElement {
   #workspaceBlock() {
     const hasProjects = this.projects.length > 0;
     return html`
-      <sonic-fieldset
-        class="workspace"
-        label=${t("landing.projectsTitle")}
-        description=${hasProjects ? undefined : t("landing.emptyHint")}
-      >
-        <sonic-form-layout>
-          ${hasProjects
-            ? html`
-                <sonic-menu
-                  direction="column"
-                  align="left"
-                  size="sm"
-                  class="w-full min-w-0"
-                >
-                  ${this.projects.map(
-                    (p) => html`
-                      <sonic-menu-item
-                        class="min-w-0"
-                        @click=${() => void this.#openProject(p.id)}
-                      >
-                        ${glIcon("folder", { slot: "prefix", size: "xs" })}
-                        <span class="block truncate">${p.title}</span>
-                      </sonic-menu-item>
-                    `,
-                  )}
-                </sonic-menu>
-              `
-            : nothing}
-          <sonic-form-actions class="w-full min-w-0">
-            <sonic-button
-              type="primary"
-              size="md"
-              shape="block"
-              @click=${() => void this.#createProject()}
-            >
-              ${glIcon("plus", { slot: "prefix" })}
-              ${t("project.new")}
-            </sonic-button>
-            <sonic-button
-              variant="outline"
-              type="neutral"
-              size="md"
-              shape="block"
-              href=${pathFor({ name: "account" })}
-              ?pushState=${true}
-            >
-              ${glIcon("user", { slot: "prefix" })}
-              ${t("landing.account")}
-            </sonic-button>
-          </sonic-form-actions>
-        </sonic-form-layout>
-      </sonic-fieldset>
+      <div class="flex flex-col gap-3">
+        <p class="text-sm text-neutral-500">
+          ${hasProjects ? t("landing.projectsTitle") : t("landing.emptyHint")}
+        </p>
+        ${hasProjects
+          ? html`
+              <sonic-menu
+                direction="column"
+                align="left"
+                size="sm"
+                class="w-full min-w-0"
+              >
+                ${this.projects.map(
+                  (p) => html`
+                    <sonic-menu-item
+                      class="min-w-0"
+                      @click=${() => void this.#openProject(p.id)}
+                    >
+                      ${glIcon("folder", { slot: "prefix", size: "xs" })}
+                      <span class="block truncate">${p.title}</span>
+                    </sonic-menu-item>
+                  `,
+                )}
+              </sonic-menu>
+            `
+          : nothing}
+        <div class="flex flex-col gap-3">
+          <sonic-button
+            type="primary"
+            size="lg"
+            class="w-full justify-center"
+            @click=${() => void this.#createProject()}
+          >
+            ${glIcon("plus", { slot: "prefix" })}
+            ${t("project.new")}
+          </sonic-button>
+          <sonic-button
+            variant="outline"
+            type="neutral"
+            size="lg"
+            class="w-full justify-center"
+            href=${pathFor({ name: "account" })}
+            ?pushState=${true}
+          >
+            ${glIcon("user", { slot: "prefix" })}
+            ${t("landing.account")}
+          </sonic-button>
+        </div>
+      </div>
     `;
   }
 }

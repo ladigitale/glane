@@ -2,6 +2,7 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { t } from "./i18n/messages.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
 
 export type GlConfirmOpts = {
   title?: string;
@@ -254,16 +255,23 @@ export class GlDialogHost extends LitElement {
   override render() {
     const p = this.pending;
     if (!p) return nothing;
+    const modalPreset =
+      p.kind === "chooseMany" ? "wide" : p.kind === "choose" ? "form" : "compact";
+    const m = GL_MODAL_PRESETS[modalPreset];
     return html`
       <sonic-modal
-        align="left"
-        maxWidth=${p.kind === "chooseMany" ? "28rem" : "24rem"}
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.open}
         @hide=${this.#onHide}
       >
         <sonic-modal-title>${p.title}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="flex flex-col gap-2">
+          <div class="flex flex-col gap-3">
             ${p.message
               ? html`<p class="m-0 whitespace-pre-wrap leading-[1.4]">${p.message}</p>`
               : nothing}

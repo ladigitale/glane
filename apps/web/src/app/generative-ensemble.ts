@@ -4,13 +4,23 @@
  */
 
 import type { ExprRole } from "@glane/core-model";
+import type { MusicStyleId } from "./generative-styles";
 import {
   pickCallResponsePair,
   pickMelodyCell,
+  type ArpEvent,
   type MelodyEvent,
 } from "./generative-refs";
 
 export type VoiceRelation = "independent" | "lock" | "respond" | "kinship";
+
+export type EnsembleSectionKind =
+  | "intro"
+  | "verse"
+  | "prechorus"
+  | "chorus"
+  | "bridge"
+  | "outro";
 
 export type EnsembleHit = {
   tickInBar: number;
@@ -28,7 +38,157 @@ export type EnsemblePlan = {
   leadCell: readonly MelodyEvent[] | null;
   leadCellAlt: readonly MelodyEvent[] | null;
   responseCell: readonly MelodyEvent[] | null;
+  styleProfile: StyleEnsembleProfile;
 };
+
+export type StyleEnsembleFamily =
+  | "popRock"
+  | "groove"
+  | "jazz"
+  | "electronic"
+  | "ambient"
+  | "hiphop"
+  | "reggae"
+  | "folk";
+
+export type StyleEnsembleProfile = {
+  family: StyleEnsembleFamily;
+  /** P(call–response) when callResponse is auto. */
+  respondAutoChance: number;
+  followerLockBias: number;
+  followerKinshipBias: number;
+  chorusLockBoost: number;
+  verseRespondBoost: number;
+  /** Alternate-bar dialogue in verse only, or also chorus. */
+  alternateBarsSections: "verse" | "verseAndChorus";
+  /** Derive arp cell from lead when follower is kinship (not only lock). */
+  coupleArpOnKinship: boolean;
+};
+
+const STYLE_FAMILY: Record<MusicStyleId, StyleEnsembleFamily> = {
+  rock: "popRock",
+  pop: "popRock",
+  punk: "popRock",
+  garage: "popRock",
+  metal: "popRock",
+  disco: "popRock",
+  funk: "groove",
+  latin: "groove",
+  afrobeat: "groove",
+  blues: "groove",
+  jazz: "jazz",
+  techno: "electronic",
+  house: "electronic",
+  dnb: "electronic",
+  breakbeat: "electronic",
+  triphop: "ambient",
+  ambient: "ambient",
+  dub: "ambient",
+  classical: "ambient",
+  hiphop: "hiphop",
+  reggae: "reggae",
+  folk: "folk",
+};
+
+const FAMILY_PROFILES: Record<StyleEnsembleFamily, StyleEnsembleProfile> = {
+  popRock: {
+    family: "popRock",
+    respondAutoChance: 0.55,
+    followerLockBias: 0.4,
+    followerKinshipBias: 0.55,
+    chorusLockBoost: 0.6,
+    verseRespondBoost: 0.3,
+    alternateBarsSections: "verse",
+    coupleArpOnKinship: true,
+  },
+  groove: {
+    family: "groove",
+    respondAutoChance: 0.72,
+    followerLockBias: 0.28,
+    followerKinshipBias: 0.62,
+    chorusLockBoost: 0.45,
+    verseRespondBoost: 0.52,
+    alternateBarsSections: "verse",
+    coupleArpOnKinship: true,
+  },
+  jazz: {
+    family: "jazz",
+    respondAutoChance: 0.78,
+    followerLockBias: 0.18,
+    followerKinshipBias: 0.68,
+    chorusLockBoost: 0.22,
+    verseRespondBoost: 0.58,
+    alternateBarsSections: "verseAndChorus",
+    coupleArpOnKinship: false,
+  },
+  electronic: {
+    family: "electronic",
+    respondAutoChance: 0.22,
+    followerLockBias: 0.68,
+    followerKinshipBias: 0.28,
+    chorusLockBoost: 0.78,
+    verseRespondBoost: 0.12,
+    alternateBarsSections: "verse",
+    coupleArpOnKinship: true,
+  },
+  ambient: {
+    family: "ambient",
+    respondAutoChance: 0.18,
+    followerLockBias: 0.14,
+    followerKinshipBias: 0.78,
+    chorusLockBoost: 0.18,
+    verseRespondBoost: 0.12,
+    alternateBarsSections: "verse",
+    coupleArpOnKinship: true,
+  },
+  hiphop: {
+    family: "hiphop",
+    respondAutoChance: 0.38,
+    followerLockBias: 0.32,
+    followerKinshipBias: 0.58,
+    chorusLockBoost: 0.32,
+    verseRespondBoost: 0.28,
+    alternateBarsSections: "verse",
+    coupleArpOnKinship: false,
+  },
+  reggae: {
+    family: "reggae",
+    respondAutoChance: 0.52,
+    followerLockBias: 0.3,
+    followerKinshipBias: 0.6,
+    chorusLockBoost: 0.38,
+    verseRespondBoost: 0.42,
+    alternateBarsSections: "verse",
+    coupleArpOnKinship: true,
+  },
+  folk: {
+    family: "folk",
+    respondAutoChance: 0.68,
+    followerLockBias: 0.22,
+    followerKinshipBias: 0.58,
+    chorusLockBoost: 0.32,
+    verseRespondBoost: 0.55,
+    alternateBarsSections: "verseAndChorus",
+    coupleArpOnKinship: true,
+  },
+};
+
+export function ensembleProfileForStyle(
+  style: MusicStyleId,
+): StyleEnsembleProfile {
+  const family = STYLE_FAMILY[style];
+  return FAMILY_PROFILES[family];
+}
+
+/** True when arp should inherit the primary melody cell rhythm/degrees. */
+export function shouldCoupleArp(
+  voiceRel: VoiceRelation,
+  profile: StyleEnsembleProfile,
+): boolean {
+  if (voiceRel === "lock") return true;
+  if (voiceRel === "kinship" && profile.coupleArpOnKinship) return true;
+  return false;
+}
 
 const MELODIC_ROLES: readonly ExprRole[] = [
   "lead",
@@ -54,6 +214,115 @@ export function extractSharedOnsets(
   return out;
 }
 
+/** Snap a scale degree to the nearest chord tone (root / 3rd / 5th / 7th / 8ve). */
+function snapMelodyDegreeToChordTone(degree: number): number {
+  const tones = [0, 2, 4, 6, 7, 9, 11];
+  let best = 0;
+  let bestDist = Infinity;
+  for (const t of tones) {
+    const d = Math.abs(degree - t);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return best;
+}
+
+/** Derive an arp ostinato from the primary melody cell (same rhythm, chord tones). */
+export function melodyCellToArpCell(
+  cell: readonly MelodyEvent[],
+): readonly ArpEvent[] {
+  return cell.map((ev) => ({
+    degree: snapMelodyDegreeToChordTone(ev.degree),
+    sixteenths: ev.sixteenths,
+    accent: ev.accent,
+  }));
+}
+
+/** Degree offset when locking a follower onto the primary skeleton. */
+export function lockDegreeOffset(
+  role: ExprRole,
+  rnd: () => number,
+  family: StyleEnsembleFamily = "popRock",
+): number {
+  switch (role) {
+    case "bass":
+      return 0;
+    case "chord":
+      if (family === "jazz") return rnd() < 0.45 ? 4 : 6;
+      if (family === "groove") return rnd() < 0.4 ? 2 : 4;
+      return rnd() < 0.55 ? 2 : 4;
+    case "arp":
+      return 0;
+    case "lead":
+      return rnd() < 0.45 ? 0 : 2;
+    default:
+      return 2;
+  }
+}
+
+/** Chorus locks; verse dialogues; bridge/intro stay lighter — style-weighted. */
+export function resolveSectionRelation(
+  base: VoiceRelation,
+  section: EnsembleSectionKind,
+  role: ExprRole,
+  rnd: () => number,
+  profile: StyleEnsembleProfile,
+): VoiceRelation {
+  if (base === "independent") return "independent";
+
+  switch (section) {
+    case "chorus":
+    case "prechorus":
+      if (base === "kinship" && rnd() < profile.chorusLockBoost) return "lock";
+      if (
+        base === "respond" &&
+        role !== "arp" &&
+        rnd() < profile.chorusLockBoost * 0.65
+      ) {
+        return "lock";
+      }
+      return base;
+    case "verse":
+      if (base === "lock" && rnd() < profile.verseRespondBoost) {
+        return role === "arp" || role === "lead" ? "respond" : "kinship";
+      }
+      if (base === "lock" && rnd() < profile.verseRespondBoost + 0.2) {
+        return "kinship";
+      }
+      return base;
+    case "bridge":
+    case "intro":
+    case "outro":
+      if (profile.family === "ambient" || profile.family === "jazz") {
+        if (base === "lock" || base === "respond") return "kinship";
+        return base;
+      }
+      if (base === "lock") return "kinship";
+      if (base === "respond" && rnd() < 0.45) return "kinship";
+      return base;
+    default:
+      return base;
+  }
+}
+
+/** Verse (or chorus for jazz/folk) = alternate bars; else half-bar antiphony. */
+export function respondPlacementMode(
+  section: EnsembleSectionKind,
+  profile: StyleEnsembleProfile,
+): "halfBar" | "alternateBars" {
+  if (profile.alternateBarsSections === "verseAndChorus") {
+    if (section === "verse" || section === "chorus") return "alternateBars";
+    return "halfBar";
+  }
+  return section === "verse" ? "alternateBars" : "halfBar";
+}
+
+export function isCallBar(absBar: number): boolean {
+  return absBar % 2 === 0;
+}
+
 function pickPrimaryTrack(roles: readonly ExprRole[]): number | null {
   for (const role of ["lead", "arp", "chord"] as const) {
     const i = roles.indexOf(role);
@@ -67,6 +336,7 @@ function assignFollowerRelation(
   rnd: () => number,
   energy: number,
   preferRespond: boolean,
+  profile: StyleEnsembleProfile,
 ): VoiceRelation {
   if (preferRespond && (role === "arp" || role === "lead")) {
     return "respond";
@@ -74,11 +344,15 @@ function assignFollowerRelation(
   if (preferRespond && (role === "chord" || role === "bass") && rnd() < 0.35) {
     return "respond";
   }
-  const lockBias = energy > 0.6 ? 0.55 : 0.35;
+  const lockBias =
+    profile.followerLockBias + (energy > 0.6 ? 0.12 : 0);
+  const kinBias = profile.followerKinshipBias;
   if (role === "bass" || role === "chord") {
-    return rnd() < 0.65 ? "kinship" : "lock";
+    return rnd() < kinBias ? "kinship" : "lock";
   }
-  return rnd() < lockBias ? "lock" : "kinship";
+  if (rnd() < lockBias) return "lock";
+  if (rnd() < kinBias) return "kinship";
+  return preferRespond ? "respond" : "kinship";
 }
 
 export function planEnsemble(opts: {
@@ -87,8 +361,10 @@ export function planEnsemble(opts: {
   callResponseMode: "auto" | "on" | "off";
   energy: number;
   sparse: boolean;
+  musicStyle: MusicStyleId;
 }): EnsemblePlan {
-  const { roles, rnd, callResponseMode, energy, sparse } = opts;
+  const { roles, rnd, callResponseMode, energy, sparse, musicStyle } = opts;
+  const styleProfile = ensembleProfileForStyle(musicStyle);
   const relationByTrack: VoiceRelation[] = roles.map(() => "independent");
   const primaryLeadTrack = pickPrimaryTrack(roles);
 
@@ -100,12 +376,14 @@ export function planEnsemble(opts: {
       leadCell: null,
       leadCellAlt: null,
       responseCell: null,
+      styleProfile,
     };
   }
 
   const wantRespond =
     callResponseMode === "on" ||
-    (callResponseMode === "auto" && rnd() < 0.55);
+    (callResponseMode === "auto" &&
+      rnd() < styleProfile.respondAutoChance);
 
   let leadCell: readonly MelodyEvent[];
   let leadCellAlt: readonly MelodyEvent[];
@@ -146,7 +424,13 @@ export function planEnsemble(opts: {
       (role === "arp" ||
         role === "lead" ||
         (callResponseMode === "on" && !hasRespond));
-    const rel = assignFollowerRelation(role, rnd, energy, preferRespond);
+    const rel = assignFollowerRelation(
+      role,
+      rnd,
+      energy,
+      preferRespond,
+      styleProfile,
+    );
     relationByTrack[i] = rel;
     if (rel === "respond") hasRespond = true;
   }
@@ -165,6 +449,7 @@ export function planEnsemble(opts: {
     leadCell,
     leadCellAlt,
     responseCell,
+    styleProfile,
   };
 }
 
@@ -262,6 +547,40 @@ export function applyRespond(
       ];
 }
 
+/** Full-bar response (alternate-bar dialogue in verse). */
+export function applyRespondFullBar(
+  responseCell: readonly MelodyEvent[],
+  beatsPerBar: number,
+  ppq: number,
+): EnsembleHit[] {
+  const tpb = beatsPerBar * ppq;
+  const ticksPer16 = ppq / 4;
+  let t = 0;
+  const hits: EnsembleHit[] = [];
+  for (const ev of responseCell) {
+    const tick = Math.round(t);
+    if (tick >= tpb) break;
+    hits.push({
+      tickInBar: tick,
+      gainDb: ev.accent ? 0.5 : -1,
+      accent: !!ev.accent,
+      melodyDegree: ev.degree,
+    });
+    t += ev.sixteenths * ticksPer16;
+  }
+  return hits.length > 0
+    ? hits
+    : [{ tickInBar: 0, gainDb: 0, accent: true, melodyDegree: 0 }];
+}
+
+/** Thin primary on answer bars (alternate-bar dialogue). */
+export function thinAnswerBar(
+  hits: readonly EnsembleHit[],
+  rnd: () => number,
+): EnsembleHit[] {
+  return hits.filter((h) => h.accent && rnd() < 0.4);
+}
+
 /** Keep shared accents; allow some ornamentation off-skeleton. */
 export function applyKinship(
   hits: readonly EnsembleHit[],
@@ -302,7 +621,16 @@ export const ensemble = {
   plan: planEnsemble,
   applyLock,
   applyRespond,
+  applyRespondFullBar,
   applyKinship,
   thinCallHalf,
+  thinAnswerBar,
   extractSharedOnsets,
+  melodyCellToArpCell,
+  lockDegreeOffset,
+  resolveSectionRelation,
+  respondPlacementMode,
+  isCallBar,
+  ensembleProfileForStyle,
+  shouldCoupleArp,
 } as const;

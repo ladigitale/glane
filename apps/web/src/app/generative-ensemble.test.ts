@@ -16,6 +16,7 @@ describe("planEnsemble", () => {
       callResponseMode: "on",
       energy: 0.6,
       sparse: false,
+      musicStyle: "pop",
     });
     const arpIdx = 2;
     assert.notEqual(plan.relationByTrack[arpIdx], "independent");
@@ -23,6 +24,7 @@ describe("planEnsemble", () => {
     assert.ok(plan.leadCell && plan.leadCell.length > 0);
     assert.ok(plan.responseCell && plan.responseCell.length > 0);
     assert.ok(plan.sharedOnsets.length > 0);
+    assert.equal(plan.styleProfile.family, "popRock");
   });
 
   it("assigns lock or kinship to bass/chord followers", () => {
@@ -33,12 +35,30 @@ describe("planEnsemble", () => {
       callResponseMode: "off",
       energy: 0.5,
       sparse: false,
+      musicStyle: "folk",
     });
     assert.equal(plan.relationByTrack[0], "independent");
     for (const i of [1, 2]) {
       const r = plan.relationByTrack[i]!;
       assert.ok(r === "lock" || r === "kinship" || r === "respond");
     }
+  });
+
+  it("electronic style favors lock over respond on auto", () => {
+    let locks = 0;
+    for (let seed = 0; seed < 30; seed++) {
+      const rnd = mulberry32(seed);
+      const plan = ensemble.plan({
+        roles: ["lead", "arp", "bass"],
+        rnd,
+        callResponseMode: "off",
+        energy: 0.7,
+        sparse: false,
+        musicStyle: "techno",
+      });
+      if (plan.relationByTrack.some((r) => r === "lock")) locks += 1;
+    }
+    assert.ok(locks > 15);
   });
 });
 
@@ -88,5 +108,87 @@ describe("applyRespond", () => {
     const secondHalf = hits.filter((h) => h.tickInBar >= half).length;
     assert.equal(firstHalf, 0);
     assert.ok(secondHalf > 0);
+  });
+
+  it("places full-bar response for alternate-bar verse dialogue", () => {
+    const response = [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 2, sixteenths: 4 },
+    ] as const;
+    const hits = ensemble.applyRespondFullBar(response, 4, 96);
+    assert.ok(hits.some((h) => h.tickInBar === 0));
+    assert.ok(hits.every((h) => h.tickInBar < 384));
+  });
+});
+
+describe("resolveSectionRelation", () => {
+  it("biases chorus kinship toward lock for electronic", () => {
+    const profile = ensemble.ensembleProfileForStyle("techno");
+    const rnd = mulberry32(99);
+    let locks = 0;
+    for (let i = 0; i < 40; i++) {
+      const r = ensemble.resolveSectionRelation(
+        "kinship",
+        "chorus",
+        "arp",
+        rnd,
+        profile,
+      );
+      if (r === "lock") locks += 1;
+    }
+    assert.ok(locks > 15);
+  });
+
+  it("softens bridge lock to kinship", () => {
+    const profile = ensemble.ensembleProfileForStyle("pop");
+    assert.equal(
+      ensemble.resolveSectionRelation(
+        "lock",
+        "bridge",
+        "bass",
+        () => 0.5,
+        profile,
+      ),
+      "kinship",
+    );
+  });
+
+  it("jazz uses alternate bars in chorus", () => {
+    const profile = ensemble.ensembleProfileForStyle("jazz");
+    assert.equal(
+      ensemble.respondPlacementMode("chorus", profile),
+      "alternateBars",
+    );
+    assert.equal(
+      ensemble.respondPlacementMode("prechorus", profile),
+      "halfBar",
+    );
+  });
+});
+
+describe("shouldCoupleArp", () => {
+  it("skips kinship coupling for jazz", () => {
+    const profile = ensemble.ensembleProfileForStyle("jazz");
+    assert.equal(ensemble.shouldCoupleArp("lock", profile), true);
+    assert.equal(ensemble.shouldCoupleArp("kinship", profile), false);
+  });
+});
+
+describe("melodyCellToArpCell", () => {
+  it("keeps rhythm and snaps degrees to chord tones", () => {
+    const cell = [
+      { degree: 1, sixteenths: 4, accent: true },
+      { degree: 5, sixteenths: 4 },
+    ] as const;
+    const arp = ensemble.melodyCellToArpCell(cell);
+    assert.equal(arp.length, 2);
+    assert.equal(arp[0]!.sixteenths, 4);
+    assert.ok([0, 2, 4, 6, 7].includes(arp[0]!.degree!));
+  });
+});
+
+describe("lockDegreeOffset", () => {
+  it("keeps bass on root", () => {
+    assert.equal(ensemble.lockDegreeOffset("bass", () => 0.9), 0);
   });
 });

@@ -58,6 +58,7 @@ import {
 } from "../edit-ops.js";
 import { editorFormKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import { glIcon } from "../icon.js";
 import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
@@ -985,10 +986,15 @@ export class GlEditorPage extends LitElement {
   }
 
   #renderStretchModal() {
+    const m = GL_MODAL_PRESETS.form;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="22rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.stretchModalOpen}
         @hide=${this.#onStretchModalHide}
       >
@@ -1013,31 +1019,39 @@ export class GlEditorPage extends LitElement {
                 }}
               />
             </label>
-            <div class="flex flex-wrap gap-[0.35rem]" role="radiogroup">
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                ?active=${this.stretchModeUi === "preserve-pitch"}
-                @click=${() => {
-                  this.stretchModeUi = "preserve-pitch";
-                }}
-              >
-                ${glIcon("music", { slot: "prefix", size: "xs" })}
-                ${t("editor.stretchPitch")}
-              </sonic-button>
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                ?active=${this.stretchModeUi === "resample"}
-                @click=${() => {
-                  this.stretchModeUi = "resample";
-                }}
-              >
-                ${glIcon("activity", { slot: "prefix", size: "xs" })}
-                ${t("editor.stretchResample")}
-              </sonic-button>
+            <div
+              class="flex flex-col gap-2"
+              role="radiogroup"
+              aria-label=${t("editor.stretchRatio")}
+            >
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="gl-stretch-mode"
+                  .checked=${this.stretchModeUi === "preserve-pitch"}
+                  @change=${() => {
+                    this.stretchModeUi = "preserve-pitch";
+                  }}
+                />
+                <span class="inline-flex items-center gap-1 text-sm">
+                  ${glIcon("music", { size: "xs" })}
+                  ${t("editor.stretchPitch")}
+                </span>
+              </label>
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="gl-stretch-mode"
+                  .checked=${this.stretchModeUi === "resample"}
+                  @change=${() => {
+                    this.stretchModeUi = "resample";
+                  }}
+                />
+                <span class="inline-flex items-center gap-1 text-sm">
+                  ${glIcon("activity", { size: "xs" })}
+                  ${t("editor.stretchResample")}
+                </span>
+              </label>
             </div>
           </div>
         </sonic-modal-content>
@@ -1072,10 +1086,15 @@ export class GlEditorPage extends LitElement {
 
   #renderDynamicsModal() {
     const gate = this.dynamicsMode === "gate";
+    const m = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="22rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.dynamicsModalOpen}
         @hide=${this.#onDynamicsModalHide}
       >
@@ -1083,29 +1102,33 @@ export class GlEditorPage extends LitElement {
         <sonic-modal-content>
           <div class="flex flex-col gap-3">
             <p class="m-0 text-xs text-neutral-500">${t("editor.dynamicsHint")}</p>
-            <div class="flex flex-wrap gap-[0.35rem]" role="radiogroup">
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                ?active=${gate}
-                @click=${() => {
-                  this.dynamicsMode = "gate";
-                }}
-              >
-                ${t("editor.dynamicsGate")}
-              </sonic-button>
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                ?active=${!gate}
-                @click=${() => {
-                  this.dynamicsMode = "compress";
-                }}
-              >
-                ${t("editor.dynamicsCompress")}
-              </sonic-button>
+            <div
+              class="flex flex-col gap-2"
+              role="radiogroup"
+              aria-label=${t("editor.dynamicsTitle")}
+            >
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="gl-dynamics-mode"
+                  .checked=${gate}
+                  @change=${() => {
+                    this.dynamicsMode = "gate";
+                  }}
+                />
+                <span class="text-sm">${t("editor.dynamicsGate")}</span>
+              </label>
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="gl-dynamics-mode"
+                  .checked=${!gate}
+                  @change=${() => {
+                    this.dynamicsMode = "compress";
+                  }}
+                />
+                <span class="text-sm">${t("editor.dynamicsCompress")}</span>
+              </label>
             </div>
             <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
               >${t("editor.dynamicsThreshold")}
@@ -1269,10 +1292,15 @@ export class GlEditorPage extends LitElement {
   #renderForceRoleModal() {
     const roles = ExprRoleSchema.options;
     const current = this.sample?.forceRole ?? null;
+    const m = GL_MODAL_PRESETS.form;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="24rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.forceRoleModalOpen}
         @hide=${() => {
           this.forceRoleModalOpen = false;
@@ -1282,27 +1310,31 @@ export class GlEditorPage extends LitElement {
         <sonic-modal-content>
           <div class="flex flex-col gap-3">
             <p class="m-0 text-xs text-neutral-500">${t("editor.forceRoleHint")}</p>
-            <div class="flex flex-wrap gap-[0.35rem]">
-              <sonic-button
-                size="sm"
-                variant="outline"
-                type="neutral"
-                ?active=${current == null}
-                @click=${() => void this.#setForceRole(null)}
-              >
-                ${t("editor.forceRoleAuto")}
-              </sonic-button>
+            <div
+              class="flex flex-col gap-2"
+              role="radiogroup"
+              aria-label=${t("editor.forceRole")}
+            >
+              <label class="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="gl-force-role"
+                  .checked=${current == null}
+                  @change=${() => void this.#setForceRole(null)}
+                />
+                <span class="text-sm">${t("editor.forceRoleAuto")}</span>
+              </label>
               ${roles.map(
                 (role) => html`
-                  <sonic-button
-                    size="sm"
-                    variant="outline"
-                    type="neutral"
-                    ?active=${current === role}
-                    @click=${() => void this.#setForceRole(role)}
-                  >
-                    ${role}
-                  </sonic-button>
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="gl-force-role"
+                      .checked=${current === role}
+                      @change=${() => void this.#setForceRole(role)}
+                    />
+                    <span class="text-sm">${role}</span>
+                  </label>
                 `,
               )}
             </div>
@@ -1332,10 +1364,15 @@ export class GlEditorPage extends LitElement {
   }
 
   #renderDocsModal() {
+    const m = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="28rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.docsModalOpen}
         @hide=${() => {
           this.docsModalOpen = false;
@@ -1376,10 +1413,15 @@ export class GlEditorPage extends LitElement {
   }
 
   #renderSettingsModal(hasSel: boolean) {
+    const m = GL_MODAL_PRESETS.panel;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="28rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.settingsOpen}
         @hide=${() => {
           this.settingsOpen = false;

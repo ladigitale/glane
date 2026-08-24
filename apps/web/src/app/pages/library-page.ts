@@ -19,6 +19,7 @@ import {
   isProcessingBusy,
   isProcessingError,
   processQueue,
+  SAMPLE_UPDATED_EVENT,
 } from "../process-queue.js";
 import {
   SAMPLE_ML_EVENT,
@@ -79,6 +80,9 @@ import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
 import type { MoreMenuEntry } from "../more-menu.js";
 import { chromeMore, renderMoreMenu } from "../more-menu.js";
+import { patchSampleInQueue } from "../sample-queue-patch.js";
+import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
 import "../sample-info.js";
 import "@supersoniks/concorde/fieldset";
@@ -88,7 +92,6 @@ import "@supersoniks/concorde/table";
 import "@supersoniks/concorde/table-tbody";
 import "@supersoniks/concorde/table-tr";
 import "@supersoniks/concorde/table-td";
-import "@supersoniks/concorde/table-caption";
 
 
 const SAMPLE_CLASSES: Array<SampleClass | "all"> = [
@@ -176,11 +179,8 @@ export class GlLibraryPage extends LitElement {
   #engine: TransportEngine | null = null;
   #lastTapAt = 0;
   #lastTapId: string | null = null;
-  #unsubProc: (() => void) | null = null;
   #unsubDemucs: (() => void) | null = null;
   #unsubDenoise: (() => void) | null = null;
-  #lastProcRemaining = -1;
-  #lastProcError = -1;
   #demucsWaveActive = false;
   #denoiseWaveActive = false;
 
@@ -195,24 +195,16 @@ export class GlLibraryPage extends LitElement {
       semantic: "",
     });
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
-    window.addEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
-    window.addEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
-    window.addEventListener(SAMPLE_DENOISE_EVENT, this.#onMlDone);
-    window.addEventListener(SAMPLE_CLAP_EVENT, this.#onMlDone);
+    window.addEventListener(SAMPLE_UPDATED_EVENT, this.#onSampleRowPatch);
+    window.addEventListener(SAMPLE_ML_EVENT, this.#onSampleEvolved);
+    window.addEventListener(SAMPLE_STEMS_EVENT, this.#onSampleEvolved);
+    window.addEventListener(SAMPLE_DENOISE_EVENT, this.#onSampleEvolved);
+    window.addEventListener(SAMPLE_CLAP_EVENT, this.#onSampleEvolved);
+    window.addEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
     window.addEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
     window.addEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
     window.addEventListener(DENOISE_QUEUE_EVENT, this.#onDenoiseQueue);
     void this.#reload();
-    this.#unsubProc = processQueue.subscribe((s) => {
-      if (
-        s.remaining !== this.#lastProcRemaining ||
-        s.error !== this.#lastProcError
-      ) {
-        this.#lastProcRemaining = s.remaining;
-        this.#lastProcError = s.error;
-        void this.#reload();
-      }
-    });
     this.#unsubDemucs = demucsQueue.subscribe((s) => this.#applyDemucsSnap(s));
     this.#unsubDenoise = denoiseQueue.subscribe((s) => this.#applyDenoiseSnap(s));
   }
@@ -220,15 +212,16 @@ export class GlLibraryPage extends LitElement {
   override disconnectedCallback(): void {
     chromeMore.clear();
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
-    window.removeEventListener(SAMPLE_ML_EVENT, this.#onMlDone);
-    window.removeEventListener(SAMPLE_STEMS_EVENT, this.#onMlDone);
-    window.removeEventListener(SAMPLE_DENOISE_EVENT, this.#onMlDone);
-    window.removeEventListener(SAMPLE_CLAP_EVENT, this.#onMlDone);
+    window.removeEventListener(SAMPLE_UPDATED_EVENT, this.#onSampleRowPatch);
+    window.removeEventListener(SAMPLE_ML_EVENT, this.#onSampleEvolved);
+    window.removeEventListener(SAMPLE_STEMS_EVENT, this.#onSampleEvolved);
+    window.removeEventListener(SAMPLE_DENOISE_EVENT, this.#onSampleEvolved);
+    window.removeEventListener(SAMPLE_CLAP_EVENT, this.#onSampleEvolved);
+    window.removeEventListener(SAMPLES_CULLED_EVENT, this.#onSamplesCulled);
     window.removeEventListener(CLAP_STATUS_EVENT, this.#onClapStatus);
     window.removeEventListener(DEMUCS_QUEUE_EVENT, this.#onDemucsQueue);
     window.removeEventListener(DENOISE_QUEUE_EVENT, this.#onDenoiseQueue);
     if (this.#clapTimer != null) window.clearTimeout(this.#clapTimer);
-    this.#unsubProc?.();
     this.#unsubDemucs?.();
     this.#unsubDenoise?.();
     this.#engine?.stop();
@@ -354,15 +347,36 @@ export class GlLibraryPage extends LitElement {
     });
   }
 
+  #onSampleRowPatch = (ev: Event): void => {
+    const sampleId = (ev as CustomEvent<{ sampleId?: string }>).detail?.sampleId;
+    if (!sampleId) return;
+    void patchSampleInQueue(libraryQueueKey.path, sampleId);
+  };
+
+  /** ML / stems — patch one row; full reload when new child samples appear. */
+  #onSampleEvolved = (ev: Event): void => {
+    const d = (ev as CustomEvent<{ sampleId?: string; childIds?: string[] }>)
+      .detail;
+    if (d?.childIds?.length) {
+      void this.#reload();
+      return;
+    }
+    if (d?.sampleId) {
+      void patchSampleInQueue(libraryQueueKey.path, d.sampleId);
+      return;
+    }
+    void this.#reload();
+  };
+
+  #onSamplesCulled = (): void => {
+    void this.#reload();
+  };
+
   #onProjectChange = (): void => {
     set(libraryFiltersKey.sessionFilter, "");
     set(libraryFiltersKey.tagFilter, []);
     setSampleListOrder(null);
     set(libraryFiltersKey.semantic, "");
-    void this.#reload();
-  };
-
-  #onMlDone = (): void => {
     void this.#reload();
   };
 
@@ -550,10 +564,15 @@ export class GlLibraryPage extends LitElement {
     const classActive = !!(this.classFilter && this.classFilter !== "all");
     const filtersActive =
       classActive || !!this.sessionFilter || this.tagFilter.length > 0;
+    const m = GL_MODAL_PRESETS.form;
     return html`
       <sonic-modal
-        align="left"
-        maxWidth="22rem"
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.filtersModalOpen}
         @hide=${() => {
           this.filtersModalOpen = false;
@@ -847,35 +866,9 @@ export class GlLibraryPage extends LitElement {
           </p>`
         : nothing}
 
-      <sonic-table
-        size="sm"
-        bordered
-        rounded
-        maxHeight="calc(100dvh - 14rem)"
-      >
-        <sonic-tbody
-          formDataProvider=${libraryFiltersKey.path}
-          dataFilterProvider=${libraryFiltersKey.path}
-        >
-          ${this.queueMounted && endpoint
-            ? html`
-                <sonic-queue
-                  class="table-queue"
-                  lazyload
-                  dataProvider=${libraryQueueKey.path}
-                  dataProviderExpression=${endpoint}
-                  dataFilterProvider=${libraryFiltersKey.path}
-                  key="data"
-                  limit="15"
-                  idKey="id"
-                  .items=${this.#renderSampleRow}
-                  .noItems=${this.#noSampleItems}
-                ></sonic-queue>
-              `
-            : nothing}
-        </sonic-tbody>
-        <sonic-caption
-          class="flex items-center justify-between gap-2"
+      <div class="flex flex-col gap-1.5">
+        <div
+          class="flex items-center justify-between gap-2 text-xs text-neutral-500"
           title=${filterCaption || undefined}
         >
           <input
@@ -895,8 +888,36 @@ export class GlLibraryPage extends LitElement {
               n: this.listTotal,
             })}</span
           >
-        </sonic-caption>
-      </sonic-table>
+        </div>
+        <sonic-table
+          size="sm"
+          bordered
+          rounded
+          maxHeight="calc(100dvh - 14rem)"
+        >
+          <sonic-tbody
+            formDataProvider=${libraryFiltersKey.path}
+            dataFilterProvider=${libraryFiltersKey.path}
+          >
+            ${this.queueMounted && endpoint
+              ? html`
+                  <sonic-queue
+                    class="table-queue"
+                    lazyload
+                    dataProvider=${libraryQueueKey.path}
+                    dataProviderExpression=${endpoint}
+                    dataFilterProvider=${libraryFiltersKey.path}
+                    key="data"
+                    limit="15"
+                    idKey="id"
+                    .items=${this.#renderSampleRow}
+                    .noItems=${this.#noSampleItems}
+                  ></sonic-queue>
+                `
+              : nothing}
+          </sonic-tbody>
+        </sonic-table>
+      </div>
       ${!this.sieve && this.listTotal > 0
         ? html`
             <div

@@ -18,6 +18,8 @@ import { buildAutoSampleName } from "./sample-auto-name.js";
 export type { ProcessJob, ProcessJobStatus } from "./db.js";
 
 export const SAMPLE_PROCESSED_EVENT = "glane:sample-processed";
+/** Row-level refresh (processing tags, metadata) — prefer over sonic-queue remount. */
+export const SAMPLE_UPDATED_EVENT = "glane:sample-updated";
 
 const PROCESSING_TAGS = [
   "processing:pending",
@@ -141,7 +143,14 @@ export const processQueue = (() => {
     });
   }
 
+  function notifySampleUpdated(sampleId: string): void {
+    window.dispatchEvent(
+      new CustomEvent(SAMPLE_UPDATED_EVENT, { detail: { sampleId } }),
+    );
+  }
+
   function notifyProcessed(sampleId: string): void {
+    notifySampleUpdated(sampleId);
     window.dispatchEvent(
       new CustomEvent(SAMPLE_PROCESSED_EVENT, { detail: { sampleId } }),
     );
@@ -183,6 +192,7 @@ export const processQueue = (() => {
       tags: [...stripProcessingTags(sample.tags ?? []), `processing:${status}`],
       updatedAt: nowIso(),
     });
+    notifySampleUpdated(sampleId);
   }
 
   function ensureWorker(): Worker {

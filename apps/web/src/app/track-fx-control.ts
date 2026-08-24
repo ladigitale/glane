@@ -26,6 +26,7 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { glIcon } from "./icon.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
 import "@supersoniks/concorde/fieldset";
 
 const FX_LABEL: Record<TrackFxType, string> = {
@@ -312,28 +313,7 @@ export class GlTrackFxControl extends LitElement {
             : nothing}
         </div>
       </sonic-pop>
-      <sonic-modal
-        align="left"
-        maxWidth="22rem"
-        .visible=${this.settingsOpen}
-        @hide=${this.#onHideSettings}
-      >
-        <sonic-modal-title
-          >${hasWet
-            ? `${FX_LABEL[fx.type]} — paramètres`
-            : hasFilters
-              ? "Filtres"
-              : "Paramètres"}</sonic-modal-title
-        >
-        <sonic-modal-content>
-          ${this.#params(fx)}
-        </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            Fermer
-          </sonic-button>
-        </sonic-modal-actions>
-      </sonic-modal>
+      ${this.#renderSettingsModal(fx, hasWet, hasFilters)}
     `;
   }
 
@@ -532,6 +512,38 @@ export class GlTrackFxControl extends LitElement {
   #onHideSettings = (): void => {
     this.settingsOpen = false;
   };
+
+  #renderSettingsModal(fx: TrackFx, hasWet: boolean, hasFilters: boolean) {
+    const m = GL_MODAL_PRESETS.form;
+    return html`
+      <sonic-modal
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
+        .visible=${this.settingsOpen}
+        @hide=${this.#onHideSettings}
+      >
+        <sonic-modal-title
+          >${hasWet
+            ? `${FX_LABEL[fx.type]} — paramètres`
+            : hasFilters
+              ? "Filtres"
+              : "Paramètres"}</sonic-modal-title
+        >
+        <sonic-modal-content>
+          ${this.#params(fx)}
+        </sonic-modal-content>
+        <sonic-modal-actions>
+          <sonic-button hideModal variant="outline" type="neutral">
+            Fermer
+          </sonic-button>
+        </sonic-modal-actions>
+      </sonic-modal>
+    `;
+  }
 
   #apply = (): void => {
     this.#hidePop();

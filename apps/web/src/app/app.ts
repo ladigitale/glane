@@ -101,6 +101,16 @@ export class GlApp extends LitElement {
         min-height: 0;
         overflow: hidden;
       }
+      /* Guest landing: full-viewport canvas, no page scroll (Tadaaa home). */
+      main:has(gl-landing-page) {
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      main > gl-landing-page {
+        flex: 1;
+        min-height: 0;
+      }
       /* Ghost [active] uses --sc-base-100 — same as header bg-neutral-100 → invisible. */
       sonic-menu-item[active]::part(button) {
         background: var(--sc-base-200);
