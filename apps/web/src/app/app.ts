@@ -21,7 +21,9 @@ import { paletteKey, prefsFormKey, projectPickKey } from "./dp-keys.js";
 import type { PrefsForm } from "./dp-keys.js";
 import "./locale-switch.js";
 import { glDialog } from "./dialog.js";
+import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
 import { glBrandMark, glIcon } from "./icon.js";
+import { tip } from "./tip.js";
 import {
   chromeMore,
   renderMoreMenu,
@@ -277,6 +279,8 @@ export class GlApp extends LitElement {
 
     this.#path = nextPath;
     this.route = toRoute;
+    // Drop page chrome more immediately; the new page republishes if needed.
+    chromeMore.clear();
   }
 
   #onProjectChange = (): void => {
@@ -466,20 +470,22 @@ export class GlApp extends LitElement {
     const section = this.#sectionLabel();
     const parent = this.#chromeParentRoute();
     const parentLabel = this.#chromeParentLabel();
-    const up = html`
-      <sonic-button
-        href=${pathFor(parent)}
-        ?pushState=${true}
-        shape="circle"
-        variant="ghost"
-        size="sm"
-        class="shrink-0"
-        data-aria-label=${parentLabel}
-        title=${parentLabel}
-      >
-        ${glIcon("arrow-left", { size: "sm" })}
-      </sonic-button>
-    `;
+    const up = tip(
+      parentLabel,
+      html`
+        <sonic-button
+          href=${pathFor(parent)}
+          ?pushState=${true}
+          shape="circle"
+          variant="ghost"
+          size="sm"
+          class="shrink-0"
+          data-aria-label=${parentLabel}
+        >
+          ${glIcon("arrow-left", { size: "sm" })}
+        </sonic-button>
+      `,
+    );
 
     /** Top-level access pages: single crumb, switch among account / privacy / diagnostic. */
     if (this.#isAccessRoute()) {
@@ -736,7 +742,7 @@ export class GlApp extends LitElement {
     if (this.#chromeLess()) {
       return html`
         <sonic-theme
-          theme=${this.themeMode}
+          theme=${this.themeMode === "dark" ? "dark" : nothing}
           background
           color
           font
@@ -754,7 +760,7 @@ export class GlApp extends LitElement {
 
     return html`
       <sonic-theme
-        theme=${this.themeMode}
+        theme=${this.themeMode === "dark" ? "dark" : nothing}
         background
         color
         font
@@ -768,16 +774,20 @@ export class GlApp extends LitElement {
             class="sticky top-0 z-10 flex min-w-0 shrink-0 items-center gap-1.5 bg-neutral-100 px-3 py-2"
           >
             <sonic-pop class="inline-block shrink-0" placement="bottom">
-              <sonic-button
-                shape="circle"
-                size="sm"
-                variant="ghost"
-                type="neutral"
-                data-aria-label=${t("nav.menu")}
-                title=${t("nav.menu")}
-              >
-                ${glIcon("menu", { size: "lg" })}
-              </sonic-button>
+              ${tip(
+                t("nav.menu"),
+                html`
+                  <sonic-button
+                    shape="circle"
+                    size="sm"
+                    variant="ghost"
+                    type="neutral"
+                    data-aria-label=${t("nav.menu")}
+                  >
+                    ${glIcon("menu", { size: "lg" })}
+                  </sonic-button>
+                `,
+              )}
               ${this.#mainNavMenu()}
             </sonic-pop>
 
@@ -802,39 +812,45 @@ export class GlApp extends LitElement {
                   </sonic-badge>`
                 : nothing}
               ${this.proc.error > 0
-                ? html`<sonic-button
-                    size="sm"
-                    variant="outline"
-                    type="warning"
-                    title=${tf("process.retryAll", {
+                ? tip(
+                    tf("process.retryAll", {
                       n: String(this.proc.error),
-                    })}
-                    data-aria-label=${tf("process.retryAll", {
-                      n: String(this.proc.error),
-                    })}
-                    @click=${() => void processQueue.retryUnfinished()}
-                  >
-                    ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
-                    ${this.proc.error}
-                  </sonic-button>`
+                    }),
+                    html`<sonic-button
+                      size="sm"
+                      variant="outline"
+                      type="warning"
+                      data-aria-label=${tf("process.retryAll", {
+                        n: String(this.proc.error),
+                      })}
+                      @click=${() => void processQueue.retryUnfinished()}
+                    >
+                      ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+                      ${this.proc.error}
+                    </sonic-button>`,
+                  )
                 : nothing}
-              <sonic-button
-                class="ml-0.5"
-                size="sm"
-                variant="ghost"
-                type="neutral"
-                title="Alt+K"
-                data-aria-label=${t("cmd.palette")}
-                @click=${() => {
-                  this.paletteOpen = true;
-                  set(paletteKey, { q: "" });
-                }}
-              >
-                ${glIcon("search", { slot: "prefix", size: "sm" })}
-                <span class="hidden text-neutral-500 sm:inline"
-                  >${t("nav.search")}</span
-                >
-              </sonic-button>
+              ${tip(
+                `${t("cmd.palette")} (Alt+K)`,
+                html`
+                  <sonic-button
+                    class="ml-0.5"
+                    size="sm"
+                    variant="ghost"
+                    type="neutral"
+                    data-aria-label=${t("cmd.palette")}
+                    @click=${() => {
+                      this.paletteOpen = true;
+                      set(paletteKey, { q: "" });
+                    }}
+                  >
+                    ${glIcon("search", { slot: "prefix", size: "sm" })}
+                    <span class="hidden text-neutral-500 sm:inline"
+                      >${t("nav.search")}</span
+                    >
+                  </sonic-button>
+                `,
+              )}
             </div>
           </header>
           ${this.proc.remaining > 0
@@ -865,7 +881,7 @@ export class GlApp extends LitElement {
             </div>
             ${this.#page()}
           </main>
-          ${this.paletteOpen ? this.#palette(links) : nothing}
+          ${this.#palette(links)}
         </sonic-scope>
       </sonic-theme>
     `;
@@ -933,49 +949,57 @@ export class GlApp extends LitElement {
       },
     ].filter((i) => i.label.toLowerCase().includes(q));
 
+    const m = GL_MODAL_PRESETS.form;
     return html`
-      <div
-        class="fixed inset-0 z-50 flex items-start justify-center bg-black/55 pt-[15vh]"
-        @click=${() => (this.paletteOpen = false)}
+      <sonic-modal
+        align=${m.align}
+        paddingX=${m.paddingX}
+        paddingY=${m.paddingY}
+        maxWidth=${m.maxWidth}
+        maxHeight=${m.maxHeight}
+        .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
+        .visible=${this.paletteOpen}
+        @hide=${() => {
+          this.paletteOpen = false;
+        }}
       >
-        <panel
-          class="block w-[min(28rem,92vw)] rounded-[10px] bg-neutral-100 p-3"
-          formDataProvider=${paletteKey.path}
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <sonic-input
-            name="q"
-            type="search"
-            size="lg"
-            inlineContent
-            placeholder=${t("cmd.palette")}
-            autofocus
-          >
-            ${glIcon("search", { slot: "prefix", size: "md" })}
-          </sonic-input>
-          <ul class="mt-2 flex list-none flex-col gap-1 p-0">
-            ${items.map(
-              (i) => html`
-                <li>
-                  <sonic-button
-                    shape="block"
-                    variant="ghost"
-                    type="neutral"
-                    align="left"
-                    @click=${() => {
-                      this.paletteOpen = false;
-                      i.run();
-                    }}
-                  >
-                    ${glIcon(i.icon, { slot: "prefix", size: "sm" })}
-                    ${i.label}
-                  </sonic-button>
-                </li>
-              `,
-            )}
-          </ul>
-        </panel>
-      </div>
+        <sonic-modal-title>${t("nav.search")}</sonic-modal-title>
+        <sonic-modal-content>
+          <panel formDataProvider=${paletteKey.path}>
+            <sonic-input
+              name="q"
+              type="search"
+              size="lg"
+              inlineContent
+              placeholder=${t("cmd.palette")}
+              autofocus
+            >
+              ${glIcon("search", { slot: "prefix", size: "md" })}
+            </sonic-input>
+            <ul class="mt-2 flex list-none flex-col gap-1 p-0">
+              ${items.map(
+                (i) => html`
+                  <li>
+                    <sonic-button
+                      shape="block"
+                      variant="ghost"
+                      type="neutral"
+                      align="left"
+                      @click=${() => {
+                        this.paletteOpen = false;
+                        i.run();
+                      }}
+                    >
+                      ${glIcon(i.icon, { slot: "prefix", size: "sm" })}
+                      ${i.label}
+                    </sonic-button>
+                  </li>
+                `,
+              )}
+            </ul>
+          </panel>
+        </sonic-modal-content>
+      </sonic-modal>
     `;
   }
 

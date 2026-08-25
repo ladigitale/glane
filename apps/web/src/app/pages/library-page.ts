@@ -11,7 +11,7 @@ import tailwind from "../../css/tailwind";
 import { subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import { db, ensurePrefs } from "../db.js";
-import { t, tf } from "../i18n/messages.js";
+import { soundCountLabel, t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { clearEditorHandoff } from "../editor-handoff.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
@@ -80,12 +80,14 @@ import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
 import type { MoreMenuEntry } from "../more-menu.js";
 import { chromeMore, renderMoreMenu } from "../more-menu.js";
+import { renderSamplePlayButton } from "../sample-play-button.js";
+import { tip } from "../tip.js";
 import { patchSampleInQueue } from "../sample-queue-patch.js";
 import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
 import "../sample-info.js";
-import "@supersoniks/concorde/fieldset";
+import "@supersoniks/concorde/checkbox";
 import "@supersoniks/concorde/form-layout";
 import "@supersoniks/concorde/queue";
 import "@supersoniks/concorde/table";
@@ -341,6 +343,7 @@ export class GlLibraryPage extends LitElement {
   }
 
   #syncChromeMore(): void {
+    if (!this.isConnected) return;
     chromeMore.set({
       ariaLabel: t("library.batchMore"),
       items: this.#batchMoreItems(),
@@ -580,70 +583,68 @@ export class GlLibraryPage extends LitElement {
       >
         <sonic-modal-title>${t("library.filters")}</sonic-modal-title>
         <sonic-modal-content>
-          <sonic-fieldset>
-            <sonic-form-layout>
-              <gl-pop-select
-                class="w-full max-w-full"
-                size="sm"
-                label=${t("library.filterClass")}
-                .value=${this.classFilter && this.classFilter !== "all"
-                  ? this.classFilter
-                  : "all"}
-                .options=${SAMPLE_CLASSES.map((c) => ({
-                  value: c,
-                  label: c === "all" ? t("library.allClasses") : c,
-                }))}
-                placeholder=${t("library.allClasses")}
-                searchPlaceholder=${t("library.popSearch")}
-                ?active=${classActive}
-                @gl-change=${(e: CustomEvent<{ value: string }>) => {
-                  set(
-                    libraryFiltersKey.classFilter,
-                    e.detail.value as SampleClass | "all",
-                  );
-                  this.selected = new Set();
-                }}
-              ></gl-pop-select>
-              <gl-pop-select
-                class="w-full max-w-full"
-                size="sm"
-                label=${t("library.filterSession")}
-                .value=${this.sessionFilter}
-                .options=${[
-                  { value: "", label: t("library.allSessions") },
-                  ...this.#sessionOptions.map((o) => ({
-                    value: o.id,
-                    label: `${o.label} (${o.count})`,
-                  })),
-                ]}
-                placeholder=${t("library.allSessions")}
-                searchPlaceholder=${t("library.popSearch")}
-                ?active=${!!this.sessionFilter}
-                @gl-change=${(e: CustomEvent<{ value: string }>) => {
-                  set(libraryFiltersKey.sessionFilter, e.detail.value);
-                  this.selected = new Set();
-                }}
-              ></gl-pop-select>
-              <gl-pop-select
-                class="w-full max-w-full"
-                size="sm"
-                multiple
-                label=${t("library.filterTag")}
-                .values=${this.tagFilter}
-                .options=${[
-                  { value: "", label: t("library.allTags") },
-                  ...this.#tagOptions,
-                ]}
-                placeholder=${t("library.allTags")}
-                searchPlaceholder=${t("library.popSearch")}
-                ?active=${this.tagFilter.length > 0}
-                @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
-                  set(libraryFiltersKey.tagFilter, e.detail.values);
-                  this.selected = new Set();
-                }}
-              ></gl-pop-select>
-            </sonic-form-layout>
-          </sonic-fieldset>
+          <sonic-form-layout>
+            <gl-pop-select
+              class="w-full max-w-full"
+              size="sm"
+              label=${t("library.filterClass")}
+              .value=${this.classFilter && this.classFilter !== "all"
+                ? this.classFilter
+                : "all"}
+              .options=${SAMPLE_CLASSES.map((c) => ({
+                value: c,
+                label: c === "all" ? t("library.allClasses") : c,
+              }))}
+              placeholder=${t("library.allClasses")}
+              searchPlaceholder=${t("library.popSearch")}
+              ?active=${classActive}
+              @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                set(
+                  libraryFiltersKey.classFilter,
+                  e.detail.value as SampleClass | "all",
+                );
+                this.selected = new Set();
+              }}
+            ></gl-pop-select>
+            <gl-pop-select
+              class="w-full max-w-full"
+              size="sm"
+              label=${t("library.filterSession")}
+              .value=${this.sessionFilter}
+              .options=${[
+                { value: "", label: t("library.allSessions") },
+                ...this.#sessionOptions.map((o) => ({
+                  value: o.id,
+                  label: `${o.label} (${o.count})`,
+                })),
+              ]}
+              placeholder=${t("library.allSessions")}
+              searchPlaceholder=${t("library.popSearch")}
+              ?active=${!!this.sessionFilter}
+              @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                set(libraryFiltersKey.sessionFilter, e.detail.value);
+                this.selected = new Set();
+              }}
+            ></gl-pop-select>
+            <gl-pop-select
+              class="w-full max-w-full"
+              size="sm"
+              multiple
+              label=${t("library.filterTag")}
+              .values=${this.tagFilter}
+              .options=${[
+                { value: "", label: t("library.allTags") },
+                ...this.#tagOptions,
+              ]}
+              placeholder=${t("library.allTags")}
+              searchPlaceholder=${t("library.popSearch")}
+              ?active=${this.tagFilter.length > 0}
+              @gl-change=${(e: CustomEvent<{ values: string[] }>) => {
+                set(libraryFiltersKey.tagFilter, e.detail.values);
+                this.selected = new Set();
+              }}
+            ></gl-pop-select>
+          </sonic-form-layout>
         </sonic-modal-content>
         <sonic-modal-actions>
           <sonic-button
@@ -690,21 +691,38 @@ export class GlLibraryPage extends LitElement {
           vAlign="middle"
           @click=${() => void this.#onRowClick(s)}
         >
-          <div>${s.userName ?? s.name}</div>
-          <div class="font-mono text-xs text-neutral-500">
-            ${s.captureName ? `${s.captureName} · ` : ""}${s.class}
-            · ${s.durationMs}ms
-            ${s.loopProposed ? " · boucle" : ""}${
-              isProcessingBusy(s.tags)
-                ? ` · ${t("library.processing")}`
-                : isProcessingError(s.tags)
-                  ? ` · ${t("library.processingError")}`
-                  : ""
-            }
-            ${(s.tags ?? []).length
-              ? ` · ${(s.tags ?? []).slice(0, 3).join(", ")}`
-              : ""}
-          </div>
+          ${tip(
+            t("library.rowHint"),
+            html`
+              <div>${s.userName ?? s.name}</div>
+              <div class="font-mono text-xs text-neutral-500">
+                ${s.captureName ? `${s.captureName} · ` : ""}${s.class}
+                · ${s.durationMs}ms
+                ${s.loopProposed ? " · boucle" : ""}${
+                  isProcessingBusy(s.tags)
+                    ? ` · ${t("library.processing")}`
+                    : isProcessingError(s.tags)
+                      ? ` · ${t("library.processingError")}`
+                      : ""
+                }
+                ${(s.tags ?? []).length
+                  ? ` · ${(s.tags ?? []).slice(0, 3).join(", ")}`
+                  : ""}
+              </div>
+            `,
+            { class: "w-full max-w-full justify-start text-left", focusable: true },
+          )}
+        </sonic-td>
+        <sonic-td
+          width="2.5rem"
+          align="center"
+          vAlign="middle"
+          @click=${(e: Event) => e.stopPropagation()}
+        >
+          ${renderSamplePlayButton({
+            playing,
+            onClick: () => void this.#audition(s),
+          })}
         </sonic-td>
         <sonic-td
           width="2.5rem"
@@ -783,7 +801,7 @@ export class GlLibraryPage extends LitElement {
 
   #noSampleItems = () => html`
     <sonic-tr>
-      <sonic-td .colSpan=${3}>${t("library.empty")}</sonic-td>
+      <sonic-td .colSpan=${4}>${t("library.empty")}</sonic-td>
     </sonic-tr>
   `;
 
@@ -818,21 +836,25 @@ export class GlLibraryPage extends LitElement {
           ${glIcon("search", { slot: "prefix", size: "sm" })}
         </sonic-input>
         <div class="relative inline-block shrink-0 overflow-visible p-1 -m-1">
-          <sonic-button
-            shape="circle"
-            variant="ghost"
-            type=${filtersActive ? "primary" : "neutral"}
-            size="sm"
-            icon
-            ?active=${filtersActive}
-            data-aria-label=${t("library.filters")}
-            title=${filterCaption || t("library.filters")}
-            @click=${() => {
-              this.filtersModalOpen = true;
-            }}
-          >
-            ${glIcon("filter", { size: "sm" })}
-          </sonic-button>
+          ${tip(
+            filterCaption || t("library.filters"),
+            html`
+              <sonic-button
+                shape="circle"
+                variant="ghost"
+                type=${filtersActive ? "primary" : "neutral"}
+                size="sm"
+                icon
+                ?active=${filtersActive}
+                data-aria-label=${t("library.filters")}
+                @click=${() => {
+                  this.filtersModalOpen = true;
+                }}
+              >
+                ${glIcon("filter", { size: "sm" })}
+              </sonic-button>
+            `,
+          )}
           ${filterCount > 0
             ? html`<sonic-badge
                 type="danger"
@@ -867,28 +889,23 @@ export class GlLibraryPage extends LitElement {
         : nothing}
 
       <div class="flex flex-col gap-1.5">
-        <div
-          class="flex items-center justify-between gap-2 text-xs text-neutral-500"
-          title=${filterCaption || undefined}
+        <sonic-checkbox
+          class="text-xs text-neutral-500"
+          size="sm"
+          checksAll
+          title=${filterCaption || t("library.selectAll")}
+          .checked=${allFilteredSelected
+            ? true
+            : selectedCount > 0
+              ? "indeterminate"
+              : null}
+          ?disabled=${!this.listTotal}
+          @change=${() => void this.#toggleSelectAll()}
         >
-          <input
-            type="checkbox"
-            class="h-[18px] w-[18px] shrink-0 cursor-pointer accent-primary"
-            title=${t("library.selectAll")}
-            data-aria-label=${t("library.selectAll")}
-            .checked=${allFilteredSelected}
-            .indeterminate=${selectedCount > 0 && !allFilteredSelected}
-            ?disabled=${this.listTotal === 0}
-            @change=${() => void this.#toggleSelectAll()}
-          />
-          <span class="min-w-0 truncate text-right"
-            >${filterCaption
-              ? html`${filterCaption} · `
-              : nothing}${tf("common.soundCount", {
-              n: this.listTotal,
-            })}</span
-          >
-        </div>
+          ${filterCaption ? html`${filterCaption} · ` : nothing}${soundCountLabel(
+            this.listTotal,
+          )}
+        </sonic-checkbox>
         <sonic-table
           size="sm"
           bordered
@@ -923,16 +940,21 @@ export class GlLibraryPage extends LitElement {
             <div
               class="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] z-20 rounded-full shadow-[0_4px_18px_color-mix(in_srgb,#000_35%,transparent)]"
             >
-              <sonic-button
-                shape="circle"
-                type="primary"
-                size="lg"
-                icon
-                data-aria-label=${t("library.sieve")}
-                @click=${() => void this.#openSieve()}
-              >
-                ${glIcon("move-horizontal", { size: "md" })}
-              </sonic-button>
+              ${tip(
+                t("library.sieve"),
+                html`
+                  <sonic-button
+                    shape="circle"
+                    type="primary"
+                    size="lg"
+                    icon
+                    data-aria-label=${t("library.sieve")}
+                    @click=${() => void this.#openSieve()}
+                  >
+                    ${glIcon("move-horizontal", { size: "md" })}
+                  </sonic-button>
+                `,
+              )}
             </div>
           `
         : nothing}

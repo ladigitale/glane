@@ -1,15 +1,29 @@
 /**
- * Landing backdrop — immersive Three.js pipeline story.
- * Lazy-loaded; falls back to Canvas2D in gl-landing-flow when unavailable.
+ * Landing backdrop — one creative step at a time with morphing transitions
+ * (capture → detect → library → arrange → export). Lazy-loaded; Canvas2D fallback
+ * in gl-landing-flow when WebGL is unavailable.
  */
 import {
   landingBlendEase,
+  landingHandoff,
+  landingHandoffMotion,
+  landingHandoffOpacity,
   landingPhaseAt,
   landingPhaseClock,
+  landingPhaseMotionClock,
   landingPhaseProgress,
   landingPhaseVisibility,
   type LandingFlowPhaseId,
 } from "./landing-flow-phases";
+import {
+  BAR_N,
+  PARTICLE_WRAP_X,
+  WAVE_SPEED,
+  barX,
+  createBarTape,
+  waveTravel,
+  wrapCentered,
+} from "./landing-flow-scroll";
 
 export type LandingFlowTheme = {
   primary: string;
@@ -60,6 +74,9 @@ function applyGroupWeight(
   weight: number,
 ): void {
   group.visible = weight > 0.001;
+  // Opacity-only handoff — no scale morph so A-exit matches B-entry motion.
+  group.scale.setScalar(1);
+  group.position.z = 0;
   group.traverse((obj) => {
     const mats =
       "material" in obj && obj.material
@@ -89,15 +106,87 @@ function markGroupOpacity(group: InstanceType<ThreeMod["Group"]>): void {
   });
 }
 
-function waveScroll(elapsed: number, speed: number, span: number): number {
-  return -(((elapsed * speed) % span) + span) % span;
+const LIBRARY_N = 16;
+const CLIP_N = 12;
+const LANE_LEFT = -2.55;
+const LANE_RIGHT = 2.55;
+const LANE_SPAN = LANE_RIGHT - LANE_LEFT;
+/** Soft fade band at lane edges (arrival / exit). */
+const CLIP_EDGE_FADE = 0.62;
+const ARRANGE_SCROLL = 0.62;
+const CAPTURE_PARTICLES = 520;
+const AMBIENT_N = 120;
+
+function librarySlot(i: number): { x: number; y: number; z: number; tag: number } {
+  const tag = i % 3;
+  const rank = Math.floor(i / 3);
+  const perCol = Math.ceil(LIBRARY_N / 3);
+  return {
+    tag,
+    x: (tag - 1) * 1.15,
+    y: (rank - (perCol - 1) / 2) * 0.36,
+    z: 0.06,
+  };
 }
 
-const BAR_N = 72;
-const LIBRARY_N = 16;
-const CLIP_N = 14;
-const CAPTURE_PARTICLES = 520;
-const BG_N = 360;
+/** Settled (or mid-sort) pose in the classification bays. */
+function libraryLivePose(
+  i: number,
+  prog: number,
+  timeS: number,
+): { x: number; y: number; z: number; rx: number; ry: number; rz: number; s: number; tag: number } {
+  const slot = librarySlot(i);
+  const stagger = Math.min(
+    1,
+    Math.max(0, prog * 1.35 - Math.floor(i / 3) * 0.07 - slot.tag * 0.04),
+  );
+  const settle = easeOutCubic(stagger);
+  const chaosX = Math.sin(i * 2.1 + timeS * 1.2) * 1.4;
+  const chaosY = Math.cos(i * 1.6 + timeS * 0.9) * 0.85;
+  const chaosZ = Math.sin(i * 0.9 + timeS) * 0.45;
+  return {
+    tag: slot.tag,
+    x: slot.x * settle + chaosX * (1 - settle),
+    y: slot.y * settle + chaosY * (1 - settle),
+    z: slot.z * settle + chaosZ * (1 - settle),
+    rx: (1 - settle) * Math.sin(timeS * 1.4 + i) * 0.9,
+    ry: settle * (slot.tag * 0.02) + (1 - settle) * (timeS * 1.1 + i * 0.5),
+    rz: (1 - settle) * Math.cos(timeS + i * 0.7) * 0.6,
+    s: 0.92 + settle * 0.08,
+  };
+}
+
+/** Live sequencer pose for clip `i` (already scrolling). */
+function clipMovingPose(
+  i: number,
+  scroll: number,
+  laneY: number,
+): {
+  x: number;
+  y: number;
+  z: number;
+  len: number;
+  tag: number;
+  u: number;
+  edgeFade: number;
+} {
+  const seed = (i * 0.71) % (LANE_SPAN - 0.8);
+  const u = (((seed - scroll) % LANE_SPAN) + LANE_SPAN) % LANE_SPAN;
+  const gen = Math.floor((scroll + LANE_SPAN - seed) / LANE_SPAN);
+  const len = 0.36 + ((i * 3 + gen * 2) % 5) * 0.1;
+  const tag = (i + gen) % 3;
+  const enter = Math.min(1, Math.max(0, (LANE_SPAN - u) / CLIP_EDGE_FADE));
+  const exit = Math.min(1, Math.max(0, u / CLIP_EDGE_FADE));
+  return {
+    x: LANE_LEFT + u + len * 0.5,
+    y: laneY + 0.08,
+    z: 0.12,
+    len,
+    tag,
+    u,
+    edgeFade: easeOutCubic(enter) * easeOutCubic(exit),
+  };
+}
 
 /** Build the landing WebGL visualizer (dynamic three import). */
 export async function createLandingFlowThree(
@@ -148,59 +237,38 @@ export async function createLandingFlowThree(
   };
   for (const g of Object.values(groups)) contentRoot.add(g);
 
-  // Always-on backdrop — no empty frames between phases.
-  const backdrop = new THREE.Group();
-  contentRoot.add(backdrop);
-  const bgPos = new Float32Array(BG_N * 3);
-  const bgSeed = new Float32Array(BG_N);
-  for (let i = 0; i < BG_N; i++) {
-    bgSeed[i] = Math.random();
-    bgPos[i * 3] = (Math.random() - 0.5) * 14;
-    bgPos[i * 3 + 1] = (Math.random() - 0.5) * 8;
-    bgPos[i * 3 + 2] = (Math.random() - 0.5) * 6 - 2;
+  // Soft ambient dust only — no persistent waveform (wave lives in detect).
+  const ambient = new THREE.Group();
+  contentRoot.add(ambient);
+  const ambPos = new Float32Array(AMBIENT_N * 3);
+  const ambSeed = new Float32Array(AMBIENT_N);
+  for (let i = 0; i < AMBIENT_N; i++) {
+    ambSeed[i] = Math.random();
+    ambPos[i * 3] = (Math.random() - 0.5) * 14;
+    ambPos[i * 3 + 1] = (Math.random() - 0.5) * 8;
+    ambPos[i * 3 + 2] = (Math.random() - 0.5) * 6 - 2;
   }
-  const bgGeo = new THREE.BufferGeometry();
-  bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
-  backdrop.add(
+  const ambGeo = new THREE.BufferGeometry();
+  ambGeo.setAttribute("position", new THREE.BufferAttribute(ambPos, 3));
+  ambient.add(
     new THREE.Points(
-      bgGeo,
+      ambGeo,
       new THREE.PointsMaterial({
         color: primary,
-        size: 0.035,
+        size: 0.028,
         transparent: true,
-        opacity: 0.22,
+        opacity: 0.1,
         depthWrite: false,
       }),
     ),
   );
-
-  const barSpan = (BAR_N - 1) * 0.11;
-
-  // Persistent background waveform — always visible, never swapped per phase.
-  const bgWave = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(0.06, 1, 0.06),
-    new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      metalness: 0.2,
-      roughness: 0.55,
-      transparent: true,
-      opacity: 0.38,
-      depthWrite: false,
-    }),
-    BAR_N,
-  );
-  bgWave.position.y = 0;
-  bgWave.position.z = -0.35;
-  backdrop.add(bgWave);
-  for (let i = 0; i < BAR_N; i++) bgWave.setColorAt(i, muted);
-  if (bgWave.instanceColor) bgWave.instanceColor.needsUpdate = true;
 
   // —— capture: inbound sparks ——
   const capPos = new Float32Array(CAPTURE_PARTICLES * 3);
   const capSeed = new Float32Array(CAPTURE_PARTICLES);
   for (let i = 0; i < CAPTURE_PARTICLES; i++) {
     capSeed[i] = Math.random();
-    capPos[i * 3] = (Math.random() - 0.5) * 8;
+    capPos[i * 3] = (Math.random() - 0.5) * PARTICLE_WRAP_X;
     capPos[i * 3 + 1] = (Math.random() - 0.5) * 2.2;
     capPos[i * 3 + 2] = (Math.random() - 0.5) * 1.2;
   }
@@ -219,7 +287,26 @@ export async function createLandingFlowThree(
   groups.capture.add(capPts);
   markGroupOpacity(groups.capture);
 
-  // —— detect: scan plane overlay (wave lives in backdrop) ——
+  // —— detect: scrolling sample wave + scan (the “glean” step) ——
+  const SCAN_X = -0.15;
+  const bgWave = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(0.24, 1, 0.08),
+    new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      metalness: 0.2,
+      roughness: 0.55,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    }),
+    BAR_N,
+  );
+  bgWave.position.y = 0;
+  bgWave.position.z = -0.15;
+  groups.detect.add(bgWave);
+  for (let i = 0; i < BAR_N; i++) bgWave.setColorAt(i, muted);
+  if (bgWave.instanceColor) bgWave.instanceColor.needsUpdate = true;
+
   const scanPlane = new THREE.Mesh(
     new THREE.PlaneGeometry(0.08, 2.8),
     new THREE.MeshBasicMaterial({
@@ -229,7 +316,7 @@ export async function createLandingFlowThree(
       side: THREE.DoubleSide,
     }),
   );
-  scanPlane.position.set(-0.15, 0, 0.22);
+  scanPlane.position.set(SCAN_X, 0, 0.22);
   scanPlane.renderOrder = 11;
   groups.detect.add(scanPlane);
   const scanGlow = new THREE.Mesh(
@@ -242,51 +329,81 @@ export async function createLandingFlowThree(
       depthWrite: false,
     }),
   );
-  scanGlow.position.set(-0.15, 0, 0.28);
+  scanGlow.position.set(SCAN_X, 0, 0.28);
   scanGlow.renderOrder = 10;
   groups.detect.add(scanGlow);
   markGroupOpacity(groups.detect);
 
-  // —— library: gleaned samples on a shelf grid ——
-  const libraryMeshes: InstanceType<ThreeMod["Mesh"]>[] = [];
-  for (let i = 0; i < LIBRARY_N; i++) {
-    const col = tagCols[i % 3]!.clone();
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(0.42, 0.42, 0.14),
+  // —— library: mechanical sort — pieces nest into criteria columns (centered) ——
+  const libraryPieces: InstanceType<ThreeMod["Group"]>[] = [];
+  for (let c = 0; c < 3; c++) {
+    const guide = new THREE.Mesh(
+      new THREE.BoxGeometry(0.52, 2.35, 0.04),
       new THREE.MeshStandardMaterial({
-        color: col,
-        metalness: 0.4,
-        roughness: 0.35,
-        emissive: col,
-        emissiveIntensity: 0.08,
+        color: muted,
+        metalness: 0.15,
+        roughness: 0.7,
+        transparent: true,
+        opacity: 0.22,
       }),
     );
-    m.add(
-      new THREE.Mesh(
-        new THREE.BoxGeometry(0.44, 0.44, 0.15),
-        new THREE.MeshBasicMaterial({
-          color: primary,
-          wireframe: true,
+    guide.position.set((c - 1) * 1.15, 0, -0.2);
+    groups.library.add(guide);
+    for (const y of [-1.22, 1.22]) {
+      const rail = new THREE.Mesh(
+        new THREE.BoxGeometry(0.58, 0.05, 0.12),
+        new THREE.MeshStandardMaterial({
+          color: muted,
+          metalness: 0.25,
+          roughness: 0.55,
           transparent: true,
-          opacity: 0.18,
+          opacity: 0.4,
         }),
-      ),
-    );
-    groups.library.add(m);
-    libraryMeshes.push(m);
+      );
+      rail.position.set((c - 1) * 1.15, y, -0.08);
+      groups.library.add(rail);
+    }
   }
-  const shelf = new THREE.Mesh(
-    new THREE.BoxGeometry(4.2, 0.06, 1.4),
-    new THREE.MeshStandardMaterial({
-      color: muted,
-      metalness: 0.1,
-      roughness: 0.85,
-      transparent: true,
-      opacity: 0.35,
-    }),
-  );
-  shelf.position.y = -0.72;
-  groups.library.add(shelf);
+  for (let i = 0; i < LIBRARY_N; i++) {
+    const tag = i % 3;
+    const col = tagCols[tag]!.clone();
+    const piece = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.38, 0.28, 0.22),
+      new THREE.MeshStandardMaterial({
+        color: col,
+        metalness: 0.45,
+        roughness: 0.32,
+        emissive: col,
+        emissiveIntensity: 0.1,
+      }),
+    );
+    const tab = new THREE.Mesh(
+      new THREE.BoxGeometry(0.14, 0.1, 0.1),
+      new THREE.MeshStandardMaterial({
+        color: col,
+        metalness: 0.5,
+        roughness: 0.28,
+        emissive: col,
+        emissiveIntensity: 0.12,
+      }),
+    );
+    tab.position.set(0.22, 0, 0);
+    const mortise = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.12, 0.14),
+      new THREE.MeshStandardMaterial({
+        color: muted,
+        metalness: 0.2,
+        roughness: 0.6,
+        transparent: true,
+        opacity: 0.55,
+      }),
+    );
+    mortise.position.set(-0.2, 0, 0);
+    piece.add(body, tab, mortise);
+    groups.library.add(piece);
+    libraryPieces.push(piece);
+  }
   markGroupOpacity(groups.library);
 
   // —— arrange: multi-lane timeline ——
@@ -336,7 +453,7 @@ export async function createLandingFlowThree(
   groups.arrange.add(playhead);
   markGroupOpacity(groups.arrange);
 
-  // —— export: share pulse ——
+  // —— export: share pulse (thin line rings + opacity) ——
   const exportCore = new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.42, 1),
     new THREE.MeshStandardMaterial({
@@ -351,7 +468,7 @@ export async function createLandingFlowThree(
   const exportRings: InstanceType<ThreeMod["Mesh"]>[] = [];
   for (let i = 0; i < 4; i++) {
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(0.55 + i * 0.12, 0.018, 6, 64),
+      new THREE.TorusGeometry(0.55 + i * 0.12, 0.0018, 8, 128),
       new THREE.MeshBasicMaterial({
         color: primary,
         transparent: true,
@@ -376,42 +493,33 @@ export async function createLandingFlowThree(
   );
   groups.export.add(exportSparks);
   markGroupOpacity(groups.export);
-  markGroupOpacity(backdrop);
 
   const barDummy = new THREE.Object3D();
-  const tagForBar = (i: number, scroll: number): number => {
-    const raw = Math.floor(i * 0.17 + scroll * 0.08);
-    return ((raw % 3) + 3) % 3;
-  };
+  const tape = createBarTape();
 
   const setWaveBars = (
     mesh: InstanceType<ThreeMod["InstancedMesh"]>,
-    timeS: number,
-    scroll: number,
+    travel: number,
     colored: boolean,
     colorMix = 1,
   ) => {
+    tape.sync(travel);
     for (let i = 0; i < BAR_N; i++) {
-      const x = (i - BAR_N / 2) * 0.11 + scroll;
-      const mag =
-        0.1 +
-        0.5 *
-          Math.abs(
-            Math.sin(i * 0.62 + timeS * 4.2) * Math.cos(i * 0.31 + timeS * 2.1),
-          ) *
-          (0.65 + 0.35 * Math.sin(timeS * 1.4 + i * 0.08));
-      const ht = 0.12 + mag * 1.65;
-      barDummy.position.set(x, 0, 0);
+      const x = barX(i, travel);
+      const mag = tape.heights[i]!;
+      const ht = 0.18 + mag * 3.35;
+      const z = mag * 0.55;
+      barDummy.position.set(x, 0, z);
       barDummy.scale.set(1, ht, 1);
       barDummy.updateMatrix();
       mesh.setMatrixAt(i, barDummy.matrix);
       if (colored && mesh.instanceColor) {
-        const tag = tagForBar(i, scroll);
-        const past = x < -0.15;
-        if (past && colorMix >= 0.98) {
-          mesh.setColorAt(i, tagCols[tag]!);
-        } else if (past && colorMix > 0.02) {
-          const c = muted.clone().lerp(tagCols[tag]!, colorMix);
+        const tag = tape.tags[i]!;
+        const past = x < SCAN_X;
+        if (past && tag >= 0 && colorMix >= 0.98) {
+          mesh.setColorAt(i, tagCols[tag as 0 | 1 | 2]!);
+        } else if (past && tag >= 0 && colorMix > 0.02) {
+          const c = muted.clone().lerp(tagCols[tag as 0 | 1 | 2]!, colorMix);
           mesh.setColorAt(i, c);
         } else {
           mesh.setColorAt(i, muted);
@@ -422,40 +530,30 @@ export async function createLandingFlowThree(
     if (colored && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   };
 
-  const detectMix = (
-    timeS: number,
-    phase: ReturnType<typeof landingPhaseAt>,
-  ): number => {
-    const vis = landingPhaseVisibility(phase).detect;
-    if (vis <= 0.001) return 0;
-    const prog = landingPhaseProgress(timeS, "detect");
-    return vis * Math.min(1, prog * 1.4 + 0.15);
-  };
-
-  const driveBackdrop = (timeS: number, phase: ReturnType<typeof landingPhaseAt>) => {
-    const scroll = waveScroll(timeS * 0.42, 0.42, barSpan);
-    const mix = detectMix(timeS, phase);
-    setWaveBars(bgWave, timeS, scroll, mix > 0.02, mix);
-    const mat = bgWave.material as InstanceType<ThreeMod["MeshStandardMaterial"]>;
-    mat.opacity = 0.28 + mix * 0.18;
-  };
-
-  const driveCapture = (timeS: number, _prog: number, _weight = 1) => {
+  const driveCapture = (timeS: number, prog: number, weight = 1) => {
+    // Coalesce toward the wave line as we approach detect (morph cue).
+    const coalesce = easeOutCubic(Math.min(1, prog * 0.35 + (1 - weight) * 0.9));
     const arr = capGeo.getAttribute("position") as InstanceType<
       ThreeMod["BufferAttribute"]
     >;
     for (let i = 0; i < CAPTURE_PARTICLES; i++) {
       const s = capSeed[i]!;
-      const homeX = (s - 0.5) * 7.8;
+      const homeX = (s - 0.5) * (PARTICLE_WRAP_X * 0.92);
       const swirl = s * Math.PI * 2 + timeS * (0.55 + s * 0.28);
-      const drift = timeS * (0.028 + s * 0.014);
-      let x = homeX - drift + Math.sin(swirl * 0.65 + timeS * 0.35) * 0.42;
-      if (x < -4.1) x += 8.2;
-      if (x > 4.1) x -= 8.2;
-      const y =
+      const drift = (timeS * (0.028 + s * 0.014)) % PARTICLE_WRAP_X;
+      let x = wrapCentered(
+        homeX - drift + Math.sin(swirl * 0.65 + timeS * 0.35) * 0.42,
+        PARTICLE_WRAP_X,
+      );
+      let y =
         Math.sin(swirl * 1.2 + timeS * 0.55) * (0.32 + s * 0.48) +
         Math.cos(swirl * 0.5 + timeS * 0.9) * 0.24;
-      const z = Math.sin(swirl) * (0.22 + s * 0.32);
+      let z =
+        Math.sin(swirl) * (0.55 + s * 0.7) + Math.cos(swirl * 0.7) * 0.25;
+      // Pull into a flat sample band → becomes the detect wave.
+      y *= 1 - coalesce * 0.92;
+      z *= 1 - coalesce * 0.75;
+      x = x * (1 - coalesce * 0.15) + SCAN_X * coalesce * 0.15;
       arr.setX(i, x);
       arr.setY(i, y);
       arr.setZ(i, z);
@@ -464,49 +562,115 @@ export async function createLandingFlowThree(
   };
 
   const driveDetect = (timeS: number, prog: number, weight = 1) => {
-    const x = -0.15 + Math.sin(timeS * 2.8) * 0.04;
-    scanPlane.position.x = x;
-    scanGlow.position.x = x;
+    // Phase-local clock so each cycle restarts the tape at the same X.
+    const travel = waveTravel(landingPhaseClock(timeS, "detect"), WAVE_SPEED);
+    const colorMix = Math.min(1, prog * 1.4 + 0.15);
+    setWaveBars(bgWave, travel, true, colorMix);
+    const waveMat = bgWave.material as InstanceType<
+      ThreeMod["MeshStandardMaterial"]
+    >;
+    waveMat.opacity = (0.42 + colorMix * 0.2) * Math.max(weight, 0.001);
+
+    const x = SCAN_X + Math.sin(timeS * 2.8) * 0.04;
+    scanPlane.position.set(x, 0, 0.22);
+    scanGlow.position.set(x, 0, 0.28);
     (
       scanGlow.material as InstanceType<ThreeMod["MeshBasicMaterial"]>
     ).opacity = (0.05 + prog * 0.1) * weight;
   };
 
-  const driveLibrary = (timeS: number, prog: number, _weight = 1) => {
-    const settle = easeOutCubic(Math.min(1, prog * 1.05 + 0.08));
+  const driveLibrary = (timeS: number, prog: number, weight = 1) => {
+    // 1:1 handoff — same t as arrange (easeInOutCubic once, shared).
+    const scroll = landingPhaseMotionClock(timeS, "arrange") * ARRANGE_SCROLL;
     for (let i = 0; i < LIBRARY_N; i++) {
-      const col = i % 4;
-      const row = Math.floor(i / 4);
-      const tx = (col - 1.5) * 0.62;
-      const ty = 0.1 - row * 0.46;
-      const tz = (row % 2) * 0.06 - 0.03;
-      const m = libraryMeshes[i]!;
-      const fly = 1 - settle;
-      m.position.set(
-        tx + Math.sin(i * 1.7 + timeS * 0.4) * fly * 0.55,
-        ty + fly * (0.75 + (i % 3) * 0.12),
-        tz + fly * 0.2,
-      );
-      m.rotation.y = timeS * 0.25 + i * 0.3;
-      m.rotation.x = Math.sin(timeS * 0.8 + i) * 0.06 * (1 - fly);
+      const a = libraryLivePose(i, prog, timeS);
+      let x = a.x;
+      let y = a.y;
+      let z = a.z;
+      let rx = a.rx;
+      let ry = a.ry;
+      let rz = a.rz;
+      let sx = a.s;
+      let sy = a.s;
+      let sz = a.s;
+      // Non-handoff pieces follow group weight only.
+      let fade = weight * (0.55 + Math.min(1, prog) * 0.45);
+
+      if (i < CLIP_N) {
+        const b = clipMovingPose(i, scroll, lanes[i % 4]!.position.y);
+        const t = landingHandoffMotion(timeS, "library", "arrange", i);
+        const o = landingHandoffOpacity(timeS, "library", "arrange", i);
+        x = a.x + (b.x - a.x) * t;
+        y = a.y + (b.y - a.y) * t;
+        z = a.z + (b.z - a.z) * t;
+        rx = a.rx * (1 - t);
+        ry = a.ry * (1 - t);
+        rz = a.rz * (1 - t);
+        sx = a.s + (b.len / 0.55 - a.s) * t;
+        sy = a.s + (1 - a.s) * t;
+        sz = a.s + (1 - a.s) * t;
+        // Fast opacity exit (separate from motion ease).
+        fade = (1 - o) * (0.55 + 0.45 * Math.min(1, prog));
+      }
+
+      const m = libraryPieces[i]!;
+      m.position.set(x, y, z);
+      m.rotation.set(rx, ry, rz);
+      m.scale.set(sx, sy, sz);
+      m.traverse((obj) => {
+        if (!("material" in obj) || !obj.material) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const raw of mats) {
+          const mat = raw as OpacityMat;
+          mat.opacity = (mat.userData.baseOpacity ?? 1) * fade;
+        }
+      });
     }
-    shelf.position.y = -0.72 + (1 - settle) * 0.25;
   };
 
-  const driveArrange = (timeS: number, _prog: number, _weight = 1) => {
-    const elapsed = landingPhaseClock(timeS, "arrange");
-    const headX = -2.2 + ((elapsed * 0.45) % 4.4);
+  const driveArrange = (timeS: number, _prog: number, weight = 1) => {
+    const handoff = landingHandoff(timeS, "library", "arrange");
+    const scroll = landingPhaseMotionClock(timeS, "arrange") * ARRANGE_SCROLL;
+    const libProg = landingPhaseProgress(timeS, "library");
+    const headX = LANE_LEFT + 0.35 + ((scroll * 0.55) % (LANE_SPAN - 0.7));
     playhead.position.x = headX;
+    (
+      playhead.material as InstanceType<ThreeMod["MeshBasicMaterial"]>
+    ).opacity = (0.25 + handoff * 0.6) * Math.max(weight, handoff);
+
+    for (const lane of lanes) {
+      const mat = lane.material as InstanceType<ThreeMod["MeshStandardMaterial"]>;
+      mat.opacity = (0.06 + handoff * 0.14) * Math.max(weight, handoff, 0.001);
+    }
+
     for (let i = 0; i < CLIP_N; i++) {
-      const lane = i % 4;
       const clip = clipMeshes[i]!;
-      const start = -1.9 + (i % 7) * 0.52;
-      const len = 0.4 + (i % 3) * 0.18;
-      clip.position.set(start + len * 0.5, lanes[lane]!.position.y + 0.08, 0.12);
-      clip.scale.x = len / 0.55;
-      const active = headX >= start && headX <= start + len;
+      const a = libraryLivePose(i, libProg, timeS);
+      const b = clipMovingPose(i, scroll, lanes[i % 4]!.position.y);
+      // Identical t / pose lerp as library exit.
+      const t = landingHandoffMotion(timeS, "library", "arrange", i);
+      const o = landingHandoffOpacity(timeS, "library", "arrange", i);
+      clip.position.set(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+      );
+      clip.scale.set(
+        a.s + (b.len / 0.55 - a.s) * t,
+        a.s + (1 - a.s) * t,
+        a.s + (1 - a.s) * t,
+      );
+      clip.rotation.set(a.rx * (1 - t), a.ry * (1 - t), a.rz * (1 - t));
+
       const mat = clip.material as InstanceType<ThreeMod["MeshStandardMaterial"]>;
-      mat.emissiveIntensity = active ? 0.35 : 0.1;
+      const col = tagCols[b.tag as 0 | 1 | 2]!;
+      mat.color.copy(col);
+      mat.emissive.copy(col);
+      const active =
+        t > 0.7 && headX >= b.x - b.len * 0.5 && headX <= b.x + b.len * 0.5;
+      mat.emissiveIntensity = active ? 0.4 : 0.1 + t * 0.06;
+      // Fast opacity entry (mirrors A’s 1 − o).
+      mat.opacity = o * b.edgeFade * (0.55 + 0.45 * o);
     }
   };
 
@@ -526,7 +690,7 @@ export async function createLandingFlowThree(
       const phase = (elapsed * 0.22 + i * 0.18) % 1;
       ring.scale.setScalar(0.55 + phase * (1.6 + i * 0.22));
       const mat = ring.material as InstanceType<ThreeMod["MeshBasicMaterial"]>;
-      mat.opacity = (1 - phase) * 0.45 * weight;
+      mat.opacity = (1 - phase) * 0.55 * weight;
       ring.rotation.x = Math.PI / 2 + i * 0.08;
     }
     const sparkMat = exportSparks.material as InstanceType<
@@ -542,7 +706,7 @@ export async function createLandingFlowThree(
       const r = 0.35 + Math.min(1, prog + 0.2) * 2.1 * (0.4 + s * 0.9);
       arr.setX(i, Math.cos(a) * r);
       arr.setY(i, Math.sin(a * 1.3 + timeS) * r * 0.55);
-      arr.setZ(i, Math.sin(a) * r * 0.35);
+      arr.setZ(i, Math.sin(a) * r * 0.75);
     }
     arr.needsUpdate = true;
   };
@@ -569,36 +733,40 @@ export async function createLandingFlowThree(
   const cameraTarget = (id: LandingFlowPhaseId, timeS: number) => {
     switch (id) {
       case "capture":
-        cameraFrom.set(0.15, 0.45, 5.6);
-        lookFrom.set(0.35, 0.05, 0);
+        cameraFrom.set(0.15, 0.2, 5.6);
+        lookFrom.set(0.15, 0, 0);
         camera.fov = 42;
         break;
       case "detect":
-        cameraFrom.set(0, 0.28, 5.2);
-        lookFrom.set(-0.15, 0.02, 0);
+        cameraFrom.set(0, 0.12, 5.2);
+        lookFrom.set(SCAN_X, 0, 0);
         camera.fov = 40;
         break;
       case "library":
         cameraFrom.set(
-          Math.sin(timeS * 0.18) * 0.35,
-          0.95,
-          5.4 + Math.cos(timeS * 0.15) * 0.2,
+          Math.sin(timeS * 0.18) * 0.2,
+          0.12,
+          5.5 + Math.cos(timeS * 0.15) * 0.15,
         );
-        lookFrom.set(0, -0.05, 0);
+        lookFrom.set(0, 0, 0);
         camera.fov = 38;
         break;
       case "arrange":
-        cameraFrom.set(0.1, 1.55 + Math.sin(timeS * 0.25) * 0.08, 5.8);
-        lookFrom.set(0, 0.08, 0);
+        cameraFrom.set(
+          0.05,
+          0.55 + Math.sin(timeS * 0.25) * 0.04,
+          5.6,
+        );
+        lookFrom.set(0, 0.05, 0);
         camera.fov = 36;
         break;
       case "export":
         cameraFrom.set(
           Math.cos(timeS * 0.2) * 3.2,
-          0.75 + Math.sin(timeS * 0.35) * 0.12,
+          0.35 + Math.sin(timeS * 0.35) * 0.1,
           Math.sin(timeS * 0.2) * 3.2,
         );
-        lookFrom.set(0, 0.02, 0);
+        lookFrom.set(0, 0, 0);
         camera.fov = 40;
         break;
     }
@@ -630,11 +798,18 @@ export async function createLandingFlowThree(
   };
 
   const fitContent = () => {
-    const aspect = cssW / cssH;
+    const aspect = cssW / Math.max(1, cssH);
     const scale =
       aspect >= 1 ? 1 : Math.min(1, 0.74 + aspect * 0.3);
     contentRoot.scale.setScalar(scale);
-    contentRoot.position.y = aspect < 0.72 ? -0.04 : 0;
+    contentRoot.position.x = 0;
+    contentRoot.position.y = aspect < 0.72 ? -0.02 : 0;
+  };
+
+  /** Extra Z breathe on the whole stage (kept separate from fitContent resize). */
+  const driveContentZ = (timeS: number) => {
+    contentRoot.position.z =
+      Math.sin(timeS * 0.55) * 0.28 + Math.sin(timeS * 1.1) * 0.1;
   };
 
   let cssW = w;
@@ -657,16 +832,16 @@ export async function createLandingFlowThree(
       phase.blend > 0.001 ? landingBlendEase(phase.blend) : 0;
     const weights = landingPhaseVisibility(phase);
 
-    const bgArr = bgGeo.getAttribute("position") as InstanceType<
+    const ambArr = ambGeo.getAttribute("position") as InstanceType<
       ThreeMod["BufferAttribute"]
     >;
-    for (let i = 0; i < BG_N; i++) {
-      const s = bgSeed[i]!;
-      bgArr.setY(i, Math.sin(timeS * 0.35 + s * 8) * 0.35 + (s - 0.5) * 6);
+    for (let i = 0; i < AMBIENT_N; i++) {
+      const s = ambSeed[i]!;
+      ambArr.setY(i, Math.sin(timeS * 0.35 + s * 8) * 0.35 + (s - 0.5) * 6);
     }
-    bgArr.needsUpdate = true;
+    ambArr.needsUpdate = true;
 
-    driveBackdrop(timeS, phase);
+    driveContentZ(timeS);
 
     for (const [id, g] of Object.entries(groups) as [
       LandingFlowPhaseId,
@@ -677,7 +852,10 @@ export async function createLandingFlowThree(
 
     for (const id of Object.keys(drivers) as LandingFlowPhaseId[]) {
       const prog = landingPhaseProgress(timeS, id);
-      drivers[id]!(timeS, prog, weights[id] ?? 0);
+      const w = weights[id] ?? 0;
+      if (w > 0.001 || id === phase.id || id === phase.next) {
+        drivers[id]!(timeS, prog, w);
+      }
     }
 
     cameraFor(
@@ -693,7 +871,7 @@ export async function createLandingFlowThree(
     renderer.dispose();
     bgWave.geometry.dispose();
     capGeo.dispose();
-    bgGeo.dispose();
+    ambGeo.dispose();
     renderer.forceContextLoss?.();
   };
 

@@ -2,10 +2,10 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
-import "@supersoniks/concorde/fieldset";
 import "@supersoniks/concorde/form-layout";
 import "@supersoniks/concorde/form-actions";
 import { t } from "../i18n/messages.js";
+import "../form-stack.js";
 import tailwind from "../../css/tailwind";
 import { db, ensurePrefs, type UserPrefs } from "../db.js";
 import { flushOpLog, getSyncStatus, type SyncStatus } from "../sync.js";
@@ -87,8 +87,8 @@ export class GlPrivacyPage extends LitElement {
         <h1 class="font-display">${t("privacy.title")}</h1>
         <p>${t("privacy.body")}</p>
 
-        <div class="mt-4 flex flex-col gap-4" formDataProvider=${prefsFormKey.path}>
-          <sonic-fieldset label=${t("privacy.voicePolicy")}>
+        <gl-form-stack class="mt-4" formDataProvider=${prefsFormKey.path}>
+          <gl-form-section label=${t("privacy.voicePolicy")}>
             <sonic-form-layout>
               <div class="flex flex-wrap gap-2">
                 ${(["exclude", "mark_keep_local", "keep"] as const).map(
@@ -105,9 +105,9 @@ export class GlPrivacyPage extends LitElement {
                 )}
               </div>
             </sonic-form-layout>
-          </sonic-fieldset>
+          </gl-form-section>
 
-          <sonic-fieldset label=${t("privacy.sync")}>
+          <gl-form-section label=${t("privacy.sync")}>
             <sonic-form-layout>
               <div class="flex flex-wrap gap-2">
                 ${(["local_only", "metadata_only", "full"] as const).map(
@@ -167,8 +167,8 @@ export class GlPrivacyPage extends LitElement {
                 ${t("privacy.syncNow")}
               </sonic-button>
             </sonic-form-actions>
-          </sonic-fieldset>
-        </div>
+          </gl-form-section>
+        </gl-form-stack>
       </div>
     `;
   }

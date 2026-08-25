@@ -16,19 +16,19 @@ export const APP_THEMES: readonly AppThemeMeta[] = [
     id: "nord",
     labelKey: "theme.nord",
     dark: true,
-    themeColor: "#1b2430",
+    themeColor: "#101820",
   },
   {
     id: "dark",
     labelKey: "theme.dark",
     dark: true,
-    themeColor: "#07070c",
+    themeColor: "#0c0d12",
   },
   {
     id: "matcha",
     labelKey: "theme.matcha",
     dark: false,
-    themeColor: "#eef8e4",
+    themeColor: "#c5bfd4",
   },
 ] as const;
 

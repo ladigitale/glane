@@ -26,8 +26,9 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { glIcon } from "./icon.js";
+import { tip } from "./tip.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
-import "@supersoniks/concorde/fieldset";
+import "./form-stack.js";
 
 const FX_LABEL: Record<TrackFxType, string> = {
   none: "Aucun",
@@ -173,9 +174,6 @@ export class GlTrackFxControl extends LitElement {
       input[type="range"] {
         accent-color: var(--gl-accent);
       }
-      :host([inline]) sonic-fieldset {
-        --sc-fieldset-mb: 0;
-      }
     `,
   ];
 
@@ -227,19 +225,23 @@ export class GlTrackFxControl extends LitElement {
         @show=${this.#onPopShow}
         @hide=${this.#onPopHide}
       >
-        <sonic-button
-          size=${this.size}
-          variant=${active ? "default" : "outline"}
-          type=${active ? "primary" : "neutral"}
-          data-aria-label=${this.fxAriaLabel}
-          title=${hint ? `${trigger} · ${hint}` : this.fxAriaLabel}
-          ?active=${active}
-        >
-          ${this.compact
-            ? trigger
-            : html`${trigger}${hint ? ` · ${hint}` : ""}
-          ${glIcon("chevron-down", { size: "xs", slot: "suffix" })}`}
-        </sonic-button>
+        ${tip(
+          hint ? `${trigger} · ${hint}` : this.fxAriaLabel,
+          html`
+            <sonic-button
+              size=${this.size}
+              variant=${active ? "default" : "outline"}
+              type=${active ? "primary" : "neutral"}
+              data-aria-label=${this.fxAriaLabel}
+              ?active=${active}
+            >
+              ${this.compact
+                ? trigger
+                : html`${trigger}${hint ? ` · ${hint}` : ""}
+              ${glIcon("chevron-down", { size: "xs", slot: "suffix" })}`}
+            </sonic-button>
+          `,
+        )}
         <div
           slot="content"
           class="flex min-w-40 flex-col gap-1.5 bg-neutral-0 p-1.5 text-content"
@@ -325,8 +327,8 @@ export class GlTrackFxControl extends LitElement {
     hasEnv: boolean,
   ) {
     return html`
-      <div class="flex w-full flex-col gap-3 text-content">
-        <sonic-fieldset label=${this.fxAriaLabel} tight>
+      <gl-form-stack gap="sm" class="text-content">
+        <gl-form-section label=${this.fxAriaLabel} tight>
           <div class="flex flex-col gap-2">
             <label
               class="grid grid-cols-[1fr_auto] items-center gap-x-2 gap-y-1 text-sm text-neutral-500"
@@ -354,11 +356,11 @@ export class GlTrackFxControl extends LitElement {
             </label>
             ${this.#wetParams(fx)}
           </div>
-        </sonic-fieldset>
+        </gl-form-section>
         ${this.wetOnly
           ? nothing
           : html`
-              <sonic-fieldset label="Passe-haut" tight>
+              <gl-form-section label="Passe-haut" tight>
                 <div class="flex flex-col gap-2">
                   <label
                     class="flex cursor-pointer items-center gap-2 text-sm text-content"
@@ -383,8 +385,8 @@ export class GlTrackFxControl extends LitElement {
                       )
                     : nothing}
                 </div>
-              </sonic-fieldset>
-              <sonic-fieldset label="Passe-bas" tight>
+              </gl-form-section>
+              <gl-form-section label="Passe-bas" tight>
                 <div class="flex flex-col gap-2">
                   <label
                     class="flex cursor-pointer items-center gap-2 text-sm text-content"
@@ -409,8 +411,8 @@ export class GlTrackFxControl extends LitElement {
                       )
                     : nothing}
                 </div>
-              </sonic-fieldset>
-              <sonic-fieldset label="ADSR" tight>
+              </gl-form-section>
+              <gl-form-section label="ADSR" tight>
                 <div class="flex flex-col gap-2">
                   <label
                     class="flex cursor-pointer items-center gap-2 text-sm text-content"
@@ -461,7 +463,7 @@ export class GlTrackFxControl extends LitElement {
                       `
                     : nothing}
                 </div>
-              </sonic-fieldset>
+              </gl-form-section>
             `}
         ${this.showApply
           ? html`
@@ -475,7 +477,7 @@ export class GlTrackFxControl extends LitElement {
               </sonic-button>
             `
           : nothing}
-      </div>
+      </gl-form-stack>
     `;
   }
 

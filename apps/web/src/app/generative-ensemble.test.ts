@@ -90,6 +90,19 @@ describe("applyLock", () => {
       assert.ok(ok, `tick ${h.tickInBar} not near skeleton ${skeleton}`);
     }
   });
+
+  it("injects melodyDegree so lock offsets apply to bass/chord motifs", () => {
+    const shared = [0, 8];
+    const hits: EnsembleHit[] = [
+      { tickInBar: 0, gainDb: 0, accent: true },
+      { tickInBar: 192, gainDb: -1, accent: true },
+    ];
+    const locked = ensemble.applyLock(hits, shared, 4, 96, 2);
+    assert.ok(locked.length > 0);
+    for (const h of locked) {
+      assert.equal(h.melodyDegree, 2);
+    }
+  });
 });
 
 describe("applyRespond", () => {

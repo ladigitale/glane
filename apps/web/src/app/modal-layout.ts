@@ -49,7 +49,11 @@ export const GL_MODAL_PRESETS: Record<GlModalPreset, GlModalLayout> = {
   },
 };
 
-/** Optional styleSheet — scroll body only, actions/title/close stay visible. */
+/**
+ * Optional styleSheet — scroll `sonic-modal-content` only.
+ * Keep `#modal-content` overflow visible: Concorde’s `sonic-modal-close`
+ * uses negative margins into the padding and is clipped by overflow:hidden.
+ */
 export const GL_MODAL_SCROLL_LAYOUT = css`
   #modal.custom-scroll {
     overflow: hidden !important;
@@ -60,13 +64,14 @@ export const GL_MODAL_SCROLL_LAYOUT = css`
   #modal-content {
     flex: 1 1 auto;
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
     display: flex;
     flex-direction: column;
     width: 100%;
   }
 
-  sonic-modal-close {
+  sonic-modal-close,
+  ::slotted(sonic-modal-close) {
     flex-shrink: 0;
   }
 

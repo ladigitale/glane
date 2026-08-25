@@ -58,6 +58,20 @@ export const MUSIC_STYLE_IDS: readonly MusicStyleId[] = [
 
 export type GenMusicStyleChoice = "auto" | MusicStyleId;
 
+/** Soft BPM window for listening / testing a style (project BPM stays free). */
+export type StyleBpmHint = {
+  min: number;
+  ideal: number;
+  max: number;
+};
+
+/** Soft bar-count window for form + arrangement to read clearly. */
+export type StyleBarsHint = {
+  min: number;
+  ideal: number;
+  max: number;
+};
+
 export type MusicStyleProfile = {
   id: MusicStyleId;
   groove: GrooveKind;
@@ -70,6 +84,10 @@ export type MusicStyleProfile = {
   energyCenter?: number;
   drumsCenter?: number;
   humanizeCenter?: number;
+  /** Recommended project tempo for this style (hints only). */
+  bpmHint: StyleBpmHint;
+  /** Recommended sequence length in bars (hints only). */
+  barsHint: StyleBarsHint;
 };
 
 type MotifSpec = { beat: number; gainDb?: number; accent?: boolean };
@@ -86,6 +104,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.7,
     drumsCenter: 0.72,
     humanizeCenter: 0.55,
+    bpmHint: { min: 100, ideal: 120, max: 140 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   pop: {
     id: "pop",
@@ -97,6 +117,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.6,
     drumsCenter: 0.6,
     humanizeCenter: 0.45,
+    bpmHint: { min: 100, ideal: 118, max: 130 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   reggae: {
     id: "reggae",
@@ -108,6 +130,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.5,
     drumsCenter: 0.55,
     humanizeCenter: 0.65,
+    bpmHint: { min: 70, ideal: 85, max: 100 },
+    barsHint: { min: 32, ideal: 64, max: 96 },
   },
   dub: {
     id: "dub",
@@ -119,6 +143,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.45,
     drumsCenter: 0.5,
     humanizeCenter: 0.55,
+    bpmHint: { min: 60, ideal: 75, max: 90 },
+    barsHint: { min: 48, ideal: 96, max: 128 },
   },
   hiphop: {
     id: "hiphop",
@@ -130,6 +156,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.55,
     drumsCenter: 0.75,
     humanizeCenter: 0.7,
+    bpmHint: { min: 80, ideal: 92, max: 105 },
+    barsHint: { min: 32, ideal: 64, max: 96 },
   },
   triphop: {
     id: "triphop",
@@ -141,6 +169,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.4,
     drumsCenter: 0.45,
     humanizeCenter: 0.75,
+    bpmHint: { min: 70, ideal: 85, max: 100 },
+    barsHint: { min: 48, ideal: 96, max: 128 },
   },
   dnb: {
     id: "dnb",
@@ -152,6 +182,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.8,
     drumsCenter: 0.85,
     humanizeCenter: 0.35,
+    bpmHint: { min: 160, ideal: 172, max: 180 },
+    barsHint: { min: 32, ideal: 96, max: 128 },
   },
   breakbeat: {
     id: "breakbeat",
@@ -162,6 +194,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.75,
     drumsCenter: 0.8,
     humanizeCenter: 0.45,
+    bpmHint: { min: 125, ideal: 135, max: 150 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   techno: {
     id: "techno",
@@ -173,6 +207,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.7,
     drumsCenter: 0.8,
     humanizeCenter: 0.25,
+    bpmHint: { min: 120, ideal: 130, max: 140 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   house: {
     id: "house",
@@ -184,6 +220,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.65,
     drumsCenter: 0.75,
     humanizeCenter: 0.35,
+    bpmHint: { min: 118, ideal: 124, max: 130 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   disco: {
     id: "disco",
@@ -195,6 +233,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.7,
     drumsCenter: 0.7,
     humanizeCenter: 0.4,
+    bpmHint: { min: 110, ideal: 120, max: 128 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   funk: {
     id: "funk",
@@ -205,6 +245,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.7,
     drumsCenter: 0.7,
     humanizeCenter: 0.6,
+    bpmHint: { min: 95, ideal: 108, max: 120 },
+    barsHint: { min: 32, ideal: 64, max: 96 },
   },
   jazz: {
     id: "jazz",
@@ -215,6 +257,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.55,
     drumsCenter: 0.55,
     humanizeCenter: 0.85,
+    bpmHint: { min: 90, ideal: 120, max: 160 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   blues: {
     id: "blues",
@@ -226,6 +270,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.55,
     drumsCenter: 0.55,
     humanizeCenter: 0.8,
+    bpmHint: { min: 70, ideal: 90, max: 110 },
+    barsHint: { min: 24, ideal: 48, max: 96 },
   },
   latin: {
     id: "latin",
@@ -237,6 +283,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.7,
     drumsCenter: 0.65,
     humanizeCenter: 0.55,
+    bpmHint: { min: 95, ideal: 110, max: 130 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   afrobeat: {
     id: "afrobeat",
@@ -247,6 +295,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.75,
     drumsCenter: 0.7,
     humanizeCenter: 0.5,
+    bpmHint: { min: 100, ideal: 115, max: 130 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   classical: {
     id: "classical",
@@ -258,6 +308,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.45,
     drumsCenter: 0.2,
     humanizeCenter: 0.5,
+    bpmHint: { min: 60, ideal: 90, max: 120 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   ambient: {
     id: "ambient",
@@ -268,6 +320,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.3,
     drumsCenter: 0.2,
     humanizeCenter: 0.4,
+    bpmHint: { min: 50, ideal: 70, max: 90 },
+    barsHint: { min: 64, ideal: 96, max: 160 },
   },
   folk: {
     id: "folk",
@@ -279,6 +333,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.45,
     drumsCenter: 0.35,
     humanizeCenter: 0.7,
+    bpmHint: { min: 80, ideal: 100, max: 120 },
+    barsHint: { min: 32, ideal: 64, max: 96 },
   },
   metal: {
     id: "metal",
@@ -290,6 +346,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.9,
     drumsCenter: 0.85,
     humanizeCenter: 0.3,
+    bpmHint: { min: 120, ideal: 160, max: 200 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   garage: {
     id: "garage",
@@ -301,6 +359,8 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.7,
     drumsCenter: 0.8,
     humanizeCenter: 0.45,
+    bpmHint: { min: 128, ideal: 135, max: 140 },
+    barsHint: { min: 32, ideal: 64, max: 128 },
   },
   punk: {
     id: "punk",
@@ -312,8 +372,51 @@ export const MUSIC_STYLE_PROFILES: Record<MusicStyleId, MusicStyleProfile> = {
     energyCenter: 0.85,
     drumsCenter: 0.8,
     humanizeCenter: 0.4,
+    bpmHint: { min: 140, ideal: 170, max: 200 },
+    barsHint: { min: 16, ideal: 48, max: 64 },
   },
 };
+
+export type StyleTempoBarsFit = {
+  style: MusicStyleId;
+  bpmOk: boolean;
+  barsOk: boolean;
+  bpm: number;
+  bars: number;
+  bpmHint: StyleBpmHint;
+  barsHint: StyleBarsHint;
+};
+
+export function styleTempoBarsFit(
+  style: MusicStyleId,
+  bpm: number,
+  bars: number,
+): StyleTempoBarsFit {
+  const p = MUSIC_STYLE_PROFILES[style];
+  return {
+    style,
+    bpm,
+    bars,
+    bpmHint: p.bpmHint,
+    barsHint: p.barsHint,
+    bpmOk: bpm >= p.bpmHint.min && bpm <= p.bpmHint.max,
+    barsOk: bars >= p.barsHint.min && bars <= p.barsHint.max,
+  };
+}
+
+/** Ideal BPM + bars to apply when the user accepts style suggestions. */
+export function styleSuggestedTempoBars(style: MusicStyleId): {
+  bpm: number;
+  bars: number;
+} {
+  const p = MUSIC_STYLE_PROFILES[style];
+  return { bpm: p.bpmHint.ideal, bars: p.barsHint.ideal };
+}
+
+/** Approximate wall-clock length for 4/4 at given BPM and bar count. */
+export function approxDurationSec(bpm: number, bars: number): number {
+  return (bars * 4 * 60) / Math.max(1, bpm);
+}
 
 type RoleMotifs = {
   kick: MotifSpec[];

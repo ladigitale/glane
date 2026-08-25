@@ -6,25 +6,47 @@ export type LandingFlowPhaseId =
   | "arrange"
   | "export";
 
-export const LANDING_FLOW_CYCLE_S = 28;
+export const LANDING_FLOW_CYCLE_S = 34;
 
 export const LANDING_FLOW_PHASES: ReadonlyArray<{
   id: LandingFlowPhaseId;
   duration: number;
 }> = [
-  { id: "capture", duration: 5 },
-  { id: "detect", duration: 5 },
-  { id: "library", duration: 5 },
-  { id: "arrange", duration: 7 },
-  { id: "export", duration: 6 },
+  { id: "capture", duration: 5.5 },
+  { id: "detect", duration: 5.5 },
+  { id: "library", duration: 5.5 },
+  /** Extra time to receive library pieces, settle, then scroll the timeline. */
+  { id: "arrange", duration: 10.5 },
+  { id: "export", duration: 7 },
 ];
 
-const BLEND_FRAC = 0.2;
+/** Short tail — snappy handoff between creative steps. */
+export const LANDING_BLEND_FRAC = 0.18;
 
-/** Smooth step for phase crossfades (0→1). */
-export function landingBlendEase(t: number): number {
+/** Symmetric motion ease — position/scale A→B. */
+export function easeInOutCubic(t: number): number {
   const x = Math.max(0, Math.min(1, t));
-  return x * x * (3 - 2 * x);
+  return x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2;
+}
+
+/** Fast opacity ease — phase A drops quickly at blend start. */
+export function easeOutCubic(t: number): number {
+  const x = Math.max(0, Math.min(1, t));
+  return 1 - (1 - x) ** 3;
+}
+
+/**
+ * Opacity / visibility crossfade (not motion).
+ * Compressed so A is nearly gone before the blend midpoint.
+ */
+export function landingOpacityEase(t: number): number {
+  const x = Math.max(0, Math.min(1, t * 1.35));
+  return easeOutCubic(x);
+}
+
+/** Camera / visibility use the snappy opacity curve. */
+export function landingBlendEase(t: number): number {
+  return landingOpacityEase(t);
 }
 
 export type LandingPhaseState = {
@@ -49,8 +71,8 @@ export function landingPhaseAt(timeS: number): LandingPhaseState {
       const next =
         LANDING_FLOW_PHASES[(i + 1) % LANDING_FLOW_PHASES.length]!.id;
       const blend =
-        local > 1 - BLEND_FRAC
-          ? (local - (1 - BLEND_FRAC)) / BLEND_FRAC
+        local > 1 - LANDING_BLEND_FRAC
+          ? (local - (1 - LANDING_BLEND_FRAC)) / LANDING_BLEND_FRAC
           : 0;
       return { id: phase.id, local, next, blend };
     }
@@ -97,8 +119,93 @@ export function landingPhaseProgress(
 }
 
 /**
- * One phase at a time — outgoing fades first half of blend, incoming second half.
- * Avoids two groups at the same spot (z-fight / blink).
+ * Motion clock for `phaseId`, starting `LANDING_BLEND_FRAC` of the previous
+ * phase early so scene B is already moving during the A→B handoff.
+ */
+export function landingPhaseMotionClock(
+  timeS: number,
+  phaseId: LandingFlowPhaseId,
+): number {
+  const loop =
+    ((timeS % LANDING_FLOW_CYCLE_S) + LANDING_FLOW_CYCLE_S) %
+    LANDING_FLOW_CYCLE_S;
+  let acc = 0;
+  for (let i = 0; i < LANDING_FLOW_PHASES.length; i++) {
+    const phase = LANDING_FLOW_PHASES[i]!;
+    if (phase.id === phaseId) {
+      const prev = LANDING_FLOW_PHASES[i === 0 ? LANDING_FLOW_PHASES.length - 1 : i - 1]!;
+      const lead = prev.duration * LANDING_BLEND_FRAC;
+      return Math.max(0, loop - (acc - lead));
+    }
+    acc += phase.duration;
+  }
+  return 0;
+}
+
+/** Linear 0…1 blend from `from` into `to` (no easing). */
+export function landingHandoffLinear(
+  timeS: number,
+  from: LandingFlowPhaseId,
+  to: LandingFlowPhaseId,
+): number {
+  const state = landingPhaseAt(timeS);
+  if (state.id === from && state.next === to) return state.blend;
+  if (state.id === to) return 1;
+  const order = LANDING_FLOW_PHASES.map((p) => p.id);
+  const iFrom = order.indexOf(from);
+  const iTo = order.indexOf(to);
+  const iCur = order.indexOf(state.id);
+  if (iFrom >= 0 && iTo >= 0 && iCur >= 0) {
+    if (iTo > iFrom && iCur > iTo) return 1;
+    if (iTo < iFrom && (iCur > iTo || iCur < iFrom)) return 1;
+  }
+  return 0;
+}
+
+function handoffRaw(linear: number, index: number): number {
+  const lag = (index % 4) * 0.035;
+  const span = Math.max(0.001, 1 - lag);
+  return Math.min(1, Math.max(0, (linear - lag) / span));
+}
+
+/** 0…1 opacity handoff (fast out) when `from` blends into `to`. */
+export function landingHandoff(
+  timeS: number,
+  from: LandingFlowPhaseId,
+  to: LandingFlowPhaseId,
+): number {
+  return landingOpacityEase(landingHandoffLinear(timeS, from, to));
+}
+
+/**
+ * Shared A→B motion progress (easeInOutCubic) — identical on both scenes.
+ */
+export function landingHandoffMotion(
+  timeS: number,
+  from: LandingFlowPhaseId,
+  to: LandingFlowPhaseId,
+  index = 0,
+): number {
+  return easeInOutCubic(
+    handoffRaw(landingHandoffLinear(timeS, from, to), index),
+  );
+}
+
+/** Opacity progress for object `index` — fast A exit / B entry. */
+export function landingHandoffOpacity(
+  timeS: number,
+  from: LandingFlowPhaseId,
+  to: LandingFlowPhaseId,
+  index = 0,
+): number {
+  return landingOpacityEase(
+    handoffRaw(landingHandoffLinear(timeS, from, to), index),
+  );
+}
+
+/**
+ * One step at a time with overlapping morph during blend
+ * (outgoing shrinks / fades while incoming grows).
  */
 export function landingPhaseVisibility(
   state: LandingPhaseState,
@@ -115,11 +222,8 @@ export function landingPhaseVisibility(
     return w;
   }
   const t = landingBlendEase(state.blend);
-  if (t <= 0.5) {
-    w[state.id] = 1 - t * 2;
-  } else {
-    w[state.next] = (t - 0.5) * 2;
-  }
+  w[state.id] = 1 - t;
+  w[state.next] = t;
   return w;
 }
 

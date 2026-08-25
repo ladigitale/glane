@@ -7,6 +7,7 @@ import {
 } from "./generative-refs.js";
 import {
   bpmSyncStretch,
+  chordRunBars,
   clipStretchFactors,
   resampleStretchPitchSemis,
   scaleCompatibleTransposes,
@@ -175,5 +176,27 @@ describe("buildSectionHarmonyTimeline", () => {
     const expanded = expandChordTimeline(prog, 16);
     assert.equal(expanded.length, 16);
     assert.ok(expanded.every((b) => b.degree >= 0 && b.degree <= 6));
+  });
+});
+
+describe("chordRunBars", () => {
+  it("counts consecutive identical chords and stops at a change", () => {
+    const timeline = [
+      { degree: 0, tones: [0, 2, 4] as const },
+      { degree: 0, tones: [0, 2, 4] as const },
+      { degree: 4, tones: [0, 2, 4] as const },
+      { degree: 4, tones: [0, 2, 4] as const },
+    ];
+    assert.equal(chordRunBars(timeline, 0, 4), 2);
+    assert.equal(chordRunBars(timeline, 2, 4), 2);
+    assert.equal(chordRunBars(timeline, 1, 3), 1);
+  });
+
+  it("treats voicing changes as a new chord", () => {
+    const timeline = [
+      { degree: 0, tones: [0, 2, 4] as const },
+      { degree: 0, tones: [0, 2, 4, 6] as const },
+    ];
+    assert.equal(chordRunBars(timeline, 0, 2), 1);
   });
 });

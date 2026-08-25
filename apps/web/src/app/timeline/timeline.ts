@@ -223,6 +223,92 @@ export const EDGE_SCROLL_ZONE_PX = 56;
 /** Max scroll step per frame at the extreme edge (px). */
 export const EDGE_SCROLL_MAX_STEP_PX = 24;
 
+/** Inertial pan after horizontal timeline drag release. */
+export const SCROLL_INERTIA_FRICTION = 0.92;
+export const SCROLL_INERTIA_MIN_V_PX_MS = 0.06;
+export const SCROLL_INERTIA_STOP_V_PX_MS = 0.015;
+export const SCROLL_INERTIA_MAX_V_PX_MS = 2.5;
+/** Throttle scrollLeft commits during coast (~30 fps). Physics still runs every frame. */
+export const SCROLL_INERTIA_APPLY_MS = 32;
+
+/** Track pointer samples during scroll drag; coast on release. */
+export class TimelineScrollInertia {
+  #samples: { x: number; t: number }[] = [];
+  #raf = 0;
+
+  push(clientX: number, timeStamp: number): void {
+    this.#samples.push({ x: clientX, t: timeStamp });
+    if (this.#samples.length > 6) this.#samples.shift();
+  }
+
+  cancel(): void {
+    if (this.#raf) {
+      cancelAnimationFrame(this.#raf);
+      this.#raf = 0;
+    }
+    this.#samples = [];
+  }
+
+  release(el: HTMLElement, onTick?: () => void): void {
+    let v = this.#velocityPxPerMs();
+    this.#samples = [];
+    if (this.#raf) {
+      cancelAnimationFrame(this.#raf);
+      this.#raf = 0;
+    }
+
+    v = Math.max(
+      -SCROLL_INERTIA_MAX_V_PX_MS,
+      Math.min(SCROLL_INERTIA_MAX_V_PX_MS, v),
+    );
+    if (Math.abs(v) < SCROLL_INERTIA_MIN_V_PX_MS) return;
+
+    let scrollPos = el.scrollLeft;
+    let lastT = performance.now();
+    let lastApply = 0;
+
+    const applyScroll = (now: number, force = false): void => {
+      if (!force && now - lastApply < SCROLL_INERTIA_APPLY_MS) return;
+      if (scrollPos === el.scrollLeft) {
+        lastApply = now;
+        return;
+      }
+      el.scrollLeft = scrollPos;
+      lastApply = now;
+      onTick?.();
+    };
+
+    const step = (now: number): void => {
+      const dt = Math.min(48, now - lastT);
+      lastT = now;
+      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+      scrollPos = Math.max(0, Math.min(maxScroll, scrollPos + v * dt));
+      const hitEdge = scrollPos <= 0 || scrollPos >= maxScroll;
+      v *= SCROLL_INERTIA_FRICTION;
+      const stopping =
+        Math.abs(v) < SCROLL_INERTIA_STOP_V_PX_MS || hitEdge;
+
+      applyScroll(now, stopping);
+
+      if (stopping) {
+        this.#raf = 0;
+        return;
+      }
+      this.#raf = requestAnimationFrame(step);
+    };
+    this.#raf = requestAnimationFrame(step);
+  }
+
+  #velocityPxPerMs(): number {
+    if (this.#samples.length < 2) return 0;
+    const first = this.#samples[0]!;
+    const last = this.#samples[this.#samples.length - 1]!;
+    const dt = last.t - first.t;
+    if (dt < 8) return 0;
+    return -(last.x - first.x) / dt;
+  }
+}
+
 /**
  * If `clientX` is near the left/right of the usable viewport, pan `el`.
  * Returns signed pixels applied (0 = no scroll). `rightInsetPx` excludes a sticky gutter.
@@ -565,6 +651,12 @@ export const timeline = {
   edgeScrollAtClientX,
   EDGE_SCROLL_ZONE_PX,
   EDGE_SCROLL_MAX_STEP_PX,
+  TimelineScrollInertia,
+  SCROLL_INERTIA_FRICTION,
+  SCROLL_INERTIA_MIN_V_PX_MS,
+  SCROLL_INERTIA_STOP_V_PX_MS,
+  SCROLL_INERTIA_MAX_V_PX_MS,
+  SCROLL_INERTIA_APPLY_MS,
   paintStretchedWave,
   paintViewportWave,
   timelineChromeCss,

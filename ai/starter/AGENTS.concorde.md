@@ -10,6 +10,7 @@ Front: `apps/web` — Lit custom elements `gl-*` + `@supersoniks/concorde`.
 | `.cursor/skills/concorde-scope/SKILL.md` | Inherited API / form / icon defaults (scope) |
 | `.cursor/skills/prefer-tailwind/SKILL.md` | Lit UI: Tailwind `class=` over new BEM/CSS (rule on `apps/web/**/*.ts`) |
 | `.cursor/skills/glane-arranger/SKILL.md` | Sequence gen: lock / call–response / kinship between melodic voices |
+| `.cursor/skills/glane-themes/SKILL.md` | UI theme palettes (nord / dark / matcha): review & retune `--sc-*` |
 
 ## Architecture
 

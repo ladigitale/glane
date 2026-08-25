@@ -12,6 +12,7 @@ import {
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { PropertyValues } from "lit";
+import { tip } from "../tip.js";
 import {
   LANE_PAD_UNITS,
   MAX_PX_PER_SAMPLE,
@@ -26,6 +27,7 @@ import {
   sampleRulerMarks,
   scrollLeftToCenterUnit,
   timelineChromeCss,
+  TimelineScrollInertia,
   zoomAtClientX,
 } from "./timeline.js";
 import { glIcon } from "../icon.js";
@@ -58,15 +60,15 @@ export class GlEditTimeline extends LitElement {
         height: 280px;
         min-height: 280px;
         touch-action: none;
-        background: var(--gl-ink-elevated, var(--sc-base-100));
-        border-radius: 6px;
-        overflow: hidden;
+        background: transparent;
+        overflow: visible;
       }
       .timeline {
         /* Not flex:1 — fixed host height; avoid collapse with Tailwind/flex parents. */
         height: 100%;
         min-height: 220px;
         flex: none;
+        border-radius: 6px;
       }
       .time-ruler {
         top: 0;
@@ -113,8 +115,7 @@ export class GlEditTimeline extends LitElement {
       }
       .track-label .conf-line {
         display: block;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        overflow: visible;
         white-space: nowrap;
       }
       .track-label .settings {
@@ -203,6 +204,7 @@ export class GlEditTimeline extends LitElement {
   #longpressOpened = false;
   #holdLastX = 0;
   #holdLastY = 0;
+  #scrollInertia = new TimelineScrollInertia();
 
   override firstUpdated(): void {
     const canvas = this.renderRoot.querySelector("canvas.wave");
@@ -268,6 +270,7 @@ export class GlEditTimeline extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    this.#scrollInertia.cancel();
     this.#unsubWheel?.();
     this.#unsubWheel = null;
     const tl = this.#timelineEl();
@@ -611,19 +614,23 @@ export class GlEditTimeline extends LitElement {
                     )
                   : html`<span class="conf-line">${this.label}</span>`}
               </div>
-              <sonic-button
-                shape="circle"
-                variant="ghost"
-                type="neutral"
-                size="xs"
-                icon
-                class="settings"
-                data-aria-label=${this.settingsHint}
-                title=${this.settingsHint}
-                @click=${this.#onSettings}
-              >
-                ${glIcon("sliders", { size: "xs" })}
-              </sonic-button>
+              ${tip(
+                this.settingsHint,
+                html`
+                  <sonic-button
+                    shape="circle"
+                    variant="ghost"
+                    type="neutral"
+                    size="xs"
+                    icon
+                    class="settings"
+                    data-aria-label=${this.settingsHint}
+                    @click=${this.#onSettings}
+                  >
+                    ${glIcon("sliders", { size: "xs" })}
+                  </sonic-button>
+                `,
+              )}
             </div>
           </div>
         </div>
@@ -694,6 +701,7 @@ export class GlEditTimeline extends LitElement {
 
     this.#clearHoldTimer();
     this.#longpressOpened = false;
+    this.#scrollInertia.cancel();
     this.#lanePtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (this.rotateMode && this.#lanePtrs.size === 1) {
@@ -893,6 +901,7 @@ export class GlEditTimeline extends LitElement {
     if (this.#drag === "scroll") {
       const tl = this.#timelineEl();
       if (tl) tl.scrollLeft = this.#panScroll0 - (e.clientX - this.#panOriginX);
+      this.#scrollInertia.push(e.clientX, e.timeStamp);
       return;
     }
     if (this.#drag === "zoom") {
@@ -936,6 +945,7 @@ export class GlEditTimeline extends LitElement {
           if (kind === "scroll") {
             this.#panOriginX = e.clientX;
             this.#panScroll0 = this.#timelineEl()?.scrollLeft ?? 0;
+            this.#scrollInertia.push(e.clientX, e.timeStamp);
           }
         }
       }
@@ -1001,7 +1011,11 @@ export class GlEditTimeline extends LitElement {
     this.#drag = "none";
     this.#lanePinchDist = 0;
     this.#fsm.reset();
-    if (mode === "scroll") this.#setFollowPlayhead(false);
+    if (mode === "scroll") {
+      this.#setFollowPlayhead(false);
+      const tl = this.#timelineEl();
+      if (tl) this.#scrollInertia.release(tl);
+    }
     if (mode === "scrub") {
       this.#setFollowPlayhead(true);
       this.#syncFollowScroll(true);

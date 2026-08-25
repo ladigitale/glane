@@ -5,6 +5,8 @@
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
+import { t } from "./i18n/messages.js";
+import { tip } from "./tip.js";
 
 @customElement("gl-seek-bar")
 export class GlSeekBar extends LitElement {
@@ -87,6 +89,45 @@ export class GlSeekBar extends LitElement {
   @property({ type: Number }) viewEnd = 0;
 
   @state() private dragging = false;
+  /** Last value written by {@link paintPosition} (avoids stale keyboard reads). */
+  #paintedValue: number | null = null;
+
+  /** Imperative playhead — no Lit re-render (transport rAF). */
+  paintPosition(opts: {
+    value: number;
+    max?: number;
+    viewStart?: number;
+    viewEnd?: number;
+  }): void {
+    this.#paintedValue = opts.value;
+    const max = Math.max(1e-9, opts.max ?? this.max);
+    const pct = Math.min(100, Math.max(0, (opts.value / max) * 100));
+    const root = this.renderRoot;
+    const fill = root.querySelector<HTMLElement>(".fill");
+    const thumb = root.querySelector<HTMLElement>(".thumb");
+    const wrap = root.querySelector<HTMLElement>(".wrap");
+    if (fill) fill.style.width = `${pct}%`;
+    if (thumb) thumb.style.left = `${pct}%`;
+    if (wrap) wrap.setAttribute("aria-valuenow", String(Math.round(opts.value)));
+
+    if (opts.viewStart === undefined || opts.viewEnd === undefined) return;
+    const v0 = Math.min(opts.viewStart, opts.viewEnd);
+    const v1 = Math.max(opts.viewStart, opts.viewEnd);
+    const showView = v1 > v0 + max * 1e-6;
+    const view = root.querySelector<HTMLElement>(".view");
+    if (!showView || !view) return;
+    const leftPct = Math.min(100, Math.max(0, (v0 / max) * 100));
+    const widthPct = Math.min(
+      100 - leftPct,
+      Math.max(0, ((v1 - v0) / max) * 100),
+    );
+    view.style.left = `${leftPct}%`;
+    view.style.width = `${widthPct}%`;
+  }
+
+  #effectiveValue(): number {
+    return this.#paintedValue ?? this.value;
+  }
 
   override render() {
     const max = Math.max(1e-9, this.max);
@@ -100,34 +141,38 @@ export class GlSeekBar extends LitElement {
     const widthPct = showView
       ? Math.min(100 - leftPct, Math.max(0, ((v1 - v0) / max) * 100))
       : 0;
-    return html`
-      <div
-        class="wrap relative flex h-touch cursor-pointer select-none items-center px-3 touch-none outline-none ${this
-          .dragging
-          ? "dragging"
-          : ""}"
-        role="slider"
-        tabindex="0"
-        aria-valuemin="0"
-        aria-valuemax=${Math.round(max)}
-        aria-valuenow=${Math.round(this.value)}
-        aria-label="Position"
-        aria-disabled=${this.disabled ? "true" : "false"}
-        @pointerdown=${this.#onDown}
-        @keydown=${this.#onKey}
-      >
-        <div class="track">
-          ${showView
-            ? html`<div
-                class="view"
-                style="left:${leftPct}%;width:${widthPct}%"
-              ></div>`
-            : nothing}
-          <div class="fill" style="width:${pct}%"></div>
-          <div class="thumb" style="left:${pct}%"></div>
+    return tip(
+      t("transport.position"),
+      html`
+        <div
+          class="wrap relative flex h-touch cursor-pointer select-none items-center px-3 touch-none outline-none ${this
+            .dragging
+            ? "dragging"
+            : ""}"
+          role="slider"
+          tabindex="0"
+          aria-valuemin="0"
+          aria-valuemax=${Math.round(max)}
+          aria-valuenow=${Math.round(this.value)}
+          aria-label=${t("transport.position")}
+          aria-disabled=${this.disabled ? "true" : "false"}
+          @pointerdown=${this.#onDown}
+          @keydown=${this.#onKey}
+        >
+          <div class="track">
+            ${showView
+              ? html`<div
+                  class="view"
+                  style="left:${leftPct}%;width:${widthPct}%"
+                ></div>`
+              : nothing}
+            <div class="fill" style="width:${pct}%"></div>
+            <div class="thumb" style="left:${pct}%"></div>
+          </div>
         </div>
-      </div>
-    `;
+      `,
+      { class: "block w-full" },
+    );
   }
 
   #ratioAtClientX(clientX: number): number {
@@ -183,9 +228,10 @@ export class GlSeekBar extends LitElement {
     if (this.disabled) return;
     const max = Math.max(0, this.max);
     const step = max / 100;
-    let next = this.value;
-    if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = this.value - step;
-    else if (e.key === "ArrowRight" || e.key === "ArrowUp") next = this.value + step;
+    const cur = this.#effectiveValue();
+    let next = cur;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = cur - step;
+    else if (e.key === "ArrowRight" || e.key === "ArrowUp") next = cur + step;
     else if (e.key === "Home") next = 0;
     else if (e.key === "End") next = max;
     else return;

@@ -509,8 +509,12 @@ export function applyLock(
 }
 
 function shiftDegree(h: EnsembleHit, offset: number): EnsembleHit {
-  if (h.melodyDegree == null || offset === 0) return { ...h };
-  return { ...h, melodyDegree: h.melodyDegree + offset };
+  // Bass/chord motifs often omit melodyDegree — inject 0 so lock offsets apply.
+  const base = h.melodyDegree ?? 0;
+  if (offset === 0) {
+    return h.melodyDegree == null ? { ...h, melodyDegree: 0 } : { ...h };
+  }
+  return { ...h, melodyDegree: base + offset };
 }
 
 /** Place response cell on the second half-bar (call–response). */

@@ -25,6 +25,7 @@ import {
   type ArpEvent,
   type ChordTone,
   type HarmonicPalette,
+  type HarmonyBar,
   type MelodyEvent,
 } from "./generative-refs";
 import {
@@ -52,6 +53,15 @@ export type {
   MusicStyleId,
 } from "./generative-styles";
 export { MUSIC_STYLE_IDS, MUSIC_STYLE_PROFILES } from "./generative-styles";
+export {
+  styleSuggestedTempoBars,
+  styleTempoBarsFit,
+} from "./generative-styles";
+export type {
+  StyleBarsHint,
+  StyleBpmHint,
+  StyleTempoBarsFit,
+} from "./generative-styles";
 export {
   parseStemFromTags,
   parseYamnetSlugs,
@@ -1010,93 +1020,152 @@ export function planSongForm(
 
   let units: Unit[];
   if (ambient) {
-    units =
-      bars <= 8
-        ? [
-            {
-              kind: "intro",
-              weight: 2,
-              densityMul: eBoost(0.22),
-              gainBiasDb: -5.5,
-              evolve: 0.12,
-              fillLastBar: false,
-              altSample: false,
-            },
-            {
-              kind: "verse",
-              weight: 4,
-              densityMul: eBoost(0.5),
-              gainBiasDb: -1.5,
-              evolve: 0.3,
-              fillLastBar: false,
-              altSample: true,
-            },
-            {
-              kind: "chorus",
-              weight: 3,
-              densityMul: eBoost(0.85),
-              gainBiasDb: 1.5,
-              evolve: 0.4,
-              fillLastBar: false,
-              altSample: false,
-            },
-            {
-              kind: "outro",
-              weight: 2,
-              densityMul: eBoost(0.2),
-              gainBiasDb: -5,
-              evolve: 0.45,
-              fillLastBar: false,
-              altSample: true,
-            },
-          ]
-        : [
-            {
-              kind: "intro",
-              weight: 3,
-              densityMul: eBoost(0.18),
-              gainBiasDb: -6.5,
-              evolve: 0.1,
-              fillLastBar: false,
-              altSample: false,
-            },
-            {
-              kind: "verse",
-              weight: 5,
-              densityMul: eBoost(0.45),
-              gainBiasDb: -2,
-              evolve: 0.28,
-              fillLastBar: false,
-              altSample: true,
-            },
-            {
-              kind: "bridge",
-              weight: 4,
-              densityMul: eBoost(0.28),
-              gainBiasDb: -3.5,
-              evolve: 0.55,
-              fillLastBar: false,
-              altSample: true,
-            },
-            {
-              kind: "chorus",
-              weight: 4,
-              densityMul: eBoost(0.9),
-              gainBiasDb: 2,
-              evolve: 0.45,
-              fillLastBar: true,
-              altSample: false,
-            },
-            {
-              kind: "outro",
-              weight: 3,
-              densityMul: eBoost(0.18),
-              gainBiasDb: -5.5,
-              evolve: 0.5,
-              fillLastBar: false,
-              altSample: true,
-            },
-          ];
+    if (bars <= 8) {
+      units = [
+        {
+          kind: "intro",
+          weight: 2,
+          densityMul: eBoost(0.22),
+          gainBiasDb: -5.5,
+          evolve: 0.12,
+          fillLastBar: false,
+          altSample: false,
+        },
+        {
+          kind: "verse",
+          weight: 4,
+          densityMul: eBoost(0.5),
+          gainBiasDb: -1.5,
+          evolve: 0.3,
+          fillLastBar: false,
+          altSample: true,
+        },
+        {
+          kind: "chorus",
+          weight: 3,
+          densityMul: eBoost(0.85),
+          gainBiasDb: 1.5,
+          evolve: 0.4,
+          fillLastBar: false,
+          altSample: false,
+        },
+        {
+          kind: "outro",
+          weight: 2,
+          densityMul: eBoost(0.2),
+          gainBiasDb: -5,
+          evolve: 0.45,
+          fillLastBar: false,
+          altSample: true,
+        },
+      ];
+    } else if (bars <= 48) {
+      units = [
+        {
+          kind: "intro",
+          weight: 3,
+          densityMul: eBoost(0.18),
+          gainBiasDb: -6.5,
+          evolve: 0.1,
+          fillLastBar: false,
+          altSample: false,
+        },
+        {
+          kind: "verse",
+          weight: 5,
+          densityMul: eBoost(0.45),
+          gainBiasDb: -2,
+          evolve: 0.28,
+          fillLastBar: false,
+          altSample: true,
+        },
+        {
+          kind: "bridge",
+          weight: 4,
+          densityMul: eBoost(0.28),
+          gainBiasDb: -3.5,
+          evolve: 0.55,
+          fillLastBar: false,
+          altSample: true,
+        },
+        {
+          kind: "chorus",
+          weight: 4,
+          densityMul: eBoost(0.9),
+          gainBiasDb: 2,
+          evolve: 0.45,
+          fillLastBar: true,
+          altSample: false,
+        },
+        {
+          kind: "outro",
+          weight: 3,
+          densityMul: eBoost(0.18),
+          gainBiasDb: -5.5,
+          evolve: 0.5,
+          fillLastBar: false,
+          altSample: true,
+        },
+      ];
+    } else {
+      // Long ambient: slow arc with space for kinship / sparse dialogue
+      units = [
+        {
+          kind: "intro",
+          weight: 4,
+          densityMul: eBoost(0.15),
+          gainBiasDb: -7,
+          evolve: 0.08,
+          fillLastBar: false,
+          altSample: false,
+        },
+        {
+          kind: "verse",
+          weight: 6,
+          densityMul: eBoost(0.4),
+          gainBiasDb: -2.2,
+          evolve: 0.22,
+          fillLastBar: false,
+          altSample: true,
+        },
+        {
+          kind: "bridge",
+          weight: 5,
+          densityMul: eBoost(0.25),
+          gainBiasDb: -3.8,
+          evolve: 0.5,
+          fillLastBar: false,
+          altSample: true,
+        },
+        {
+          kind: "chorus",
+          weight: 5,
+          densityMul: eBoost(0.85),
+          gainBiasDb: 1.8,
+          evolve: 0.4,
+          fillLastBar: true,
+          altSample: false,
+        },
+        {
+          kind: "verse",
+          weight: 5,
+          densityMul: eBoost(0.42),
+          gainBiasDb: -2,
+          evolve: 0.35,
+          fillLastBar: false,
+          altSample: true,
+        },
+        {
+          kind: "outro",
+          weight: 4,
+          densityMul: eBoost(0.15),
+          gainBiasDb: -6,
+          evolve: 0.55,
+          fillLastBar: false,
+          altSample: true,
+        },
+      ];
+    }
   } else if (bars <= 4) {
     units = [
       {
@@ -1232,7 +1301,8 @@ export function planSongForm(
         altSample: true,
       },
     ];
-  } else {
+  } else if (bars <= 48) {
+    // Mid-length song: classic two-chorus + bridge return
     units = [
       {
         kind: "intro",
@@ -1319,6 +1389,100 @@ export function planSongForm(
     if (rnd() < 0.35) {
       units = units.filter((u) => u.kind !== "prechorus");
     }
+  } else {
+    // Long song (≥49 bars): room for dialogue + recall without crushing sections
+    units = [
+      {
+        kind: "intro",
+        weight: 3,
+        densityMul: eBoost(0.2),
+        gainBiasDb: -6.5,
+        evolve: 0.05,
+        fillLastBar: false,
+        altSample: false,
+      },
+      {
+        kind: "verse",
+        weight: 5,
+        densityMul: eBoost(0.62),
+        gainBiasDb: -1.8,
+        evolve: 0.12,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "prechorus",
+        weight: 2,
+        densityMul: eBoost(0.92),
+        gainBiasDb: 0.6,
+        evolve: 0.32,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "chorus",
+        weight: 5,
+        densityMul: eBoost(1.18),
+        gainBiasDb: 2.4,
+        evolve: 0.25,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "verse",
+        weight: 5,
+        densityMul: eBoost(0.68),
+        gainBiasDb: -1.2,
+        evolve: 0.32,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "prechorus",
+        weight: 2,
+        densityMul: eBoost(0.98),
+        gainBiasDb: 0.9,
+        evolve: 0.38,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "chorus",
+        weight: 5,
+        densityMul: eBoost(1.26),
+        gainBiasDb: 2.8,
+        evolve: 0.38,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "bridge",
+        weight: 4,
+        densityMul: eBoost(0.3),
+        gainBiasDb: -3.8,
+        evolve: 0.55,
+        fillLastBar: false,
+        altSample: true,
+      },
+      {
+        kind: "chorus",
+        weight: 6,
+        densityMul: eBoost(1.38),
+        gainBiasDb: 3.3,
+        evolve: 0.52,
+        fillLastBar: true,
+        altSample: false,
+      },
+      {
+        kind: "outro",
+        weight: 3,
+        densityMul: eBoost(0.25),
+        gainBiasDb: -5.5,
+        evolve: 0.55,
+        fillLastBar: false,
+        altSample: true,
+      },
+    ];
   }
 
   const totalW = units.reduce((s, u) => s + u.weight, 0);
@@ -1872,6 +2036,29 @@ function isMelodicClass(cls: string, harmonicity?: number): boolean {
   return (harmonicity ?? 0) > 0.6;
 }
 
+/**
+ * Consecutive bars that share the same chord (degree + voicing).
+ * Used to keep pads / holds from ringing across a harmony change.
+ */
+export function chordRunBars(
+  timeline: readonly HarmonyBar[],
+  startBar: number,
+  maxBars: number,
+): number {
+  const max = Math.max(1, Math.floor(maxBars));
+  const start = timeline[startBar];
+  if (!start || max <= 1) return 1;
+  let n = 1;
+  while (n < max) {
+    const next = timeline[startBar + n];
+    if (!next || next.degree !== start.degree) break;
+    if (next.tones.length !== start.tones.length) break;
+    if (!next.tones.every((t, i) => t === start.tones[i])) break;
+    n++;
+  }
+  return n;
+}
+
 function chordToneSemis(
   scale: readonly number[],
   rootDegree: number,
@@ -2203,19 +2390,22 @@ function pickPitchSemitones(opts: {
   }
 
   let degree = scale[degreeHint % scale.length] ?? 0;
-  if (role === "chord" && tones.length > 0) {
-    const tone = tones[(toneIndex ?? 0) % tones.length]!;
-    degree = chordToneSemis(scale, degreeHint, tone);
-  } else if (
-    (role === "lead" || role === "arp") &&
+  if (
+    (role === "lead" ||
+      role === "arp" ||
+      role === "bass" ||
+      role === "chord") &&
     melodyDegree != null
   ) {
-    // Cell degrees are chord-relative: transpose onto current chord root.
+    // Cell / lock degrees are chord-relative: transpose onto current chord root.
     const md = melodyDegree + degreeHint;
     const oct = Math.floor(md / scale.length);
     degree =
       (scale[((md % scale.length) + scale.length) % scale.length] ?? 0) +
       oct * 12;
+  } else if (role === "chord" && tones.length > 0) {
+    const tone = tones[(toneIndex ?? 0) % tones.length]!;
+    degree = chordToneSemis(scale, degreeHint, tone);
   } else if (role === "bass") {
     // Prefer chord root; weak beats may target the fifth via allowedRels snap.
     const tone: ChordTone = accent === false && rnd() < 0.35 ? 4 : 0;
@@ -2858,7 +3048,6 @@ function pickLengthTick(opts: {
     ticksPerBar,
     bpm,
     ppq,
-    section,
     bpmLengthFactor,
     stutter,
     energy,
@@ -2898,9 +3087,14 @@ function pickLengthTick(opts: {
       Math.min(natural * (0.8 + rnd() * 0.5), hold),
     );
   } else if (role === "chord") {
-    const barsHold = section.kind === "chorus" ? 2 : 1;
-    lengthTick = Math.max(ticksPerBar, barsHold * ticksPerBar);
-    if (nextTick != null) lengthTick = Math.min(lengthTick, nextTick - startTick);
+    // Hold = caller window (ticksPerBar already = realTpb × harmony-safe stride).
+    lengthTick = ticksPerBar;
+    if (nextTick != null) {
+      lengthTick = Math.min(
+        lengthTick,
+        Math.max(minLen, nextTick - startTick),
+      );
+    }
   } else if (role === "arp") {
     // Gate to the next cell step — sample length must not drive the note.
     // Longer takes are truncated (`stretchMode: off`) + track ADSR.
@@ -4334,7 +4528,7 @@ export function planSequence(opts: {
         trackFxRefined = true;
       }
 
-      for (let b = 0; b < section.bars; b += barStride) {
+      for (let b = 0; b < section.bars; ) {
         const absBar = section.startBar + b;
         const barTick = absBar * ticksPerBar;
         const chord = lockPitch
@@ -4344,10 +4538,20 @@ export function planSequence(opts: {
               tones: [0, 2, 4] as const,
             });
         const degreeHint = chord.degree;
+        // Don't hold / skip across a chord change (pads ringing into the next harmony).
+        const step = Math.max(
+          1,
+          Math.min(
+            barStride,
+            lockPitch
+              ? barStride
+              : chordRunBars(chordTimeline, absBar, section.bars - b),
+          ),
+        );
 
         // Stick to the section home sample; rare fill ornament only at high variation.
         let sample = homeSample;
-        const lastBar = b + barStride >= section.bars;
+        const lastBar = b + step >= section.bars;
         const allowOrnament =
           variation > 0.6 &&
           samplePool.length > 1 &&
@@ -4372,6 +4576,7 @@ export function planSequence(opts: {
         if (
           !sectionAllowsRole(role, section, b, energy, rnd)
         ) {
+          b += step;
           continue;
         }
 
@@ -4396,6 +4601,7 @@ export function planSequence(opts: {
           isMelodicRole(role) &&
           callBar
         ) {
+          b += step;
           continue;
         }
 
@@ -4561,7 +4767,7 @@ export function planSequence(opts: {
             startTick: hit.tick,
             nextTick: next,
             barTick,
-            ticksPerBar: ticksPerBar * barStride,
+            ticksPerBar: ticksPerBar * step,
             bpm,
             ppq,
             section,
@@ -4611,8 +4817,10 @@ export function planSequence(opts: {
                 toneIndex: role === "chord" ? hi : undefined,
                 melodyDegree:
                   role === "lead" || role === "arp"
-                    ? (hit.melodyDegree ?? degreeHint)
-                    : undefined,
+                    ? (hit.melodyDegree ?? 0)
+                    : role === "bass" || role === "chord"
+                      ? hit.melodyDegree
+                      : undefined,
                 accent: hit.accent,
                 section,
                 energy,
@@ -4879,6 +5087,7 @@ export function planSequence(opts: {
             repTick += lengthTick;
           }
         }
+        b += step;
       }
     }
   }

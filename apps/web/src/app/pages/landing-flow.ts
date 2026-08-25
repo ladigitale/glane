@@ -1,31 +1,26 @@
 import { LitElement, css, html } from "lit";
 import { customElement } from "lit/decorators.js";
 import {
+  landingHandoff,
+  landingHandoffMotion,
+  landingHandoffOpacity,
   landingPhaseAt,
   landingPhaseClock,
+  landingPhaseMotionClock,
   landingPhaseProgress,
   landingPhaseVisibility,
 } from "./landing-flow-phases.js";
 import type { LandingFlowTheme, LandingFlowViz } from "./landing-flow-three.js";
 import { resolveCssColor } from "./landing-flow-color.js";
-
-/** Timeline length (samples) for the 2D waveform loop. */
-const CYCLE = 520;
-const BLOCKS: ReadonlyArray<{
-  start: number;
-  end: number;
-  kind: "silence" | "sound";
-  tag: number;
-}> = [
-  { start: 0, end: 55, kind: "silence", tag: -1 },
-  { start: 55, end: 145, kind: "sound", tag: 0 },
-  { start: 145, end: 195, kind: "silence", tag: -1 },
-  { start: 195, end: 250, kind: "sound", tag: 1 },
-  { start: 250, end: 310, kind: "silence", tag: -1 },
-  { start: 310, end: 420, kind: "sound", tag: 2 },
-  { start: 420, end: 470, kind: "silence", tag: -1 },
-  { start: 470, end: 520, kind: "sound", tag: 0 },
-];
+import {
+  BAR_N,
+  BAR_SPAN,
+  WAVE_SPEED,
+  barX,
+  createBarTape,
+  type BarTape,
+  waveTravel,
+} from "./landing-flow-scroll.js";
 
 /**
  * Landing backdrop — full pipeline story (capture → export).
@@ -70,6 +65,7 @@ export class GlLandingFlow extends LitElement {
   #t0 = 0;
   #cssW = 0;
   #cssH = 0;
+  #tape: BarTape = createBarTape();
 
   #onResize = (): void => {
     this.#measure();
@@ -254,34 +250,9 @@ export class GlLandingFlow extends LitElement {
     this.#paint2d(t);
   }
 
-  #block(sample: number) {
-    const local = ((sample % CYCLE) + CYCLE) % CYCLE;
-    for (const b of BLOCKS) {
-      if (local >= b.start && local < b.end) {
-        return { ...b, t: (local - b.start) / (b.end - b.start) };
-      }
-    }
-    return { start: 0, end: CYCLE, kind: "silence" as const, tag: -1, t: 0 };
-  }
-
-  #amp(sample: number): number {
-    const b = this.#block(sample);
-    if (b.kind === "silence") return 0.02;
-    const env = Math.sin(b.t * Math.PI);
-    const s = sample * 0.09;
-    const texture =
-      Math.abs(Math.sin(s * 1.2 + b.tag) * 0.35) +
-      Math.abs(Math.sin(s * 2.7 - 0.5) * 0.22) +
-      Math.abs(Math.sin(s * 6.1) * 0.1);
-    const peak = 0.55 + (b.tag % 3) * 0.12;
-    return Math.min(1, 0.02 + env * (peak * 0.55 + texture));
-  }
-
-  #tagIndex(sample: number): number {
-    const b = this.#block(sample);
-    if (b.kind !== "sound") return -1;
-    const cycle = Math.floor(sample / CYCLE);
-    return (b.tag + cycle) % 3;
+  /** Keep 2D focal plane centered (matches Three contentRoot). */
+  #layoutBias(_w: number, _h: number): { x: number; y: number } {
+    return { x: 0, y: 0 };
   }
 
   /** Canvas2D fallback — same narrative phases as Three. */
@@ -292,6 +263,7 @@ export class GlLandingFlow extends LitElement {
     if (!ctx) return;
     const w = this.#cssW;
     const h = this.#cssH;
+    const bias = this.#layoutBias(w, h);
     const phase = landingPhaseAt(t);
 
     const primary =
@@ -313,19 +285,34 @@ export class GlLandingFlow extends LitElement {
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
 
-    const detectVis = landingPhaseVisibility(phase).detect;
-    const detectMix =
-      detectVis > 0.001
-        ? detectVis *
-          Math.min(1, landingPhaseProgress(t, "detect") * 1.4 + 0.15)
-        : 0;
-    this.#paint2dWaveBg(ctx, w, h, t, primary, muted, mid, tags, detectMix);
-
     const vis = landingPhaseVisibility(phase);
+
+    if (vis.capture > 0.001) {
+      ctx.save();
+      ctx.globalAlpha = vis.capture;
+      this.#paint2dCapture(ctx, w, h, t, primary, bias, vis.capture);
+      ctx.restore();
+    }
     if (vis.detect > 0.001) {
       ctx.save();
       ctx.globalAlpha = vis.detect;
-      this.#paint2dDetectOverlay(ctx, w, h, t, primary, muted);
+      const detectMix = Math.min(
+        1,
+        landingPhaseProgress(t, "detect") * 1.4 + 0.15,
+      );
+      this.#paint2dWaveBg(
+        ctx,
+        w,
+        h,
+        t,
+        primary,
+        muted,
+        mid,
+        tags,
+        detectMix,
+        bias,
+      );
+      this.#paint2dDetectOverlay(ctx, w, h, t, primary, muted, bias);
       ctx.restore();
     }
     if (vis.library > 0.001) {
@@ -339,6 +326,7 @@ export class GlLandingFlow extends LitElement {
         landingPhaseProgress(t, "library"),
         tags,
         muted,
+        bias,
       );
       ctx.restore();
     }
@@ -354,6 +342,7 @@ export class GlLandingFlow extends LitElement {
         tags,
         primary,
         muted,
+        bias,
       );
       ctx.restore();
     }
@@ -368,9 +357,40 @@ export class GlLandingFlow extends LitElement {
         landingPhaseProgress(t, "export"),
         primary,
         tags,
+        bias,
       );
       ctx.restore();
     }
+  }
+
+  #paint2dCapture(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    t: number,
+    primary: string,
+    bias: { x: number; y: number },
+    weight: number,
+  ): void {
+    const cx = w * 0.5 + bias.x;
+    const cy = h * 0.5 + bias.y;
+    // Flatten toward a mid line as weight drops (morph into detect).
+    const flatten = 1 - weight;
+    ctx.fillStyle = primary;
+    for (let i = 0; i < 48; i++) {
+      const a = i * 1.37 + t * 0.9;
+      const r = 40 + (i % 7) * 18 + Math.sin(t + i) * 12;
+      const x = cx + Math.cos(a) * r * (1 - flatten * 0.35);
+      const y =
+        cy +
+        Math.sin(a * 1.3) * r * 0.45 * (1 - flatten * 0.92) +
+        flatten * Math.sin(i + t) * 4;
+      ctx.globalAlpha = 0.25 + (i % 5) * 0.08;
+      ctx.beginPath();
+      ctx.arc(x, y, 1.6 + (i % 3) * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
   }
 
   #paint2dWaveBg(
@@ -383,14 +403,13 @@ export class GlLandingFlow extends LitElement {
     mid: string,
     tags: readonly [string, string, string],
     detectMix: number,
+    bias: { x: number; y: number },
   ): void {
-    const midY = h * 0.5;
-    const maxAmp = h * 0.22;
-    const step = 3;
-    const pxPerSample = 2.5;
-    const span = 130 * 2.5;
-    const scroll = (t * 130) % span;
-    const filterX = w * 0.42;
+    const midY = h * 0.5 + bias.y;
+    const maxAmp = h * 0.36;
+    const travel = waveTravel(landingPhaseClock(t, "detect"), WAVE_SPEED);
+    this.#tape.sync(travel);
+    const filterX = w * 0.42 + bias.x;
     const filterW = Math.max(18, w * 0.045);
 
     ctx.strokeStyle = muted;
@@ -402,21 +421,23 @@ export class GlLandingFlow extends LitElement {
     ctx.stroke();
 
     ctx.lineCap = "round";
-    for (let x = 0; x <= w; x += step) {
-      const sample = (x + scroll) / pxPerSample;
-      const a = this.#amp(sample);
-      const silent = a < 0.04;
-      const half = silent ? 1.5 : Math.max(2, a * maxAmp);
+    for (let i = 0; i < BAR_N; i++) {
+      const xWorld = barX(i, travel);
+      const x = ((xWorld / BAR_SPAN) + 0.5) * w + bias.x;
+      if (x < -4 || x > w + 4) continue;
+      const mag = this.#tape.heights[i]!;
+      const silent = mag < 0.05;
+      const half = silent ? 1.5 : Math.max(2, mag * maxAmp);
       const past = detectMix > 0.02 && x < filterX - filterW / 2;
-      const tag = this.#tagIndex(sample);
+      const tag = this.#tape.tags[i]!;
 
       if (past && !silent && tag >= 0 && detectMix > 0.5) {
         ctx.strokeStyle = tags[tag as 0 | 1 | 2];
         ctx.globalAlpha = 0.35 + detectMix * 0.35;
         ctx.lineWidth = 1.75;
       } else {
-        ctx.strokeStyle = silent ? muted : a > 0.5 ? mid : muted;
-        ctx.globalAlpha = silent ? 0.12 : 0.18 + a * 0.2;
+        ctx.strokeStyle = silent ? muted : mag > 0.5 ? mid : muted;
+        ctx.globalAlpha = silent ? 0.12 : 0.18 + mag * 0.2;
         ctx.lineWidth = 1.5;
       }
 
@@ -435,10 +456,11 @@ export class GlLandingFlow extends LitElement {
     t: number,
     primary: string,
     _muted: string,
+    bias: { x: number; y: number },
   ): void {
-    const midY = h * 0.5;
-    const maxAmp = h * 0.22;
-    const filterX = w * 0.42;
+    const midY = h * 0.5 + bias.y;
+    const maxAmp = h * 0.36;
+    const filterX = w * 0.42 + bias.x;
     const filterW = Math.max(18, w * 0.045);
     ctx.fillStyle = primary;
     ctx.globalAlpha = 0.08;
@@ -466,34 +488,73 @@ export class GlLandingFlow extends LitElement {
     local: number,
     tags: readonly [string, string, string],
     muted: string,
+    bias: { x: number; y: number },
   ): void {
-    const settle = Math.min(1, local * 1.2);
-    const cols = 4;
-    const rows = 4;
-    const cell = Math.min(w * 0.14, 52);
-    const ox = w * 0.5 - (cols * cell) / 2;
-    const oy = h * 0.38;
-    ctx.strokeStyle = muted;
-    ctx.globalAlpha = 0.25;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(ox - 8, oy + rows * cell + 4, cols * cell + 16, 0);
-    ctx.beginPath();
-    ctx.moveTo(ox - 8, oy + rows * cell + 8);
-    ctx.lineTo(ox + cols * cell + 8, oy + rows * cell + 8);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    const N = 12;
+    const CLIP = 12;
+    const perCol = Math.ceil(N / 3);
+    const cellW = Math.min(w * 0.12, 44);
+    const cellH = Math.min(h * 0.07, 28);
+    const gapX = Math.min(w * 0.22, 90);
+    const gapY = cellH + 8;
+    const cx = w * 0.5 + bias.x;
+    const cy = h * 0.5 + bias.y;
+    const lanes = 4;
+    const laneH = Math.min(h * 0.07, 36);
+    const oy = h * 0.32 + bias.y;
+    const ox = w * 0.08 + bias.x * 0.5;
+    const tw = Math.min(w * 0.84, w - ox - w * 0.06);
+    const handoff = landingHandoff(t, "library", "arrange");
+    const scroll = landingPhaseMotionClock(t, "arrange") * 0.55;
 
-    for (let i = 0; i < cols * rows; i++) {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const tx = ox + col * cell + cell * 0.12;
-      const ty = oy + row * cell + cell * 0.12;
-      const fly = 1 - settle;
-      const x = tx + Math.sin(i + t * 0.5) * fly * 40;
-      const y = ty - fly * (80 + (i % 3) * 20);
-      ctx.fillStyle = tags[i % 3]!;
-      ctx.globalAlpha = 0.55 + settle * 0.4;
-      ctx.fillRect(x, y, cell * 0.76, cell * 0.76);
+    for (let c = 0; c < 3; c++) {
+      const bx = cx + (c - 1) * gapX;
+      ctx.strokeStyle = muted;
+      ctx.globalAlpha = 0.28 * (1 - handoff * 0.9);
+      ctx.lineWidth = 1.5;
+      const bayH = perCol * gapY + 12;
+      ctx.strokeRect(bx - cellW * 0.65, cy - bayH / 2, cellW * 1.3, bayH);
+      ctx.globalAlpha = 1;
+    }
+
+    for (let i = 0; i < N; i++) {
+      const tag = i % 3;
+      const rank = Math.floor(i / 3);
+      const stagger = Math.min(
+        1,
+        Math.max(0, local * 1.35 - rank * 0.07 - tag * 0.04),
+      );
+      const settle = 1 - Math.pow(1 - stagger, 3);
+      const ax = cx + (tag - 1) * gapX - cellW / 2;
+      const ay = cy + (rank - (perCol - 1) / 2) * gapY - cellH / 2;
+      const chaosX = Math.sin(i * 2.1 + t * 1.2) * 70;
+      const chaosY = Math.cos(i * 1.6 + t * 0.9) * 50;
+      let x = ax * settle + (cx + chaosX - cellW / 2) * (1 - settle);
+      let y = ay * settle + (cy + chaosY - cellH / 2) * (1 - settle);
+      let pw = cellW * 0.72;
+      let ph = cellH;
+      let fade = 0.55 + settle * 0.4;
+
+      if (i < CLIP) {
+        const lane = i % lanes;
+        const seed = (i * 0.71) % 0.82;
+        const u = (((seed - scroll / tw) % 1) + 1) % 1;
+        const gen = Math.floor(scroll / tw + 1 - seed);
+        const cw = tw * (0.07 + ((i * 3 + gen * 2) % 5) * 0.02);
+        const bx = ox + u * tw;
+        const by = oy + lane * (laneH + 10) + laneH * 0.15;
+        const d = landingHandoffMotion(t, "library", "arrange", i);
+        const o = landingHandoffOpacity(t, "library", "arrange", i);
+        x = x + (bx - x) * d;
+        y = y + (by - y) * d;
+        pw = pw + (cw - pw) * d;
+        ph = ph + (laneH * 0.7 - ph) * d;
+        fade *= 1 - o;
+      }
+
+      ctx.fillStyle = tags[tag]!;
+      ctx.globalAlpha = fade;
+      ctx.fillRect(x, y, pw, ph);
       ctx.globalAlpha = 1;
     }
   }
@@ -503,39 +564,74 @@ export class GlLandingFlow extends LitElement {
     w: number,
     h: number,
     t: number,
-    local: number,
+    _local: number,
     tags: readonly [string, string, string],
     primary: string,
     muted: string,
+    bias: { x: number; y: number },
   ): void {
     const lanes = 4;
+    const CLIP = 12;
+    const handoff = landingHandoff(t, "library", "arrange");
     const laneH = Math.min(h * 0.07, 36);
-    const oy = h * 0.28;
-    const ox = w * 0.08;
-    const tw = w * 0.84;
-    const head =
-      ox + ((landingPhaseClock(t, "arrange") * 0.12) % 1) * tw;
+    const oy = h * 0.32 + bias.y;
+    const ox = w * 0.08 + bias.x * 0.5;
+    const tw = Math.min(w * 0.84, w - ox - w * 0.06);
+    const scroll = landingPhaseMotionClock(t, "arrange") * 0.55;
+    const head = ox + 0.08 * tw + ((scroll * 0.4) % 0.85) * tw;
+    const libLocal = landingPhaseProgress(t, "library");
+    const cx = w * 0.5 + bias.x;
+    const cy = h * 0.5 + bias.y;
+    const gapX = Math.min(w * 0.22, 90);
+    const cellW = Math.min(w * 0.12, 44);
+    const cellH = Math.min(h * 0.07, 28);
+    const gapY = cellH + 8;
+    const perCol = Math.ceil(CLIP / 3);
 
     for (let l = 0; l < lanes; l++) {
       const y = oy + l * (laneH + 10);
       ctx.fillStyle = muted;
-      ctx.globalAlpha = 0.15;
+      ctx.globalAlpha = 0.06 + handoff * 0.12;
       ctx.fillRect(ox, y, tw, laneH);
       ctx.globalAlpha = 1;
     }
 
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < CLIP; i++) {
       const lane = i % lanes;
-      const y = oy + lane * (laneH + 10) + laneH * 0.15;
-      const x = ox + (i % 6) * (tw / 6.5);
-      const cw = tw / 7 + (i % 3) * 12;
-      ctx.fillStyle = tags[i % 3]!;
-      ctx.globalAlpha = head >= x && head <= x + cw ? 0.95 : 0.55;
-      ctx.fillRect(x, y, cw, laneH * 0.7);
+      const tag0 = i % 3;
+      const rank = Math.floor(i / 3);
+      const stagger = Math.min(
+        1,
+        Math.max(0, libLocal * 1.35 - rank * 0.07 - tag0 * 0.04),
+      );
+      const settle = 1 - Math.pow(1 - stagger, 3);
+      const ax = cx + (tag0 - 1) * gapX - cellW / 2;
+      const ay = cy + (rank - (perCol - 1) / 2) * gapY - cellH / 2;
+      const seed = (i * 0.71) % 0.82;
+      const u = (((seed - scroll / tw) % 1) + 1) % 1;
+      const gen = Math.floor(scroll / tw + 1 - seed);
+      const cw = tw * (0.07 + ((i * 3 + gen * 2) % 5) * 0.02);
+      const tag = (i + Math.max(0, gen)) % 3;
+      const bx = ox + u * tw;
+      const by = oy + lane * (laneH + 10) + laneH * 0.15;
+      const d = landingHandoffMotion(t, "library", "arrange", i);
+      const o = landingHandoffOpacity(t, "library", "arrange", i);
+      const x = ax * settle + (bx - ax * settle) * d;
+      const y = ay * settle + (by - ay * settle) * d;
+      const enter = Math.min(1, Math.max(0, (1 - u) / 0.14));
+      const exit = Math.min(1, Math.max(0, u / 0.14));
+      ctx.fillStyle = tags[tag]!;
+      ctx.globalAlpha = o * enter * exit * (0.45 + o * 0.5);
+      ctx.fillRect(
+        x,
+        y,
+        cellW * 0.72 + (cw - cellW * 0.72) * d,
+        cellH + (laneH * 0.7 - cellH) * d,
+      );
     }
 
     ctx.strokeStyle = primary;
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = 0.25 + handoff * 0.55;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(head, oy - 6);
@@ -552,16 +648,17 @@ export class GlLandingFlow extends LitElement {
     local: number,
     primary: string,
     tags: readonly [string, string, string],
+    bias: { x: number; y: number },
   ): void {
-    const cx = w * 0.5;
-    const cy = h * 0.48;
+    const cx = w * 0.5 + bias.x;
+    const cy = h * 0.5 + bias.y;
     const maxR = Math.min(w, h) * 0.16;
     for (let i = 0; i < 4; i++) {
       const phase = (local + t * 0.25 + i * 0.15) % 1;
       const r = 20 + phase * maxR;
       ctx.strokeStyle = i % 2 === 0 ? primary : tags[1]!;
-      ctx.globalAlpha = (1 - phase) * 0.4;
-      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = (1 - phase) * 0.45;
+      ctx.lineWidth = 0.5;
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.stroke();

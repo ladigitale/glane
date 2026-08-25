@@ -14,10 +14,12 @@ import {
   DSP_THRESHOLDS,
   computeInterestScore,
   durationMsFromPcm,
+  interleavedToAudioBuffer,
   songSlice,
   toMonoPcm,
   type CaptureLiveState,
 } from "@glane/audio-dsp";
+import { TransportEngine } from "@glane/audio-engine";
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import tailwind from "../../css/tailwind";
@@ -50,7 +52,7 @@ import {
   nextSensitivity,
   pruneCaptureTimes,
 } from "../capture-rate-regulator.js";
-import { t, tf } from "../i18n/messages.js";
+import { soundCountLabel, t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import { deleteSample } from "../sample-actions.js";
 import { importForHunt, ImportTempoError } from "../import-for-hunt.js";
@@ -69,11 +71,14 @@ import {
 } from "../project-workspace.js";
 import { captureFormKey, captureFeedKey, captureQueueKey } from "../dp-keys.js";
 import { glIcon } from "../icon.js";
+import { loadSampleAudio } from "../load-sample-audio.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { chromeMore } from "../more-menu.js";
+import { renderSamplePlayButton } from "../sample-play-button.js";
+import { tip } from "../tip.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
-import "@supersoniks/concorde/fieldset";
+import "../form-stack.js";
 import "@supersoniks/concorde/form-layout";
 import "@supersoniks/concorde/queue";
 import "@supersoniks/concorde/table";
@@ -121,8 +126,8 @@ export class GlCapturePage extends LitElement {
       :host {
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
-        padding: 1.75rem 1rem 1.25rem;
+        gap: 0.5rem;
+        padding: 1rem 1rem 1.25rem;
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
         padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
@@ -134,13 +139,13 @@ export class GlCapturePage extends LitElement {
       .feed {
         flex: 1 1 auto;
         min-height: 8rem;
-        max-height: min(40vh, 22rem);
+        max-height: min(48vh, 26rem);
         overflow: auto;
         overscroll-behavior: contain;
       }
       .rec-wrap sonic-button {
-        --sc-btn-height: 5.5rem;
-        --sc-_fs: 1.75rem;
+        --sc-btn-height: 4.5rem;
+        --sc-_fs: 1.5rem;
       }
       /* Circle + icon-only: Concorde main-slot grows / icon baseline shifts. */
       .rec-wrap sonic-button::part(button) {
@@ -159,9 +164,6 @@ export class GlCapturePage extends LitElement {
       .rec-wrap sonic-icon {
         line-height: 0;
         vertical-align: 0;
-      }
-      .capture-config-modal sonic-fieldset {
-        --sc-fieldset-mb: 0;
       }
       .capture-config-modal input[type="range"] {
         width: 100%;
@@ -269,10 +271,12 @@ export class GlCapturePage extends LitElement {
   @state() private importBusy = false;
   @state() private importRatio = 0;
   @state() private importExtracted = 0;
+  @state() private playingId: string | null = null;
 
   #live: LiveCapture | null = null;
   #hunter: EventHunter | null = null;
   #hunt: Session | null = null;
+  #engine: TransportEngine | null = null;
   #analyseTimer: number | null = null;
   #clockTimer: number | null = null;
   /** Absolute RollingPcmWindow cursor — gap-free EventHunter feed. */
@@ -304,6 +308,7 @@ export class GlCapturePage extends LitElement {
   };
 
   #syncChromeMore(): void {
+    if (!this.isConnected) return;
     chromeMore.set({
       ariaLabel: t("capture.more"),
       items: [
@@ -390,6 +395,9 @@ export class GlCapturePage extends LitElement {
     this.#unsubProc = null;
     this.#importAbort?.abort();
     this.#importAbort = null;
+    this.#engine?.stop();
+    this.#engine = null;
+    this.playingId = null;
     void this.#shutdownMic();
     super.disconnectedCallback();
   }
@@ -439,20 +447,16 @@ export class GlCapturePage extends LitElement {
 
   #renderStatusSlot() {
     const alert = this.#captureStatusAlert();
+    if (!alert) return nothing;
     return html`
-      <div
-        class="box-border flex h-14 shrink-0 items-center overflow-hidden"
-        aria-live="polite"
-      >
-        ${alert
-          ? html`<sonic-alert
-              class="w-full min-w-0"
-              size="xs"
-              status=${alert.status}
-              label=${alert.label}
-              >${alert.text || nothing}</sonic-alert
-            >`
-          : nothing}
+      <div class="box-border min-w-0 shrink-0" aria-live="polite">
+        <sonic-alert
+          class="w-full min-w-0"
+          size="xs"
+          status=${alert.status}
+          label=${alert.label}
+          >${alert.text || nothing}</sonic-alert
+        >
       </div>
     `;
   }
@@ -636,32 +640,34 @@ export class GlCapturePage extends LitElement {
         accept=".wav,.wave,.mp3,audio/wav,audio/wave,audio/x-wav,audio/mpeg,audio/mp3"
         @change=${(e: Event) => void this.#onImportFile(e)}
       />
-      <div
-        class="rec-wrap flex min-h-[7.5rem] items-center justify-center py-5"
-      >
-        <sonic-button
-          type=${this.listening ? "danger" : "primary"}
-          shape="circle"
-          size="2xl"
-          icon
-          ?disabled=${this.importBusy}
-          data-aria-label=${this.listening
-            ? t("capture.stop")
-            : t("capture.start")}
-          title=${`${this.listening ? t("capture.stop") : t("capture.start")} (Espace)`}
-          @click=${this.#toggle}
-        >
-          <span class="inline-flex items-center justify-center leading-none"
-            >${glIcon(this.listening ? "square" : "mic", {
-              size: "xl",
-            })}</span
-          >
-        </sonic-button>
+      <div class="rec-wrap flex items-center justify-center py-2">
+        ${tip(
+          `${this.listening ? t("capture.stop") : t("capture.start")} (Espace)`,
+          html`
+            <sonic-button
+              type=${this.listening ? "danger" : "primary"}
+              shape="circle"
+              size="2xl"
+              icon
+              ?disabled=${this.importBusy}
+              data-aria-label=${this.listening
+                ? t("capture.stop")
+                : t("capture.start")}
+              @click=${this.#toggle}
+            >
+              <span class="inline-flex items-center justify-center leading-none"
+                >${glIcon(this.listening ? "square" : "mic", {
+                  size: "lg",
+                })}</span
+              >
+            </sonic-button>
+          `,
+        )}
       </div>
-      <div class="flex flex-col gap-1.5">
+      <div class="flex flex-col gap-1">
         <div class="flex items-baseline justify-between gap-3">
           <div class="flex items-center gap-2.5">
-            <span class="font-mono tabular-nums">${formatClock(this.clockMs)}</span>
+            <span class="font-mono text-sm tabular-nums">${formatClock(this.clockMs)}</span>
             ${this.micOpen
               ? html`<span
                   class="font-mono text-[0.75rem] tabular-nums text-neutral-500"
@@ -741,10 +747,7 @@ export class GlCapturePage extends LitElement {
           `
         : nothing}
       ${this.#renderConfigModal()}
-      <div
-        class="mt-1 flex flex-col"
-        formDataProvider=${captureFormKey.path}
-      >
+      <div class="flex flex-col" formDataProvider=${captureFormKey.path}>
         <sonic-form-layout>
           <sonic-input
             class="w-full max-w-md opacity-90"
@@ -752,13 +755,13 @@ export class GlCapturePage extends LitElement {
             type="text"
             size="sm"
             label=${t("capture.name")}
-            description=${t("capture.nameHint")}
+            title=${t("capture.nameHint")}
             ?disabled=${this.listening}
           ></sonic-input>
         </sonic-form-layout>
       </div>
       <div
-        class="mt-6 flex flex-col gap-2"
+        class="mt-2 flex min-h-0 flex-1 flex-col gap-1.5"
         formDataProvider=${captureFeedKey.path}
         dataFilterProvider=${captureFeedKey.path}
       >
@@ -772,13 +775,11 @@ export class GlCapturePage extends LitElement {
                     : "Aucun son extrait pour l’instant."}
               </p>`
             : nothing}
-          <div class="flex flex-col gap-1.5">
-            <p class="text-right text-xs text-neutral-500">
-              ${tf("common.soundCount", {
-                n: this.sampleCount,
-              })}
+          <div class="flex flex-col gap-1">
+            <p class="min-h-[1.25em] text-xs leading-[1.25em] text-neutral-500">
+              ${soundCountLabel(this.sampleCount)}
             </p>
-            <sonic-table size="sm" bordered rounded maxHeight="min(40vh, 22rem)">
+            <sonic-table size="sm" bordered rounded maxHeight="min(48vh, 26rem)">
               <sonic-tbody>
                 ${this.queueMounted && this.feedSessionId && this.feedProjectId
                   ? html`
@@ -809,6 +810,7 @@ export class GlCapturePage extends LitElement {
             @click=${() => (this.economy = false)}
             role="button"
             tabindex="0"
+            title=${t("capture.economy")}
           >
             <div class="halo" style="opacity:${0.2 + this.level.rms * 2}"></div>
             <span class="absolute bottom-8">${t("capture.economy")}</span>
@@ -827,59 +829,78 @@ export class GlCapturePage extends LitElement {
   #renderFeedRow = (row: FeedRow) => {
     const tags = row.tags ?? [];
     const name = row.userName?.trim() || row.name || row.id.slice(0, 8);
+    const playing = this.playingId === row.id;
     return html`
-      <sonic-tr>
+      <sonic-tr type=${playing ? "info" : nothing}>
         <sonic-td
           minWidth="10rem"
           vAlign="middle"
           @click=${() => navigate({ name: "sample", id: row.id })}
         >
-          <div>
-            ${name}${
-              isProcessingBusy(tags)
-                ? ` · ${t("library.processing")}`
-                : isProcessingError(tags)
-                  ? ` · ${t("library.processingError")}`
-                  : tags.includes("processing:done")
-                    ? " · ok"
+          ${tip(
+            t("sample.open"),
+            html`
+              <div>
+                ${name}${
+                  isProcessingBusy(tags)
+                    ? ` · ${t("library.processing")}`
+                    : isProcessingError(tags)
+                      ? ` · ${t("library.processingError")}`
+                      : tags.includes("processing:done")
+                        ? " · ok"
+                        : ""
+                }${
+                  row.interestScore != null
+                    ? ` · ★${Math.round(row.interestScore * 100)}`
                     : ""
-            }${
-              row.interestScore != null
-                ? ` · ★${Math.round(row.interestScore * 100)}`
-                : ""
-            }
-          </div>
-          <div class="font-mono text-[0.7rem] text-neutral-500">
-            ${row.class}${row.loopProposed ? " · boucle" : ""}${
-              tags.length ? ` · ${tags.slice(0, 4).join(" · ")}` : ""
-            }
-          </div>
+                }
+              </div>
+              <div class="font-mono text-[0.7rem] text-neutral-500">
+                ${row.class}${row.loopProposed ? " · boucle" : ""}${
+                  tags.length ? ` · ${tags.slice(0, 4).join(" · ")}` : ""
+                }
+              </div>
+            `,
+            { class: "w-full max-w-full justify-start text-left", focusable: true },
+          )}
         </sonic-td>
-        <sonic-td width="4.5rem" align="right" vAlign="middle">
+        <sonic-td width="6.5rem" align="right" vAlign="middle">
+          ${renderSamplePlayButton({
+            playing,
+            onClick: () => void this.#audition(row.id),
+          })}
           ${isProcessingError(tags)
-            ? html`<sonic-button
+            ? tip(
+                t("library.retryProcess"),
+                html`<sonic-button
+                  shape="circle"
+                  variant="ghost"
+                  type="warning"
+                  size="sm"
+                  icon
+                  data-aria-label=${t("library.retryProcess")}
+                  @click=${() => void processQueue.reanalyzeSample(row.id)}
+                >
+                  ${glIcon("refresh-cw", { size: "sm" })}
+                </sonic-button>`,
+              )
+            : nothing}
+          ${tip(
+            t("dialog.delete"),
+            html`
+              <sonic-button
                 shape="circle"
                 variant="ghost"
-                type="warning"
+                type="neutral"
                 size="sm"
                 icon
-                data-aria-label=${t("library.retryProcess")}
-                @click=${() => void processQueue.reanalyzeSample(row.id)}
+                data-aria-label=${t("dialog.delete")}
+                @click=${() => void this.#removeExtracted(row.id)}
               >
-                ${glIcon("refresh-cw", { size: "sm" })}
-              </sonic-button>`
-            : nothing}
-          <sonic-button
-            shape="circle"
-            variant="ghost"
-            type="neutral"
-            size="sm"
-            icon
-            data-aria-label=${t("dialog.delete")}
-            @click=${() => void this.#removeExtracted(row.id)}
-          >
-            ${glIcon("x", { size: "sm" })}
-          </sonic-button>
+                ${glIcon("x", { size: "sm" })}
+              </sonic-button>
+            `,
+          )}
         </sonic-td>
       </sonic-tr>
     `;
@@ -894,7 +915,7 @@ export class GlCapturePage extends LitElement {
           <sonic-td minWidth="10rem">
             <span class="block h-2.5 w-2/5 rounded bg-neutral-200"></span>
           </sonic-td>
-          <sonic-td width="4.5rem" align="right"></sonic-td>
+          <sonic-td width="6.5rem" align="right"></sonic-td>
         </sonic-tr>
       `,
     )}
@@ -982,8 +1003,8 @@ export class GlCapturePage extends LitElement {
       >
         <sonic-modal-title>${t("capture.configTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="capture-config-modal flex w-full flex-col gap-5">
-            <sonic-fieldset
+          <gl-form-stack gap="lg" class="capture-config-modal">
+            <gl-form-section
               label=${t("capture.sectionInput")}
               description=${t("capture.sectionInputHint")}
             >
@@ -1040,9 +1061,9 @@ export class GlCapturePage extends LitElement {
                   </span>
                 </label>
               </sonic-form-layout>
-            </sonic-fieldset>
+            </gl-form-section>
 
-            <sonic-fieldset
+            <gl-form-section
               label=${t("capture.sectionSlice")}
               description=${t("capture.sectionSliceHint")}
             >
@@ -1058,9 +1079,9 @@ export class GlCapturePage extends LitElement {
                 </div>
                 ${this.#renderTargetRateSection()}
               </sonic-form-layout>
-            </sonic-fieldset>
+            </gl-form-section>
 
-            <sonic-fieldset
+            <gl-form-section
               label=${t("capture.mlYamnet")}
               description=${t("capture.mlYamnetHint")}
             >
@@ -1125,9 +1146,9 @@ export class GlCapturePage extends LitElement {
                     `
                   : nothing}
               </sonic-form-layout>
-            </sonic-fieldset>
+            </gl-form-section>
 
-            <sonic-fieldset
+            <gl-form-section
               label=${t("capture.mlClap")}
               description=${t("capture.mlClapHint")}
             >
@@ -1184,9 +1205,9 @@ export class GlCapturePage extends LitElement {
                     `
                   : nothing}
               </sonic-form-layout>
-            </sonic-fieldset>
+            </gl-form-section>
 
-            <sonic-fieldset
+            <gl-form-section
               label=${t("capture.mlDemucsStems")}
               description=${t("capture.mlDemucsStemsHint")}
             >
@@ -1207,8 +1228,8 @@ export class GlCapturePage extends LitElement {
                   )}
                 </div>
               </sonic-form-layout>
-            </sonic-fieldset>
-          </div>
+            </gl-form-section>
+          </gl-form-stack>
         </sonic-modal-content>
         <sonic-modal-actions>
           <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
@@ -1882,8 +1903,28 @@ export class GlCapturePage extends LitElement {
     void this.#persistCapturePrefs();
   }
 
+  async #audition(id: string): Promise<void> {
+    const sample = await db.samples.get(id);
+    if (!sample || sample.deletedAt) return;
+    this.#engine ??= new TransportEngine();
+    const data = await loadSampleAudio(sample);
+    if (!data) return;
+    const buf = interleavedToAudioBuffer(
+      this.#engine.ctx,
+      data.pcm,
+      data.sampleRate,
+      data.channelCount,
+    );
+    this.playingId = id;
+    this.#engine.audition(buf, 5);
+  }
+
   async #removeExtracted(id: string): Promise<void> {
     await deleteSample(id);
+    if (this.playingId === id) {
+      this.#engine?.stop();
+      this.playingId = null;
+    }
     this.#bumpFeed();
   }
 }

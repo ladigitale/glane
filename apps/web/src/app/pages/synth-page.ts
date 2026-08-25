@@ -23,7 +23,7 @@ import {
   type MachineFilterType,
 } from "@glane/audio-synth";
 import tailwind from "../../css/tailwind";
-import { t, tf } from "../i18n/messages.js";
+import { soundCountLabel, t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
 import {
   PROJECT_CHANGE_EVENT,
@@ -43,15 +43,22 @@ import {
   type SynthRoleForm,
 } from "../dp-keys.js";
 import { glIcon } from "../icon.js";
+import { tip } from "../tip.js";
+import { chromeMore } from "../more-menu.js";
+import { renderSamplePlayButton } from "../sample-play-button.js";
+import "../form-stack.js";
 import "../pop-select.js";
 import "@supersoniks/concorde/button";
-import "@supersoniks/concorde/fieldset";
 import "@supersoniks/concorde/form-layout";
 import "@supersoniks/concorde/form-actions";
 import "@supersoniks/concorde/checkbox";
 import "@supersoniks/concorde/switch";
 import "@supersoniks/concorde/divider";
 import "@supersoniks/concorde/alert";
+import "@supersoniks/concorde/table";
+import "@supersoniks/concorde/table-tbody";
+import "@supersoniks/concorde/table-tr";
+import "@supersoniks/concorde/table-td";
 
 type Phase = "edit" | "validate";
 type DraftItem = VariationBatchItem;
@@ -202,6 +209,8 @@ export class GlSynthPage extends LitElement {
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
         padding-bottom: max(5.5rem, env(safe-area-inset-bottom));
+        max-width: 100%;
+        overflow-x: hidden;
         --sc-label-fs: 0.9rem;
         --sc-label-fw: 500;
       }
@@ -232,9 +241,6 @@ export class GlSynthPage extends LitElement {
           var(--sc-neutral-100, #222) 80%,
           transparent
         );
-      }
-      sonic-fieldset {
-        --sc-fieldset-mb: 0;
       }
     `,
   ];
@@ -388,11 +394,14 @@ export class GlSynthPage extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Synth has no page chrome more — clear leftovers from library / arrange.
+    chromeMore.clear();
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     void this.#boot();
   }
 
   override disconnectedCallback(): void {
+    chromeMore.clear();
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     this.#flushPersist();
     this.#stopPlay();
@@ -1198,216 +1207,199 @@ export class GlSynthPage extends LitElement {
       "B",
     ].map((name, i) => ({ value: String(i), label: name }));
     return html`
-      <div
-        class="box-border mx-auto flex w-full max-w-[90rem] flex-col gap-5"
-        formDataProvider=${synthFormKey.path}
-      >
-        <header class="flex flex-wrap items-end justify-between gap-3">
-          <div class="flex min-w-0 flex-col gap-1">
-            <h1 class="font-display m-0 text-2xl lg:text-3xl">
-              ${t("synth.title")}
-            </h1>
-          </div>
-          ${this.#modePop()}
-        </header>
-
-        <div
-          class="grid gap-5 lg:grid-cols-[minmax(17rem,22rem)_minmax(0,1fr)] lg:items-start"
+      <gl-form-stack formDataProvider=${synthFormKey.path}>
+        <gl-form-section
+          label=${t("synth.setup")}
+          description=${t("synth.setupHint")}
         >
-          <aside class="flex flex-col gap-4 lg:sticky lg:top-2">
-            <sonic-fieldset
-              label=${t("synth.setup")}
-              description=${t("synth.setupHint")}
-            >
-              <sonic-form-layout>
-                ${this.#rangeField(
-                  t("synth.quantity"),
-                  this.globalQty,
-                  1,
-                  40,
-                  (n) => set(synthFormKey.globalQty, String(n)),
-                )}
-                ${this.mode !== "song" ? this.#freeFmSwitch() : nothing}
-              </sonic-form-layout>
+          <sonic-form-layout>
+            ${this.#modePop()}
+            ${this.#rangeField(
+              t("synth.quantity"),
+              this.globalQty,
+              1,
+              40,
+              (n) => set(synthFormKey.globalQty, String(n)),
+            )}
+            ${this.mode !== "song" ? this.#freeFmSwitch() : nothing}
+          </sonic-form-layout>
 
-              ${this.mode === "song"
-                ? html`
-                    <sonic-divider></sonic-divider>
-                    <sonic-form-layout>
-                      <div class="form-item-container flex flex-col gap-1">
-                        <span class="form-label">${t("synth.intention")}</span>
-                        <gl-pop-select
-                          class="max-w-full w-full"
-                          size="sm"
-                          .value=${this.intention}
-                          .options=${audioSynth.songIntentions.map((id) => ({
-                            value: id,
-                            label: t(
-                              `synth.intention.${id}` as "synth.intention.full",
-                            ),
-                          }))}
-                          @gl-change=${(e: CustomEvent<{ value: string }>) => {
-                            this.intention = e.detail.value as SongIntention;
-                            this.#applyIntention();
-                          }}
-                        ></gl-pop-select>
-                      </div>
+          ${this.mode === "song"
+            ? html`
+                <sonic-divider></sonic-divider>
+                <sonic-form-layout>
+                  <div class="form-item-container flex flex-col gap-1">
+                    <span class="form-label">${t("synth.intention")}</span>
+                    <gl-pop-select
+                      class="max-w-full w-full"
+                      size="sm"
+                      .value=${this.intention}
+                      .options=${audioSynth.songIntentions.map((id) => ({
+                        value: id,
+                        label: t(
+                          `synth.intention.${id}` as "synth.intention.full",
+                        ),
+                      }))}
+                      @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                        this.intention = e.detail.value as SongIntention;
+                        this.#applyIntention();
+                      }}
+                    ></gl-pop-select>
+                  </div>
 
-                      <div class="flex flex-col gap-2">
-                        <span class="form-label">${t("synth.coherence")}</span>
-                        <div class="flex flex-wrap gap-2">
-                          <sonic-button
-                            unique
-                            name="coherence"
-                            value="parametric"
-                            type="primary"
-                            variant="outline"
+                  <div class="flex flex-col gap-2">
+                    <span class="form-label">${t("synth.coherence")}</span>
+                    <div class="flex flex-wrap gap-2">
+                      <sonic-button
+                        unique
+                        name="coherence"
+                        value="parametric"
+                        type="primary"
+                        variant="outline"
+                        size="sm"
+                      >
+                        ${this.#checkIcon()}
+                        ${t("synth.coherenceParametric")}
+                      </sonic-button>
+                      <sonic-button
+                        unique
+                        name="coherence"
+                        value="musical"
+                        type="primary"
+                        variant="outline"
+                        size="sm"
+                      >
+                        ${this.#checkIcon()}
+                        ${t("synth.coherenceMusical")}
+                      </sonic-button>
+                    </div>
+                  </div>
+
+                  ${this.#freeFmSwitch()}
+                  ${this.coherence === "musical"
+                    ? html`
+                        <div class="form-item-container flex flex-col gap-1">
+                          <span class="form-label">${t("synth.tonic")}</span>
+                          <gl-pop-select
+                            class="max-w-full w-full"
                             size="sm"
-                          >
-                            ${this.#checkIcon()}
-                            ${t("synth.coherenceParametric")}
-                          </sonic-button>
-                          <sonic-button
-                            unique
-                            name="coherence"
-                            value="musical"
-                            type="primary"
-                            variant="outline"
-                            size="sm"
-                          >
-                            ${this.#checkIcon()}
-                            ${t("synth.coherenceMusical")}
-                          </sonic-button>
+                            .value=${String(this.tonicPc)}
+                            .options=${tonicOpts}
+                            @gl-change=${(
+                              e: CustomEvent<{ value: string }>,
+                            ) => {
+                              this.tonicPc = Number(e.detail.value);
+                            }}
+                          ></gl-pop-select>
                         </div>
-                      </div>
+                        <div class="form-item-container flex flex-col gap-1">
+                          <span class="form-label">${t("synth.scale")}</span>
+                          <gl-pop-select
+                            class="max-w-full w-full"
+                            size="sm"
+                            .value=${this.scaleMode}
+                            .options=${[
+                              {
+                                value: "major",
+                                label: t("synth.scaleMajor"),
+                              },
+                              {
+                                value: "minor",
+                                label: t("synth.scaleMinor"),
+                              },
+                            ]}
+                            @gl-change=${(
+                              e: CustomEvent<{ value: string }>,
+                            ) => {
+                              this.scaleMode = e.detail.value as ScaleMode;
+                            }}
+                          ></gl-pop-select>
+                        </div>
+                      `
+                    : nothing}
+                  ${this.#rangeField(
+                    t("synth.bpm"),
+                    this.bpm,
+                    60,
+                    180,
+                    (n) => {
+                      this.bpm = n;
+                    },
+                  )}
+                </sonic-form-layout>
+              `
+            : nothing}
+        </gl-form-section>
 
-                      ${this.#freeFmSwitch()}
-                      ${this.coherence === "musical"
-                        ? html`
-                            <div class="form-item-container flex flex-col gap-1">
-                              <span class="form-label">${t("synth.tonic")}</span>
-                              <gl-pop-select
-                                class="max-w-full w-full"
-                                size="sm"
-                                .value=${String(this.tonicPc)}
-                                .options=${tonicOpts}
-                                @gl-change=${(
-                                  e: CustomEvent<{ value: string }>,
-                                ) => {
-                                  this.tonicPc = Number(e.detail.value);
-                                }}
-                              ></gl-pop-select>
-                            </div>
-                            <div class="form-item-container flex flex-col gap-1">
-                              <span class="form-label">${t("synth.scale")}</span>
-                              <gl-pop-select
-                                class="max-w-full w-full"
-                                size="sm"
-                                .value=${this.scaleMode}
-                                .options=${[
-                                  {
-                                    value: "major",
-                                    label: t("synth.scaleMajor"),
-                                  },
-                                  {
-                                    value: "minor",
-                                    label: t("synth.scaleMinor"),
-                                  },
-                                ]}
-                                @gl-change=${(
-                                  e: CustomEvent<{ value: string }>,
-                                ) => {
-                                  this.scaleMode = e.detail.value as ScaleMode;
-                                }}
-                              ></gl-pop-select>
-                            </div>
-                          `
-                        : nothing}
-                      ${this.#rangeField(
-                        t("synth.bpm"),
-                        this.bpm,
-                        60,
-                        180,
-                        (n) => {
-                          this.bpm = n;
-                        },
-                      )}
-                    </sonic-form-layout>
-                  `
-                : nothing}
-            </sonic-fieldset>
-          </aside>
-
-          <div class="min-w-0 flex flex-col gap-4">
-            <sonic-fieldset
-              label=${t("synth.roles")}
-              description=${t("synth.rolesHint")}
-            >
-              <div class="flex items-center gap-1">
-                <gl-pop-select
-                  class="min-w-0 w-full flex-1"
-                  size="sm"
-                  .value=${this.openCardId}
-                  .options=${this.cards.map((card) => ({
-                    value: card.id,
-                    label: `${t(ROLE_LABEL[card.role] as "synth.role.pivot")} · ${card.quantity}`,
-                  }))}
-                  placeholder=${t("synth.pickRole")}
-                  @gl-change=${(e: CustomEvent<{ value: string }>) => {
-                    set(synthFormKey.openCardId, e.detail.value);
-                  }}
-                ></gl-pop-select>
-                ${this.mode !== "variations" && this.cards.length > 1
-                  ? html`
-                      <sonic-button
-                        type="default"
-                        size="xs"
-                        shape="circle"
-                        data-aria-label=${t("synth.removeRole")}
-                        title=${t("synth.removeRole")}
-                        @click=${() => this.#removeCard(this.openCardId)}
-                      >
-                        ${glIcon("trash-2")}
-                      </sonic-button>
-                    `
-                  : nothing}
-              </div>
-
-              ${this.mode === "family" || this.mode === "song"
-                ? html`
-                    <sonic-divider></sonic-divider>
-                    <sonic-form-actions>
-                      <gl-pop-select
-                        size="sm"
-                        .value=${this.addRole}
-                        .options=${audioSynth.familyRoles.map((r) => ({
-                          value: r,
-                          label: t(ROLE_LABEL[r] as "synth.role.kick"),
-                        }))}
-                        @gl-change=${(e: CustomEvent<{ value: string }>) => {
-                          this.addRole = e.detail.value as SynthRoleId;
-                        }}
-                      ></gl-pop-select>
-                      <sonic-button
-                        type="default"
-                        size="sm"
-                        @click=${() => this.#addFamilyRole()}
-                      >
-                        ${glIcon("plus", { slot: "prefix" })}
-                        ${t("synth.addRole")}
-                      </sonic-button>
-                    </sonic-form-actions>
-                  `
-                : nothing}
-            </sonic-fieldset>
-
-            ${open
-              ? this.#renderCardDetail(open)
-              : html`<sonic-alert status="info" label=${t("synth.roles")}
-                  >${t("synth.pickRole")}</sonic-alert
-                >`}
+        <gl-form-section
+          label=${t("synth.roles")}
+          description=${t("synth.rolesHint")}
+        >
+          <div class="flex items-center gap-1">
+            <gl-pop-select
+              class="min-w-0 w-full flex-1"
+              size="sm"
+              .value=${this.openCardId}
+              .options=${this.cards.map((card) => ({
+                value: card.id,
+                label: `${t(ROLE_LABEL[card.role] as "synth.role.pivot")} · ${card.quantity}`,
+              }))}
+              placeholder=${t("synth.pickRole")}
+              @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                set(synthFormKey.openCardId, e.detail.value);
+              }}
+            ></gl-pop-select>
+            ${this.mode !== "variations" && this.cards.length > 1
+              ? tip(
+                  t("synth.removeRole"),
+                  html`
+                    <sonic-button
+                      type="default"
+                      size="xs"
+                      shape="circle"
+                      data-aria-label=${t("synth.removeRole")}
+                      @click=${() => this.#removeCard(this.openCardId)}
+                    >
+                      ${glIcon("trash-2")}
+                    </sonic-button>
+                  `,
+                )
+              : nothing}
           </div>
-        </div>
+
+          ${this.mode === "family" || this.mode === "song"
+            ? html`
+                <sonic-divider></sonic-divider>
+                <sonic-form-actions>
+                  <gl-pop-select
+                    size="sm"
+                    .value=${this.addRole}
+                    .options=${audioSynth.familyRoles.map((r) => ({
+                      value: r,
+                      label: t(ROLE_LABEL[r] as "synth.role.kick"),
+                    }))}
+                    @gl-change=${(e: CustomEvent<{ value: string }>) => {
+                      this.addRole = e.detail.value as SynthRoleId;
+                    }}
+                  ></gl-pop-select>
+                  <sonic-button
+                    type="default"
+                    size="sm"
+                    @click=${() => this.#addFamilyRole()}
+                  >
+                    ${glIcon("plus", { slot: "prefix" })}
+                    ${t("synth.addRole")}
+                  </sonic-button>
+                </sonic-form-actions>
+              `
+            : nothing}
+        </gl-form-section>
+
+        ${open
+          ? this.#renderCardDetail(open)
+          : html`<sonic-alert status="info" label=${t("synth.roles")}
+              >${t("synth.pickRole")}</sonic-alert
+            >`}
 
         <footer
           class="sticky bottom-0 z-10 -mx-4 mt-2 flex flex-col gap-2 border-t border-neutral-200 bg-neutral-0/95 px-4 py-3 backdrop-blur"
@@ -1435,12 +1427,15 @@ export class GlSynthPage extends LitElement {
               @click=${() => void this.#generate()}
             >
               ${this.busy
+                ? nothing
+                : glIcon("audio-lines", { slot: "prefix" })}
+              ${this.busy
                 ? this.progress || t("synth.generating")
                 : t("synth.generate")}
             </sonic-button>
           </sonic-form-actions>
         </footer>
-      </div>
+      </gl-form-stack>
     `;
   }
 
@@ -1455,7 +1450,7 @@ export class GlSynthPage extends LitElement {
     kind: EngineKind,
   ) {
     return html`
-      <sonic-fieldset variant="ghost" label=${label}>
+      <gl-form-section variant="ghost" label=${label}>
         <sonic-form-layout>
           ${keys.map((key) =>
             this.#paramRow(
@@ -1469,7 +1464,7 @@ export class GlSynthPage extends LitElement {
             ),
           )}
         </sonic-form-layout>
-      </sonic-fieldset>
+      </gl-form-section>
     `;
   }
 
@@ -1483,7 +1478,7 @@ export class GlSynthPage extends LitElement {
       !roleOwnsDsp && (!showMachine || this.roleEngineUi === "1");
     return html`
       <div formDataProvider=${synthRoleFormKey.path}>
-        <sonic-fieldset
+        <gl-form-section
           label=${`${t(ROLE_LABEL[card.role] as "synth.role.pivot")} — ${t("synth.roleEdit")}`}
         >
           <sonic-form-layout>
@@ -1700,85 +1695,90 @@ export class GlSynthPage extends LitElement {
               ${glIcon("play", { slot: "prefix" })} ${t("synth.preview")}
             </sonic-button>
           </sonic-form-actions>
-        </sonic-fieldset>
+        </gl-form-section>
       </div>
     `;
   }
 
   #renderValidate() {
+    const total = this.drafts.length;
+    const selectedCount = this.validateSelected.length;
+    const allSelected = total > 0 && selectedCount >= total;
     return html`
       <div
-        class="box-border mx-auto flex w-full max-w-[90rem] flex-col gap-4"
+        class="box-border flex w-full max-w-full flex-col gap-4"
         formDataProvider=${synthValidateFormKey.path}
       >
-        <header class="flex flex-wrap items-center justify-between gap-2">
-          <h1 class="font-display m-0 text-2xl">${t("synth.validateTitle")}</h1>
-          <sonic-button
-            type="default"
+        <div class="flex flex-col gap-1.5">
+          <sonic-checkbox
+            class="text-xs text-neutral-500"
             size="sm"
-            @click=${() => {
-              this.#stopPlay();
-              this.phase = "edit";
-            }}
-          >
-            ${t("synth.backEdit")}
-          </sonic-button>
-        </header>
-
-        <sonic-form-actions>
-          <sonic-button
-            type="default"
-            size="sm"
-            @click=${() => {
+            checksAll
+            title=${t("synth.selectAll")}
+            .checked=${allSelected
+              ? true
+              : selectedCount > 0
+                ? "indeterminate"
+                : null}
+            ?disabled=${total === 0}
+            @change=${() => {
               set(
                 synthValidateFormKey.selected,
-                this.drafts.map((_, i) => String(i)),
+                allSelected ? [] : this.drafts.map((_, i) => String(i)),
               );
             }}
-            >${t("synth.selectAll")}</sonic-button
           >
-          <sonic-button
-            type="default"
+            ${soundCountLabel(total)}
+          </sonic-checkbox>
+          <sonic-table
             size="sm"
-            @click=${() => set(synthValidateFormKey.selected, [])}
-            >${t("synth.selectNone")}</sonic-button
+            bordered
+            rounded
+            maxHeight="calc(100dvh - 16rem)"
           >
-        </sonic-form-actions>
-
-        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          ${this.drafts.map(
-            (d, i) => html`
-              <sonic-fieldset variant="ghost">
-                <div class="flex items-start gap-2">
-                  <sonic-checkbox name="selected" value=${String(i)} size="sm">
-                    #${i + 1}
-                    ${d.meta.role && d.meta.role !== "pivot"
-                      ? html` · ${d.meta.role}`
-                      : nothing}
-                    · ${d.durationMs} ms
-                    ${d.meta.fundHz != null
-                      ? html` · ${Math.round(d.meta.fundHz)} Hz`
-                      : nothing}
-                    · ${d.meta.roleSynth
-                      ? t("synth.roleSynth")
-                      : d.meta.engines.join("+")}
-                  </sonic-checkbox>
-                  <sonic-button
-                    type="default"
-                    size="xs"
-                    shape="circle"
-                    @click=${() => void this.#playPcm(d.pcm, d.sampleRate)}
-                  >
-                    ${glIcon("play")}
-                  </sonic-button>
-                </div>
-                <canvas
-                  class="gl-synth-wave mt-2"
-                  data-wave=${String(i)}
-                ></canvas>
-              </sonic-fieldset>
-            `,
-          )}
+            <sonic-tbody>
+              ${this.drafts.map(
+                (d, i) => html`
+                  <sonic-tr>
+                    <sonic-td width="2.5rem" vAlign="middle" align="center">
+                      <sonic-checkbox
+                        name="selected"
+                        value=${String(i)}
+                        size="sm"
+                      ></sonic-checkbox>
+                    </sonic-td>
+                    <sonic-td minWidth="12rem" vAlign="middle">
+                      <div>
+                        #${i + 1}
+                        ${d.meta.role && d.meta.role !== "pivot"
+                          ? html` · ${t(ROLE_LABEL[d.meta.role] as "synth.role.pivot")}`
+                          : nothing}
+                      </div>
+                      <div class="font-mono text-xs text-neutral-500">
+                        ${d.durationMs} ms
+                        ${d.meta.fundHz != null
+                          ? html` · ${Math.round(d.meta.fundHz)} Hz`
+                          : nothing}
+                        ·
+                        ${d.meta.roleSynth
+                          ? t("synth.roleSynth")
+                          : d.meta.engines.join("+")}
+                      </div>
+                      <canvas
+                        class="gl-synth-wave mt-2"
+                        data-wave=${String(i)}
+                      ></canvas>
+                    </sonic-td>
+                    <sonic-td width="2.5rem" align="right" vAlign="middle">
+                      ${renderSamplePlayButton({
+                        onClick: () => void this.#playPcm(d.pcm, d.sampleRate),
+                      })}
+                    </sonic-td>
+                  </sonic-tr>
+                `,
+              )}
+            </sonic-tbody>
+          </sonic-table>
         </div>
 
         ${this.statusMsg
@@ -1787,17 +1787,35 @@ export class GlSynthPage extends LitElement {
             >`
           : nothing}
 
-        <sonic-form-actions>
-          <sonic-button
-            type="primary"
-            size="md"
-            ?disabled=${this.busy || this.validateSelected.length === 0}
-            ?loading=${this.busy}
-            @click=${() => void this.#saveSelected()}
-          >
-            ${t("synth.addToLibrary")}
-          </sonic-button>
-        </sonic-form-actions>
+        <footer
+          class="sticky bottom-0 z-10 -mx-4 mt-2 flex flex-col gap-2 border-t border-neutral-200 bg-neutral-0/95 px-4 py-3 backdrop-blur"
+        >
+          <sonic-form-actions>
+            <sonic-button
+              variant="outline"
+              type="neutral"
+              size="md"
+              ?disabled=${this.busy}
+              @click=${() => {
+                this.#stopPlay();
+                this.phase = "edit";
+              }}
+            >
+              ${glIcon("x", { slot: "prefix" })}
+              ${t("synth.cancel")}
+            </sonic-button>
+            <sonic-button
+              type="primary"
+              size="md"
+              ?disabled=${this.busy || selectedCount === 0}
+              ?loading=${this.busy}
+              @click=${() => void this.#saveSelected()}
+            >
+              ${glIcon("library", { slot: "prefix" })}
+              ${t("synth.addToLibrary")}
+            </sonic-button>
+          </sonic-form-actions>
+        </footer>
       </div>
     `;
   }

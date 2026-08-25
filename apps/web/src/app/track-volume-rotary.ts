@@ -8,6 +8,7 @@ import {
   trackGainAngleToLin,
   trackGainLinToAngle,
 } from "./seq-schedule.js";
+import { tip } from "./tip.js";
 
 /**
  * Compact AudioRoom-inspired track volume rotary (0…2× linear → gainDb).
@@ -81,30 +82,34 @@ export class GlTrackVolumeRotary extends LitElement {
     const arc = this.#arcPath(cx, cy, r, t0, angle);
     const knobX = cx + Math.cos(angle) * (r - 3);
     const knobY = cy + Math.sin(angle) * (r - 3);
-    return html`
-      <svg
-        class="block h-full w-full overflow-visible"
-        viewBox="0 0 44 44"
-        role="slider"
-        aria-valuemin="0"
-        aria-valuemax=${TRACK_GAIN_LIN_MAX}
-        aria-valuenow=${Number(lin.toFixed(2))}
-        aria-label=${this.label}
-        @pointerdown=${this.#onDown}
-      >
-        ${svg`
-          <circle class="ring" cx=${cx} cy=${cy} r=${r} />
-          ${
-            lin > 0
-              ? svg`<path class="fill" d=${arc} />`
-              : svg``
-          }
-          <circle class="hub" cx=${cx} cy=${cy} r=${rInner} />
-          <line class="needle" x1=${cx} y1=${cy} x2=${knobX} y2=${knobY} />
-          <circle class="tip" cx=${knobX} cy=${knobY} r="2.5" />
-        `}
-      </svg>
-    `;
+    return tip(
+      this.label,
+      html`
+        <svg
+          class="block h-full w-full overflow-visible"
+          viewBox="0 0 44 44"
+          role="slider"
+          aria-valuemin="0"
+          aria-valuemax=${TRACK_GAIN_LIN_MAX}
+          aria-valuenow=${Number(lin.toFixed(2))}
+          aria-label=${this.label}
+          @pointerdown=${this.#onDown}
+        >
+          ${svg`
+            <circle class="ring" cx=${cx} cy=${cy} r=${r} />
+            ${
+              lin > 0
+                ? svg`<path class="fill" d=${arc} />`
+                : svg``
+            }
+            <circle class="hub" cx=${cx} cy=${cy} r=${rInner} />
+            <line class="needle" x1=${cx} y1=${cy} x2=${knobX} y2=${knobY} />
+            <circle class="tip" cx=${knobX} cy=${knobY} r="2.5" />
+          `}
+        </svg>
+      `,
+      { class: "block h-full w-full" },
+    );
   }
 
   #arcPath(

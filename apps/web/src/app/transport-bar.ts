@@ -6,6 +6,7 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { glIcon } from "./icon.js";
+import { tip } from "./tip.js";
 
 export type TransportAction = "play" | "pause";
 
@@ -40,6 +41,12 @@ export class GlTransportBar extends LitElement {
   @property({ type: String }) clock = "";
   @property({ type: Boolean }) disabled = false;
 
+  /** Imperative clock — no Lit re-render (transport rAF). */
+  paintClock(clock: string): void {
+    const el = this.renderRoot.querySelector<HTMLElement>(".clock-readout");
+    if (el && el.textContent !== clock) el.textContent = clock;
+  }
+
   override render() {
     const label = this.playing ? "Pause" : "Play";
     const title = `${label} (Espace)`;
@@ -52,33 +59,37 @@ export class GlTransportBar extends LitElement {
         <div class="flex min-w-0 items-center justify-start gap-2">
           ${this.clock
             ? html`<span
-                class="min-w-14 font-mono text-sm text-neutral-500 tabular-nums"
+                class="clock-readout min-w-14 font-mono text-sm text-neutral-500 tabular-nums"
                 aria-live="off"
                 >${this.clock}</span
               >`
             : nothing}
         </div>
         <div class="flex items-center justify-center">
-          <sonic-button
-            class="play-btn"
-            shape="circle"
-            size="2xl"
-            type="primary"
-            icon
-            data-aria-label=${label}
-            title=${title}
-            ?disabled=${this.disabled}
-            ?loading=${this.loading}
-            @click=${() => this.#emit(this.playing ? "pause" : "play")}
-          >
-            ${this.loading
-              ? nothing
-              : this.playing
-                ? glIcon("pause", { size: "xl" })
-                : html`<span class="play-glyph"
-                    >${glIcon("play", { size: "xl" })}</span
-                  >`}
-          </sonic-button>
+          ${tip(
+            title,
+            html`
+              <sonic-button
+                class="play-btn"
+                shape="circle"
+                size="2xl"
+                type="primary"
+                icon
+                data-aria-label=${label}
+                ?disabled=${this.disabled}
+                ?loading=${this.loading}
+                @click=${() => this.#emit(this.playing ? "pause" : "play")}
+              >
+                ${this.loading
+                  ? nothing
+                  : this.playing
+                    ? glIcon("pause", { size: "xl" })
+                    : html`<span class="play-glyph"
+                        >${glIcon("play", { size: "xl" })}</span
+                      >`}
+              </sonic-button>
+            `,
+          )}
         </div>
         <div
           class="end flex items-center justify-end gap-x-2.5 overflow-visible"

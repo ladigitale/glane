@@ -36,6 +36,7 @@ Type + planners: `ensemble.plan` / `applyLock` / `applyRespond` / `applyKinship`
 7. **Coupled arp**: `melodyCellToArpCell(leadCell)` when follower is lock/kinship — same rhythm, chord-tone degrees.
 8. **Role lock offset**: `lockDegreeOffset` — bass 0, chord 2|4 (jazz 4|6), arp 0.
 9. **Style families**: `ensembleProfileForStyle(musicStyle)` — electronic → lock; jazz/folk → respond + alternate bars; ambient → kinship; groove → call–response.
+10. **Tempo / length**: style `bpmHint` / `barsHint` are soft UX+QA only (generate modal). See `docs/guides/style-tempo-bars-checklist.md`.
 
 ## Anti-patterns
 

@@ -60,6 +60,7 @@ import { editorFormKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import { glIcon } from "../icon.js";
+import { tip } from "../tip.js";
 import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { formatClock } from "../timeline/timeline.js";
@@ -130,9 +131,6 @@ export class GlEditorPage extends LitElement {
         height: 280px;
         min-height: 280px;
         flex: none;
-      }
-      .editor-settings-modal sonic-fieldset {
-        --sc-fieldset-mb: 0;
       }
       .editor-settings-modal {
         max-height: min(80vh, 42rem);
@@ -264,6 +262,7 @@ export class GlEditorPage extends LitElement {
   }
 
   #syncChromeMore(): void {
+    if (!this.isConnected) return;
     const selL = Math.min(this.selStart, this.selEnd);
     const selR = Math.max(this.selStart, this.selEnd);
     const hasSel = selR > selL + 1;
@@ -289,18 +288,20 @@ export class GlEditorPage extends LitElement {
         formDataProvider=${editorFormKey.path}
       >
         ${peekEditorHandoff()
-          ? html`<sonic-button
-              shape="circle"
-              variant="ghost"
-              type="neutral"
-              size="sm"
-              icon
-              data-aria-label=${t("editor.backToProject")}
-              title=${t("editor.backToProject")}
-              @click=${() => void this.#backToProject()}
-            >
-              ${glIcon("arrow-left", { size: "sm" })}
-            </sonic-button>`
+          ? tip(
+              t("editor.backToProject"),
+              html`<sonic-button
+                shape="circle"
+                variant="ghost"
+                type="neutral"
+                size="sm"
+                icon
+                data-aria-label=${t("editor.backToProject")}
+                @click=${() => void this.#backToProject()}
+              >
+                ${glIcon("arrow-left", { size: "sm" })}
+              </sonic-button>`,
+            )
           : nothing}
         <sonic-input
           class="rename min-w-0 max-w-full flex-[1_1_10rem]"
@@ -308,19 +309,24 @@ export class GlEditorPage extends LitElement {
           type="text"
           placeholder="Nom du son"
         ></sonic-input>
-        <sonic-button
-          shape="circle"
-          variant="ghost"
-          type="neutral"
-          size="sm"
-          icon
-          data-aria-label=${t("sample.info")}
-          @click=${() => {
-            this.infoOpen = true;
-          }}
-        >
-          ${glIcon("info", { size: "sm" })}
-        </sonic-button>
+        ${tip(
+          t("sample.info"),
+          html`
+            <sonic-button
+              shape="circle"
+              variant="ghost"
+              type="neutral"
+              size="sm"
+              icon
+              data-aria-label=${t("sample.info")}
+              @click=${() => {
+                this.infoOpen = true;
+              }}
+            >
+              ${glIcon("info", { size: "sm" })}
+            </sonic-button>
+          `,
+        )}
       </div>
       ${this.#processingMeta()}
       ${this.rotateTool

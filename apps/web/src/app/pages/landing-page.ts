@@ -71,9 +71,10 @@ export class GlLandingPage extends LitElement {
         scrollbar-gutter: stable;
         pointer-events: auto;
         color: var(--sc-base-content);
-        background: color-mix(in srgb, var(--sc-base) 94%, transparent);
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
+        /* A: let the WebGL scene read through the centered card */
+        background: color-mix(in srgb, var(--sc-base) 72%, transparent);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         border: 1px solid
           color-mix(in srgb, var(--sc-base-content) 14%, transparent);
         border-radius: calc(var(--sc-rounded, 0.5rem) + 0.35rem);
