@@ -29,10 +29,17 @@ describe("turntableRateFromOmega", () => {
 });
 
 describe("platterOmegaFromRotationRate", () => {
-  it("prefers alpha when present", () => {
+  it("prefers gamma (screen-normal Z) when present", () => {
     assert.equal(
-      platterOmegaFromRotationRate({ alpha: 10, beta: 90, gamma: 90 }),
+      platterOmegaFromRotationRate({ alpha: 90, beta: 90, gamma: 10 }),
       10,
+    );
+  });
+
+  it("falls back to largest |ω| when gamma missing", () => {
+    assert.equal(
+      platterOmegaFromRotationRate({ alpha: 10, beta: -40, gamma: null }),
+      -40,
     );
   });
 });

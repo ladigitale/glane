@@ -167,6 +167,7 @@ export class GlLibraryPage extends LitElement {
   @state() private batchBusy = false;
   @state() private separatingId: string | null = null;
   @state() private separateProgress = "";
+  @state() private exportProgress = "";
   @state() private clapBusy = false;
   @state() private clapStatus = "";
   @state() private infoId: string | null = null;
@@ -876,11 +877,11 @@ export class GlLibraryPage extends LitElement {
         />
       </div>
 
-      ${this.separateProgress
+      ${this.separateProgress || this.exportProgress
         ? html`<sonic-alert
             class="mb-3"
             status="info"
-            label=${this.separateProgress}
+            label=${this.exportProgress || this.separateProgress}
           ></sonic-alert>`
         : nothing}
       ${this.clapBusy || this.clapStatus
@@ -1129,32 +1130,81 @@ export class GlLibraryPage extends LitElement {
         ? await this.#samplesByIds(selectedIds)
         : await filteredSamples(this.#filterQuery());
     if (samples.length === 0) return;
+    const targetLabels: Record<MachineTarget, string> = {
+      octatrack: t("library.exportOctatrack"),
+      digitakt: t("library.exportDigitakt"),
+      digitakt2: t("library.exportDigitakt2"),
+      mpc2000xl: t("library.exportMpc2000xl"),
+    };
     const target = (await glDialog.choose({
       title: t("library.exportMachineTitle"),
       message: `${t("library.exportMachineMsg")} (${samples.length})`,
       options: [
-        { value: "octatrack", label: t("library.exportOctatrack") },
-        { value: "mpc2000xl", label: t("library.exportMpc2000xl") },
+        { value: "octatrack", label: targetLabels.octatrack },
+        { value: "digitakt", label: targetLabels.digitakt },
+        { value: "digitakt2", label: targetLabels.digitakt2 },
+        { value: "mpc2000xl", label: targetLabels.mpc2000xl },
       ],
     })) as MachineTarget | null;
     if (!target) return;
+    const levelsChoice = await glDialog.choose({
+      title: t("library.exportLevelsTitle"),
+      message: t("library.exportLevelsMsg"),
+      options: [
+        { value: "keep", label: t("library.exportLevelsKeep") },
+        { value: "norm", label: t("library.exportLevelsNorm") },
+      ],
+    });
+    if (!levelsChoice) return;
+    const normalizePeak = levelsChoice === "norm";
     this.batchBusy = true;
+    this.exportProgress = tf("library.exportProgress", {
+      done: 0,
+      total: samples.length,
+    });
     try {
-      const { blob, exported, skipped } =
-        await libraryMachineExport.buildZip(samples, target);
-      if (exported === 0) {
+      const result = await libraryMachineExport.buildZip(samples, target, {
+        normalizePeak,
+        onProgress: ({ done, total }) => {
+          this.exportProgress = tf("library.exportProgress", { done, total });
+        },
+      });
+      if (result.exported === 0) {
         await glDialog.alert(t("library.exportEmpty"));
         return;
       }
       const project = await projectWorkspace.ensure();
       if (!project) return;
-      libraryMachineExport.download(project.title, target, blob);
-      if (skipped > 0) {
-        await glDialog.alert(
-          `${t("library.exportDone")} — ${exported} WAV, ${skipped} ignoré(s).`,
-        );
-      }
+      libraryMachineExport.download(project.title, target, result.blob);
+      const channels =
+        result.stereo > 0
+          ? tf("library.exportChannelsMixed", {
+              mono: result.mono,
+              stereo: result.stereo,
+            })
+          : tf("library.exportChannelsMono", { n: result.mono });
+      const rate =
+        result.rate === 48_000
+          ? t("library.exportRate48000")
+          : t("library.exportRate44100");
+      await glDialog.alert({
+        title: t("library.exportDone"),
+        message: tf("library.exportDoneDetail", {
+          exported: result.exported,
+          target: targetLabels[target],
+          rate,
+          channels,
+          levels: result.normalized
+            ? t("library.exportLevelsNormalized")
+            : t("library.exportLevelsKept"),
+          skipped:
+            result.skipped > 0
+              ? tf("library.exportSkipped", { n: result.skipped })
+              : "",
+        }),
+      });
     } finally {
+      this.exportProgress = "";
       this.batchBusy = false;
     }
   }

@@ -36,8 +36,10 @@ export function smoothTurntableRate(
 }
 
 /**
- * Pick the dominant rotation axis while the phone lies roughly flat
- * (face up on a platter): prefer Z / alpha.
+ * Platter spin = ω around screen-normal (device Z).
+ *
+ * DeviceMotion `rotationRate` axes (W3C / MDN) differ from DeviceOrientation:
+ * alpha→X (pitch), beta→Y (roll), gamma→Z (yaw / screen-normal).
  */
 export function platterOmegaFromRotationRate(rr: {
   alpha: number | null;
@@ -51,8 +53,8 @@ export function platterOmegaFromRotationRate(rr: {
     (v): v is number => v != null && Number.isFinite(v),
   );
   if (candidates.length === 0) return 0;
-  // Alpha is yaw around screen-normal when device is flat — best platter axis.
-  if (a != null && Number.isFinite(a)) return a;
+  // Gamma = Z = twist about the line perpendicular to the screen.
+  if (g != null && Number.isFinite(g)) return g;
   let best = candidates[0]!;
   for (const v of candidates) {
     if (Math.abs(v) > Math.abs(best)) best = v;
