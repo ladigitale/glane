@@ -26,6 +26,7 @@ const PALETTES = new Set([
 ]);
 const FORMS = new Set(["auto", "song", "ambient"]);
 const TRI = new Set(["auto", "on", "off"]);
+const ENSEMBLE_RELATIONS = new Set(["auto", "lock", "respond", "kinship"]);
 const STYLE_SET = new Set<string>(["auto", ...MUSIC_STYLE_IDS]);
 
 /** Generator dialog drafts — restored with the arrangement chrome. */
@@ -51,6 +52,8 @@ export type SeqGenUiState = {
   reverse: string;
   stutter: string;
   callResponse: string;
+  /** Melodic voice arrangement: auto | lock | respond | kinship */
+  ensembleRelation: string;
   lockPitch: string;
   pitchUpSemitones: number | "auto";
   pitchDownSemitones: number | "auto";
@@ -98,6 +101,7 @@ export const DEFAULT_SEQ_GEN_UI: SeqGenUiState = {
   reverse: "auto",
   stutter: "auto",
   callResponse: "auto",
+  ensembleRelation: "auto",
   lockPitch: "off",
   pitchUpSemitones: "auto",
   pitchDownSemitones: "auto",
@@ -217,6 +221,11 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
     reverse: oneOf(o.reverse, TRI, DEFAULT_SEQ_GEN_UI.reverse),
     stutter: oneOf(o.stutter, TRI, DEFAULT_SEQ_GEN_UI.stutter),
     callResponse: oneOf(o.callResponse, TRI, DEFAULT_SEQ_GEN_UI.callResponse),
+    ensembleRelation: oneOf(
+      o.ensembleRelation,
+      ENSEMBLE_RELATIONS,
+      DEFAULT_SEQ_GEN_UI.ensembleRelation,
+    ),
     lockPitch: oneOf(
       o.lockPitch,
       new Set(["on", "off"]),

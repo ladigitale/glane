@@ -20,7 +20,7 @@ import {
   type Track,
   type TrackFx,
 } from "@glane/core-model";
-import { TransportEngine, type TrackInsertConfig } from "@glane/audio-engine";
+import { TransportEngine, type TapeScrubVoice, type TrackInsertConfig } from "@glane/audio-engine";
 import {
   frameCount,
   interleavedToAudioBuffer,
@@ -65,7 +65,10 @@ import {
   type GenPaletteChoice,
   type GenScaleMode,
   type GenTriState,
+  type GenEnsembleRelation,
+  type VoiceRelation,
 } from "../generative.js";
+import { SonicToast } from "@supersoniks/concorde/toast";
 import { clapFeatureFromAnalysis } from "../ml/clap-runtime.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { SAMPLE_PROCESSED_EVENT, resolveSamplePitchHz } from "../process-queue.js";
@@ -128,7 +131,7 @@ import "../seek-bar.js";
 import "../transport-bar.js";
 import "../vu-meter.js";
 import { glIcon } from "../icon.js";
-import { renderSamplePlayButton } from "../sample-play-button.js";
+import { renderSamplePlayButton, setSampleAuditionPlaying, getSampleAuditionPlaying, clearSampleAudition } from "../sample-play-button.js";
 import { tip } from "../tip.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
@@ -678,7 +681,6 @@ export class GlSequencerPage extends LitElement {
   @state() private playheadTick = 0;
   @state() private loadingPlay = false;
   @state() private placingSampleId: string | null = null;
-  @state() private auditionId: string | null = null;
   @state() private ghost: { x: number; y: number; label: string } | null =
     null;
   @state() private cancelHot = false;
@@ -718,6 +720,7 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenReverse: GenTriState = "auto";
   @state() private draftGenStutter: GenTriState = "auto";
   @state() private draftGenCallResponse: GenTriState = "auto";
+  @state() private draftGenEnsembleRelation: GenEnsembleRelation = "auto";
   @state() private draftGenLockPitch: GenTriState = "off";
   @state() private draftGenPitchUp: number | GenAuto = "auto";
   @state() private draftGenPitchDown: number | GenAuto = "auto";
@@ -764,6 +767,7 @@ export class GlSequencerPage extends LitElement {
   }
 
   #engine: TransportEngine | null = null;
+  #auditionGen = 0;
   #fsm = new GestureFsm();
   @state() private dragClipId: string | null = null;
   #dragStartX = 0;
@@ -795,6 +799,8 @@ export class GlSequencerPage extends LitElement {
   #raf = 0;
   /** Bumps to cancel in-flight schedule hydration. */
   #hydrateGen = 0;
+  /** Bumps on pause / superseding play — only latest play arm may set playing. */
+  #playGen = 0;
   /** Tick horizon already covered by the live schedule window. */
   #scheduledToTick = 0;
   #tlRo: ResizeObserver | null = null;
@@ -804,6 +810,9 @@ export class GlSequencerPage extends LitElement {
   #viewBusy = false;
   /** Manual playhead / seek-bar drag — owns position over transport RAF. */
   #scrubbing = false;
+  #tapeRaf = 0;
+  /** Resume transport after tape scrub if it was playing. */
+  #resumeAfterTape = false;
   /** ~30 fps transport paint on coarse pointers (mobile). */
   #transportFrameMs =
     typeof matchMedia !== "undefined" &&
@@ -836,7 +845,9 @@ export class GlSequencerPage extends LitElement {
     }
     if (!isSpaceKey(e) || shouldIgnoreShortcut(e)) return;
     e.preventDefault();
-    void this.#handleTransport(this.playing ? "pause" : "play");
+    void this.#handleTransport(
+      this.playing || this.loadingPlay ? "pause" : "play",
+    );
   };
 
   #onPageHide = (): void => {
@@ -964,6 +975,7 @@ export class GlSequencerPage extends LitElement {
     this.#stopSelEdgeScroll();
     this.#scrollInertia.cancel();
     this.#engine?.stop();
+    clearSampleAudition();
     this.#revokeReel();
     super.disconnectedCallback();
   }
@@ -1026,6 +1038,7 @@ export class GlSequencerPage extends LitElement {
         reverse: this.draftGenReverse,
         stutter: this.draftGenStutter,
         callResponse: this.draftGenCallResponse,
+        ensembleRelation: this.draftGenEnsembleRelation,
         lockPitch: this.draftGenLockPitch,
         pitchUpSemitones: this.draftGenPitchUp,
         pitchDownSemitones: this.draftGenPitchDown,
@@ -1109,6 +1122,13 @@ export class GlSequencerPage extends LitElement {
     this.draftGenReverse = g.reverse as GenTriState;
     this.draftGenStutter = g.stutter as GenTriState;
     this.draftGenCallResponse = g.callResponse as GenTriState;
+    this.draftGenEnsembleRelation = (
+      g.ensembleRelation === "lock" ||
+      g.ensembleRelation === "respond" ||
+      g.ensembleRelation === "kinship"
+        ? g.ensembleRelation
+        : "auto"
+    ) as GenEnsembleRelation;
     this.draftGenLockPitch = g.lockPitch === "on" ? "on" : "off";
     this.draftGenPitchUp = g.pitchUpSemitones;
     this.draftGenPitchDown = g.pitchDownSemitones;
@@ -1585,7 +1605,7 @@ export class GlSequencerPage extends LitElement {
 
   #renderDrawerSampleRow(s: Sample) {
     const placing = this.placingSampleId === s.id;
-    const playing = this.auditionId === s.id;
+    const playing = getSampleAuditionPlaying() === s.id;
     const title = s.userName ?? s.name;
     return html`
       <sonic-tr
@@ -1615,7 +1635,7 @@ export class GlSequencerPage extends LitElement {
         </sonic-td>
         <sonic-td width="1.75rem" align="center" vAlign="middle">
           ${renderSamplePlayButton({
-            playing,
+            sampleId: s.id,
             size: "2xs",
             onClick: () => void this.#audition(s),
           })}
@@ -1980,6 +2000,13 @@ export class GlSequencerPage extends LitElement {
   }
 
   async #audition(s: Sample): Promise<void> {
+    if (getSampleAuditionPlaying() === s.id) {
+      // Shared engine — also clears a stuck transport `playing` flag.
+      this.#haltTransport();
+      return;
+    }
+    // Audition shares the engine with transport — halt play chrome first.
+    if (this.playing) this.#haltTransport();
     this.#engine ??= new TransportEngine();
     const data = await loadSampleAudio(s);
     if (!data) return;
@@ -1989,8 +2016,11 @@ export class GlSequencerPage extends LitElement {
       data.sampleRate,
       data.channelCount,
     );
-    this.auditionId = s.id;
-    this.#engine.audition(buf, 5);
+    const gen = ++this.#auditionGen;
+    setSampleAuditionPlaying(s.id);
+    this.#engine.audition(buf, 5, () => {
+      if (gen === this.#auditionGen) clearSampleAudition();
+    });
   }
 
   #drawerDown = (e: PointerEvent, sample: Sample): void => {
@@ -2530,6 +2560,16 @@ export class GlSequencerPage extends LitElement {
     );
   }
 
+  #bufferCacheKey(
+    sampleId: string,
+    clip?: Clip,
+    opts?: { bakeCopy?: boolean },
+  ): string {
+    const bakeCopy = opts?.bakeCopy === true;
+    if (!clip) return sampleId;
+    return `${sampleId}:${clip.stretchMode}:${clip.lengthTick}:${clip.contentOffsetMs}:${clip.loopEnabled ? 1 : 0}:${clip.loopLengthMs ?? 0}:${clip.reverse ? 1 : 0}:${bakeCopy ? "bake" : "live"}`;
+  }
+
   async #loadBufferForSample(
     sampleId: string,
     clip?: Clip,
@@ -2537,9 +2577,7 @@ export class GlSequencerPage extends LitElement {
   ): Promise<AudioBuffer | null> {
     if (!this.#engine || !this.project) return null;
     const bakeCopy = opts?.bakeCopy === true;
-    const cacheKey = clip
-      ? `${sampleId}:${clip.stretchMode}:${clip.lengthTick}:${clip.contentOffsetMs}:${clip.loopEnabled ? 1 : 0}:${clip.loopLengthMs ?? 0}:${clip.reverse ? 1 : 0}:${bakeCopy ? "bake" : "live"}`
-      : sampleId;
+    const cacheKey = this.#bufferCacheKey(sampleId, clip, opts);
     const cached = this.#bufferCache.get(cacheKey);
     if (cached) {
       this.#bufferCache.delete(cacheKey);
@@ -3585,6 +3623,7 @@ export class GlSequencerPage extends LitElement {
     this.draftGenReverse = "auto";
     this.draftGenStutter = "auto";
     this.draftGenCallResponse = "auto";
+    this.draftGenEnsembleRelation = "auto";
     this.draftGenLockPitch = "off";
     this.draftGenPitchUp = "auto";
     this.draftGenPitchDown = "auto";
@@ -3675,6 +3714,35 @@ export class GlSequencerPage extends LitElement {
     await this.#setBars(bars);
     this.draftBpm = this.project?.bpm ?? bpm;
     this.draftBars = this.project?.bars ?? bars;
+  }
+
+  /** When style ≠ Auto and project is outside the hint window, snap to ideals. */
+  async #applyStyleTempoBarsIfNeeded(opts?: {
+    toast?: boolean;
+  }): Promise<boolean> {
+    const style = this.draftGenMusicStyle;
+    if (style === "auto" || !this.project) return false;
+    const fit = styleTempoBarsFit(
+      style,
+      this.project.bpm,
+      this.project.bars,
+    );
+    if (fit.bpmOk && fit.barsOk) return false;
+    const { bpm, bars } = styleSuggestedTempoBars(style);
+    await this.#applyStyleTempoBarsSuggestions();
+    if (opts?.toast) {
+      SonicToast.add({
+        id: "glane-gen-tempo",
+        title: t("seq.generate"),
+        text: tf("seq.genStyleTempoApplied", {
+          bpm: String(bpm),
+          bars: String(bars),
+        }),
+        status: "info",
+        preserve: false,
+      });
+    }
+    return true;
   }
 
   #renderGenerateForm(bars: number, seqDurMs: number) {
@@ -3863,6 +3931,9 @@ export class GlSequencerPage extends LitElement {
               ],
               onPick: (v) => {
                 this.draftGenMusicStyle = v as GenMusicStyleChoice;
+                if (v !== "auto") {
+                  void this.#applyStyleTempoBarsIfNeeded({ toast: true });
+                }
               },
             })}
             ${this.#renderStyleTempoBarsHint(bars)}
@@ -3879,6 +3950,22 @@ export class GlSequencerPage extends LitElement {
                 this.draftGenGroove = v as GenGrooveChoice;
               },
             })}
+            ${this.#renderGenChoice({
+              label: t("seq.genEnsembleRelation"),
+              value: this.draftGenEnsembleRelation,
+              options: [
+                ["auto", t("seq.genEnsembleAuto")],
+                ["lock", t("seq.genEnsembleLock")],
+                ["respond", t("seq.genEnsembleRespond")],
+                ["kinship", t("seq.genEnsembleKinship")],
+              ],
+              onPick: (v) => {
+                this.draftGenEnsembleRelation = v as GenEnsembleRelation;
+              },
+            })}
+            <p class="form-description m-0">
+              ${t("seq.genEnsembleRelationHint")}
+            </p>
           </sonic-form-layout>
         </gl-form-section>
 
@@ -4176,6 +4263,9 @@ export class GlSequencerPage extends LitElement {
                       this.draftGenCallResponse = v as GenTriState;
                     },
                   })}
+                  <p class="form-description m-0">
+                    ${t("seq.genCallResponseHint")}
+                  </p>
                 </sonic-form-layout>
               </gl-form-section>
             `
@@ -4698,6 +4788,9 @@ export class GlSequencerPage extends LitElement {
 
   #haltTransport(resetTick?: number): void {
     this.#hydrateGen++;
+    this.#playGen++;
+    this.#auditionGen++;
+    clearSampleAudition();
     if (this.playing && this.#engine && this.project) {
       this.playheadTick = samplesToTicks(
         this.#engine.playheadSample(),
@@ -4707,6 +4800,7 @@ export class GlSequencerPage extends LitElement {
     }
     this.#engine?.stop();
     this.playing = false;
+    this.loadingPlay = false;
     cancelAnimationFrame(this.#raf);
     if (resetTick != null) this.playheadTick = resetTick;
     this.#syncViewWindow();
@@ -4719,6 +4813,11 @@ export class GlSequencerPage extends LitElement {
       this.#haltTransport();
       return;
     }
+    const gen = ++this.#playGen;
+    this.#auditionGen++;
+    clearSampleAudition();
+    // Flip chrome immediately — buildSchedule can take hundreds of ms.
+    this.playing = true;
     this.loadingPlay = true;
     try {
       const range = this.#transportLoopRange();
@@ -4749,6 +4848,11 @@ export class GlSequencerPage extends LitElement {
       const scheduled = await this.#buildSchedule({
         windowTicks: { from: fromTick, to: fromTick + preload },
       });
+      if (gen !== this.#playGen || !this.#engine || !this.project) {
+        if (gen === this.#playGen) this.playing = false;
+        return;
+      }
+
       this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
       this.#engine.setClips(scheduled);
 
@@ -4759,7 +4863,10 @@ export class GlSequencerPage extends LitElement {
       );
 
       this.#engine.play(from);
-      this.playing = true;
+      if (gen !== this.#playGen) {
+        this.#engine.stop();
+        return;
+      }
       this.#setFollowPlayhead(true);
       this.playheadTick = fromTick;
       this.#syncFollowScroll();
@@ -4779,8 +4886,14 @@ export class GlSequencerPage extends LitElement {
         this.#raf = requestAnimationFrame(tick);
       };
       this.#raf = requestAnimationFrame(tick);
+    } catch (err) {
+      if (gen === this.#playGen) {
+        this.playing = false;
+        this.#engine?.stop();
+      }
+      throw err;
     } finally {
-      this.loadingPlay = false;
+      if (gen === this.#playGen) this.loadingPlay = false;
     }
   };
 
@@ -5609,7 +5722,7 @@ export class GlSequencerPage extends LitElement {
     const next = Math.max(0, Math.min(maxT, Math.round(tick)));
     this.playheadTick = next;
     this.#setFollowPlayhead(true);
-    if (this.playing && this.#engine && this.project) {
+    if (this.playing && this.#engine && this.project && !this.#scrubbing) {
       const sample = ticksToSamples(
         asTick(next),
         this.project.bpm,
@@ -5621,6 +5734,90 @@ export class GlSequencerPage extends LitElement {
       });
     }
     this.#syncFollowScroll(true);
+    this.#paintTransportPlayhead(next);
+  }
+
+  #tapeVoicesAtTick(tick: number): TapeScrubVoice[] {
+    if (!this.#engine || !this.project) return [];
+    const sr = this.#engine.sampleRate;
+    const bpm = this.project.bpm;
+    const ph = ticksToSamples(asTick(tick), bpm, sr);
+    const audible = audibleTrackIds(this.tracks);
+    const out: TapeScrubVoice[] = [];
+    for (const clip of this.clips) {
+      if (!audible.has(clip.trackId) || !clip.sampleId) continue;
+      const clipEnd = clip.startTick + clip.lengthTick;
+      if (tick < clip.startTick || tick >= clipEnd) continue;
+      const cacheKey = this.#bufferCacheKey(clip.sampleId, clip);
+      const buf = this.#bufferCache.get(cacheKey);
+      if (!buf) {
+        void this.#loadBufferForSample(clip.sampleId, clip);
+        continue;
+      }
+      const startS = ticksToSamples(asTick(clip.startTick), bpm, sr);
+      const intoClip = Math.max(0, ph - startS);
+      const contentOffset = msToSamples(clip.contentOffsetMs, sr);
+      let bufferOffset = contentOffset + intoClip;
+      if (clip.loopEnabled) {
+        const ls = Math.max(0, Math.floor(contentOffset));
+        const loopLenMs = clip.loopLengthMs;
+        const le =
+          loopLenMs != null && loopLenMs > 0
+            ? Math.min(
+                buf.length,
+                ls + Math.max(1, msToSamples(loopLenMs, sr)),
+              )
+            : buf.length;
+        const loopLen = Math.max(1, le - ls);
+        bufferOffset = ls + ((bufferOffset - ls) % loopLen);
+        if (bufferOffset < ls) bufferOffset += loopLen;
+      } else if (bufferOffset >= buf.length) {
+        continue;
+      }
+      out.push({
+        key: clip.id,
+        buffer: buf,
+        sample: bufferOffset,
+        gain: dbToGain(clip.gainDb),
+        trackId: clip.trackId,
+        pitchRate: Math.pow(2, (clip.pitchSemitones ?? 0) / 12),
+      });
+    }
+    return out;
+  }
+
+  #driveTapeAtTick(tick: number): void {
+    if (!this.#engine || !this.project) return;
+    this.#engine.tapeScrub(this.#tapeVoicesAtTick(tick));
+  }
+
+  #beginTapeScrub(_tick: number): void {
+    this.#scrubbing = true;
+    this.#setFollowPlayhead(true);
+    if (this.playing) {
+      this.#resumeAfterTape = true;
+      this.#haltTransport();
+    } else {
+      this.#resumeAfterTape = false;
+    }
+    cancelAnimationFrame(this.#tapeRaf);
+    const tick = () => {
+      if (!this.#scrubbing) return;
+      this.#driveTapeAtTick(this.playheadTick);
+      this.#tapeRaf = requestAnimationFrame(tick);
+    };
+    this.#tapeRaf = requestAnimationFrame(tick);
+  }
+
+  async #endTapeScrub(): Promise<void> {
+    this.#scrubbing = false;
+    cancelAnimationFrame(this.#tapeRaf);
+    this.#tapeRaf = 0;
+    this.#engine?.endTapeScrub();
+    if (this.#resumeAfterTape) {
+      this.#resumeAfterTape = false;
+      await this.#handleTransport("play");
+    }
   }
 
   #playheadDown = (e: PointerEvent): void => {
@@ -5629,8 +5826,7 @@ export class GlSequencerPage extends LitElement {
     e.stopPropagation();
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
-    this.#scrubbing = true;
-    this.#setFollowPlayhead(true);
+    this.#beginTapeScrub(this.playheadTick);
     // Delta scrub keeps the playhead centered like play-mode follow.
     let lastX = e.clientX;
     this.#syncFollowScroll(true);
@@ -5640,7 +5836,7 @@ export class GlSequencerPage extends LitElement {
       this.#seekPlayheadTick(this.playheadTick + dx / this.pxPerTick);
     };
     const up = () => {
-      this.#scrubbing = false;
+      void this.#endTapeScrub();
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
@@ -5653,8 +5849,7 @@ export class GlSequencerPage extends LitElement {
   };
 
   #onSeekBarStart = (): void => {
-    this.#scrubbing = true;
-    this.#setFollowPlayhead(true);
+    this.#beginTapeScrub(this.playheadTick);
   };
 
   #onSeekBar = (e: CustomEvent<{ value: number }>): void => {
@@ -5662,7 +5857,7 @@ export class GlSequencerPage extends LitElement {
   };
 
   #onSeekBarEnd = (): void => {
-    this.#scrubbing = false;
+    void this.#endTapeScrub();
     this.#setFollowPlayhead(true);
     this.#syncFollowScroll(true);
   };
@@ -6071,6 +6266,8 @@ export class GlSequencerPage extends LitElement {
       return;
     }
 
+    await this.#applyStyleTempoBarsIfNeeded({ toast: true });
+
     const analysisRows = await db.analyses.bulkGet(pool.map((s) => s.id));
     const analysisById = new Map(
       analysisRows
@@ -6100,6 +6297,7 @@ export class GlSequencerPage extends LitElement {
       reverse: this.draftGenReverse,
       stutter: this.draftGenStutter,
       callResponse: this.draftGenCallResponse,
+      ensembleRelation: this.draftGenEnsembleRelation,
       lockPitch: this.draftGenLockPitch,
       pitchUpSemitones: this.draftGenPitchUp,
       pitchDownSemitones: this.draftGenPitchDown,
@@ -6226,6 +6424,44 @@ export class GlSequencerPage extends LitElement {
     this.#bufferCache.clear();
     if (navigator.vibrate) navigator.vibrate([8, 30, 8]);
     if (this.playing) await this.#resyncSchedule();
+    this.#toastEnsembleSummary(planned.ensemble);
+  }
+
+  #toastEnsembleSummary(
+    ensemble:
+      | {
+          relations: VoiceRelation[];
+          primaryLeadTrack: number | null;
+        }
+      | undefined,
+  ): void {
+    if (!ensemble?.relations.length) return;
+    const parts = ensemble.relations
+      .map((r, i) => {
+        if (i === ensemble.primaryLeadTrack) {
+          return t("seq.genEnsembleRel.independent");
+        }
+        if (r === "independent") return null;
+        const key =
+          r === "lock"
+            ? "seq.genEnsembleRel.lock"
+            : r === "respond"
+              ? "seq.genEnsembleRel.respond"
+              : r === "kinship"
+                ? "seq.genEnsembleRel.kinship"
+                : null;
+        return key ? t(key) : null;
+      })
+      .filter((x): x is string => x != null);
+    if (parts.length === 0) return;
+    const unique = [...new Set(parts)];
+    SonicToast.add({
+      id: "glane-gen-ensemble",
+      title: t("seq.generate"),
+      text: tf("seq.genEnsembleDone", { summary: unique.join(" · ") }),
+      status: "success",
+      preserve: false,
+    });
   }
 }
 

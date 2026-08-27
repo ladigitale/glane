@@ -15,9 +15,13 @@ import {
   computeInterestScore,
   durationMsFromPcm,
   interleavedToAudioBuffer,
+  runProcessJob,
+  sliceFrames,
   songSlice,
   toMonoPcm,
   type CaptureLiveState,
+  type ClipCharacterization,
+  type TempoEstimate,
 } from "@glane/audio-dsp";
 import { TransportEngine } from "@glane/audio-engine";
 import { LitElement, css, html, nothing } from "lit";
@@ -52,10 +56,26 @@ import {
   nextSensitivity,
   pruneCaptureTimes,
 } from "../capture-rate-regulator.js";
+import {
+  SLICE_DURATION,
+  durationPassesSliceFilter,
+  parseOptionalDurationMs,
+  resolveSliceDurationFilter,
+} from "../slice-duration.js";
 import { soundCountLabel, t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
-import { deleteSample } from "../sample-actions.js";
+import {
+  decodeAudioFileToPcm,
+  deleteSample,
+  isImportableAudio,
+} from "../sample-actions.js";
 import { importForHunt, ImportTempoError } from "../import-for-hunt.js";
+import {
+  slicePreview,
+  type SlicePreviewHit,
+  type SlicePreviewRegion,
+  type SlicePreviewResult,
+} from "../slice-preview.js";
 import {
   isProcessingBusy,
   isProcessingError,
@@ -74,11 +94,12 @@ import { glIcon } from "../icon.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { chromeMore } from "../more-menu.js";
-import { renderSamplePlayButton } from "../sample-play-button.js";
+import { renderSamplePlayButton, setSampleAuditionPlaying, getSampleAuditionPlaying, clearSampleAudition } from "../sample-play-button.js";
 import { tip } from "../tip.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
 import "../form-stack.js";
+import "../timeline/slice-preview-wave.js";
 import "@supersoniks/concorde/form-layout";
 import "@supersoniks/concorde/queue";
 import "@supersoniks/concorde/table";
@@ -263,6 +284,9 @@ export class GlCapturePage extends LitElement {
   @state() private attackSensitivity = DEFAULT_ATTACK_SENSITIVITY;
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
   @state() private fileProcessMode: FileProcessMode = "hunt";
+  /** null = DSP default. */
+  @state() private sliceMinDurationMs: number | null = null;
+  @state() private sliceMaxDurationMs: number | null = null;
   @state() private measuredRatePerMin = 0;
   @state() private configModalOpen = false;
   @state() private scoutBlocked = false;
@@ -271,12 +295,26 @@ export class GlCapturePage extends LitElement {
   @state() private importBusy = false;
   @state() private importRatio = 0;
   @state() private importExtracted = 0;
-  @state() private playingId: string | null = null;
+  @state() private previewFileName = "";
+  @state() private previewBusy = false;
+  @state() private previewResult: SlicePreviewResult | null = null;
+  @state() private previewSelected = -1;
+  @state() private previewDetailBusy = false;
+  @state() private previewDetailMono: Float32Array | null = null;
+  @state() private previewDetailMeta: {
+    durationMs: number;
+    interestScore: number;
+    tags: string[];
+    class: string;
+    kept: boolean;
+    analysis: ClipCharacterization | null;
+  } | null = null;
 
   #live: LiveCapture | null = null;
   #hunter: EventHunter | null = null;
   #hunt: Session | null = null;
   #engine: TransportEngine | null = null;
+  #auditionGen = 0;
   #analyseTimer: number | null = null;
   #clockTimer: number | null = null;
   /** Absolute RollingPcmWindow cursor — gap-free EventHunter feed. */
@@ -292,6 +330,30 @@ export class GlCapturePage extends LitElement {
   #lastRateAdjustMs = 0;
   #scoutStarting = false;
   #importAbort: AbortController | null = null;
+  #previewFile: File | null = null;
+  #previewPcm: Float32Array | null = null;
+  #previewMono: Float32Array | null = null;
+  #previewSampleRate = 48_000;
+  #previewChannelCount = 1;
+  #previewHuntHits: SlicePreviewHit[] | null = null;
+  #previewTempo: TempoEstimate | null = null;
+  #previewOpenFloor: number | null = null;
+  #previewDurationKey = "";
+  #previewAbort: AbortController | null = null;
+  #previewTimer: number | null = null;
+  /** Lazy polish cache keyed by region index. */
+  #previewProcessed = new Map<
+    number,
+    {
+      pcm: Float32Array;
+      mono: Float32Array;
+      durationMs: number;
+      interestScore: number;
+      tags: string[];
+      analysis: ClipCharacterization;
+    }
+  >();
+  #previewSelectGen = 0;
 
   @handle(captureFormKey.autoGain)
   onAutoGainFromForm(v: "1" | null): void {
@@ -395,9 +457,14 @@ export class GlCapturePage extends LitElement {
     this.#unsubProc = null;
     this.#importAbort?.abort();
     this.#importAbort = null;
+    this.#previewAbort?.abort();
+    this.#previewAbort = null;
+    if (this.#previewTimer != null) window.clearTimeout(this.#previewTimer);
+    this.#previewTimer = null;
     this.#engine?.stop();
     this.#engine = null;
-    this.playingId = null;
+    this.#auditionGen++;
+    clearSampleAudition();
     void this.#shutdownMic();
     super.disconnectedCallback();
   }
@@ -543,6 +610,8 @@ export class GlCapturePage extends LitElement {
       prefs.targetCapturesPerMin ?? DEFAULT_TARGET_CAPTURES_PER_MIN,
     );
     this.fileProcessMode = prefs.fileProcessMode ?? "hunt";
+    this.sliceMinDurationMs = parseOptionalDurationMs(prefs.sliceMinDurationMs);
+    this.sliceMaxDurationMs = parseOptionalDurationMs(prefs.sliceMaxDurationMs);
     this.audioDeviceId = prefs.captureAudioDeviceId ?? "";
     this.#syncCaptureForm();
   }
@@ -563,6 +632,8 @@ export class GlCapturePage extends LitElement {
       attackSensitivity: this.attackSensitivity,
       targetCapturesPerMin: this.targetCapturesPerMin,
       fileProcessMode: this.fileProcessMode,
+      sliceMinDurationMs: this.sliceMinDurationMs,
+      sliceMaxDurationMs: this.sliceMaxDurationMs,
       captureAudioDeviceId: this.audioDeviceId || undefined,
     });
   }
@@ -573,11 +644,19 @@ export class GlCapturePage extends LitElement {
     );
   }
 
+  #sliceLengthFilter() {
+    return resolveSliceDurationFilter({
+      minMs: this.sliceMinDurationMs,
+      maxMs: this.sliceMaxDurationMs,
+    });
+  }
+
   #onTargetRateInput = (e: Event): void => {
     const v = Number((e.target as HTMLInputElement).value);
     this.targetCapturesPerMin = clampTargetPerMin(
       Number.isFinite(v) ? v : DEFAULT_TARGET_CAPTURES_PER_MIN,
     );
+    this.#scheduleSlicePreview();
   };
 
   #onTargetRateChange = (e: Event): void => {
@@ -639,6 +718,13 @@ export class GlCapturePage extends LitElement {
         type="file"
         accept=".wav,.wave,.mp3,audio/wav,audio/wave,audio/x-wav,audio/mpeg,audio/mp3"
         @change=${(e: Event) => void this.#onImportFile(e)}
+      />
+      <input
+        id="slice-preview-audio"
+        class="sr-only"
+        type="file"
+        accept=".wav,.wave,.mp3,audio/wav,audio/wave,audio/x-wav,audio/mpeg,audio/mp3"
+        @change=${(e: Event) => void this.#onPreviewFile(e)}
       />
       <div class="rec-wrap flex items-center justify-center py-2">
         ${tip(
@@ -829,7 +915,7 @@ export class GlCapturePage extends LitElement {
   #renderFeedRow = (row: FeedRow) => {
     const tags = row.tags ?? [];
     const name = row.userName?.trim() || row.name || row.id.slice(0, 8);
-    const playing = this.playingId === row.id;
+    const playing = getSampleAuditionPlaying() === row.id;
     return html`
       <sonic-tr type=${playing ? "info" : nothing}>
         <sonic-td
@@ -866,7 +952,7 @@ export class GlCapturePage extends LitElement {
         </sonic-td>
         <sonic-td width="6.5rem" align="right" vAlign="middle">
           ${renderSamplePlayButton({
-            playing,
+            sampleId: row.id,
             onClick: () => void this.#audition(row.id),
           })}
           ${isProcessingError(tags)
@@ -992,11 +1078,10 @@ export class GlCapturePage extends LitElement {
     const m = GL_MODAL_PRESETS.wide;
     return html`
       <sonic-modal
+        ?fullScreen=${true}
         align=${m.align}
         paddingX=${m.paddingX}
         paddingY=${m.paddingY}
-        maxWidth=${m.maxWidth}
-        maxHeight=${m.maxHeight}
         .styleSheet=${GL_MODAL_SCROLL_LAYOUT}
         .visible=${this.configModalOpen}
         @hide=${this.#onConfigModalHide}
@@ -1078,6 +1163,8 @@ export class GlCapturePage extends LitElement {
                   ${this.#renderFileModeRadios()}
                 </div>
                 ${this.#renderTargetRateSection()}
+                ${this.#renderSliceDurationFields()}
+                ${this.#renderSlicePreview()}
               </sonic-form-layout>
             </gl-form-section>
 
@@ -1238,6 +1325,341 @@ export class GlCapturePage extends LitElement {
     `;
   }
 
+  #renderSliceDurationFields() {
+    const wholeMode = this.fileProcessMode === "whole";
+    return html`
+      <div class="flex w-full flex-col gap-1.5">
+        <span class="text-sm font-medium text-content"
+          >${t("capture.sliceDuration")}</span
+        >
+        <p class="m-0 text-xs leading-snug text-neutral-500">
+          ${wholeMode
+            ? t("capture.sliceDurationHintWhole")
+            : t("capture.sliceDurationHint")}
+        </p>
+        <div class="flex flex-wrap gap-3">
+          <label class="flex min-w-[8rem] flex-1 flex-col gap-1">
+            <span class="text-xs text-neutral-500"
+              >${t("capture.sliceMinMs")}</span
+            >
+            <input
+              class="w-full rounded border border-neutral-300 bg-neutral-0 px-2 py-1.5 font-mono text-sm text-content ${wholeMode
+                ? "cursor-not-allowed opacity-40"
+                : ""}"
+              type="number"
+              inputmode="numeric"
+              min=${SLICE_DURATION.absMinMs}
+              max=${SLICE_DURATION.absMaxMs}
+              step="10"
+              placeholder=${t("capture.sliceDurationEmpty")}
+              .value=${this.sliceMinDurationMs == null
+                ? ""
+                : String(this.sliceMinDurationMs)}
+              ?disabled=${wholeMode}
+              @change=${this.#onSliceMinDurationChange}
+              aria-label=${t("capture.sliceMinMs")}
+            />
+          </label>
+          <label class="flex min-w-[8rem] flex-1 flex-col gap-1">
+            <span class="text-xs text-neutral-500"
+              >${t("capture.sliceMaxMs")}</span
+            >
+            <input
+              class="w-full rounded border border-neutral-300 bg-neutral-0 px-2 py-1.5 font-mono text-sm text-content ${wholeMode
+                ? "cursor-not-allowed opacity-40"
+                : ""}"
+              type="number"
+              inputmode="numeric"
+              min=${SLICE_DURATION.absMinMs}
+              max=${SLICE_DURATION.absMaxMs}
+              step="50"
+              placeholder=${t("capture.sliceDurationEmpty")}
+              .value=${this.sliceMaxDurationMs == null
+                ? ""
+                : String(this.sliceMaxDurationMs)}
+              ?disabled=${wholeMode}
+              @change=${this.#onSliceMaxDurationChange}
+              aria-label=${t("capture.sliceMaxMs")}
+            />
+          </label>
+        </div>
+      </div>
+    `;
+  }
+
+  #renderSlicePreview() {
+    const result = this.previewResult;
+    const err = result?.error;
+    const errText =
+      err === "no-tempo"
+        ? t("capture.importNoTempo")
+        : err === "too-long"
+          ? t("capture.previewTooLong")
+          : err === "empty"
+            ? t("capture.previewFailed")
+            : "";
+    const summary = this.#previewSummaryLabel();
+    return html`
+      <div class="flex flex-col gap-1.5">
+        <span class="text-sm font-medium text-content"
+          >${t("capture.previewFile")}</span
+        >
+        <p class="m-0 text-xs leading-snug text-neutral-500">
+          ${t("capture.previewFileHint")}
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <sonic-button
+            size="sm"
+            variant="outline"
+            type="neutral"
+            @click=${this.#pickPreviewFile}
+          >
+            ${glIcon("upload", { slot: "prefix", size: "sm" })}
+            ${t("capture.previewFilePick")}
+          </sonic-button>
+          ${this.previewFileName
+            ? html`
+                <span
+                  class="min-w-0 max-w-[12rem] truncate font-mono text-[0.75rem] text-content"
+                  title=${this.previewFileName}
+                  >${this.previewFileName}</span
+                >
+                ${tip(
+                  t("capture.previewFileClear"),
+                  html`
+                    <sonic-button
+                      shape="circle"
+                      variant="ghost"
+                      type="neutral"
+                      size="sm"
+                      icon
+                      data-aria-label=${t("capture.previewFileClear")}
+                      @click=${this.#clearPreviewFile}
+                    >
+                      ${glIcon("x", { size: "sm" })}
+                    </sonic-button>
+                  `,
+                )}
+              `
+            : nothing}
+        </div>
+        ${this.previewBusy
+          ? html`<p class="m-0 text-xs text-neutral-500">
+              ${t("capture.previewAnalyzing")}
+            </p>`
+          : nothing}
+        ${errText
+          ? html`<p class="m-0 text-xs leading-snug text-warning">${errText}</p>`
+          : nothing}
+        ${!errText &&
+        result &&
+        result.regions.length === 0 &&
+        result.mode !== "whole"
+          ? html`<p class="m-0 text-xs leading-snug text-neutral-500">
+              ${t("capture.previewEmpty")}
+            </p>`
+          : nothing}
+        ${summary && !errText
+          ? html`<p
+              class="m-0 font-mono text-[0.75rem] leading-snug text-neutral-500"
+            >
+              ${summary}
+            </p>`
+          : nothing}
+        ${this.#previewMono
+          ? html`
+              <gl-slice-preview-wave
+                class="mt-1"
+                .pcm=${this.#previewMono}
+                .sampleRate=${this.#previewSampleRate}
+                .regions=${result?.regions ?? []}
+                .selectedIndex=${this.previewSelected}
+                @gl-slice-preview-play=${this.#onPreviewSlicePlay}
+              ></gl-slice-preview-wave>
+            `
+          : nothing}
+        ${this.#renderSlicePreviewDetail()}
+        ${this.#previewFile && result && !err
+          ? html`
+              <sonic-button
+                size="sm"
+                type="primary"
+                ?disabled=${this.importBusy || this.listening}
+                @click=${() => void this.#processPreviewFile()}
+              >
+                ${t("capture.previewFileProcess")}
+              </sonic-button>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  #renderSlicePreviewDetail() {
+    const result = this.previewResult;
+    if (!result || result.error || result.regions.length === 0) return nothing;
+    const n = result.regions.length;
+    const idx = this.previewSelected;
+    const region = idx >= 0 ? result.regions[idx] : null;
+    const meta = this.previewDetailMeta;
+    const detailRegions =
+      this.previewDetailMono && this.previewDetailMono.length > 0
+        ? [
+            {
+              startFrame: 0,
+              endFrame: this.previewDetailMono.length,
+              class: (region?.class ?? "texture") as SlicePreviewRegion["class"],
+              kind: (region?.kind ?? "texture") as SlicePreviewRegion["kind"],
+              interestScore: meta?.interestScore ?? region?.interestScore ?? 0,
+              durationMs: meta?.durationMs ?? region?.durationMs ?? 0,
+              kept: region?.kept ?? true,
+            },
+          ]
+        : [];
+    const canPrev = idx > 0;
+    const canNext = idx >= 0 && idx < n - 1;
+    const canPrevKept = this.#findKeptIndex(idx, -1) >= 0;
+    const canNextKept = this.#findKeptIndex(idx, 1) >= 0;
+    const posLabel =
+      idx >= 0
+        ? tf("capture.previewDetailPos", {
+            i: String(idx + 1),
+            n: String(n),
+          })
+        : "";
+    const infoBits: string[] = [];
+    if (meta) {
+      infoBits.push(`${meta.durationMs} ms`);
+      infoBits.push(`★${Math.round(meta.interestScore * 100)}`);
+      if (meta.class) infoBits.push(meta.class);
+      if (!meta.kept) infoBits.push(t("capture.previewDetailCulled"));
+      if (meta.analysis?.noteName) infoBits.push(meta.analysis.noteName);
+      if (meta.analysis?.bpm)
+        infoBits.push(`${Math.round(meta.analysis.bpm)} BPM`);
+    } else if (region) {
+      infoBits.push(`${region.durationMs} ms`);
+      infoBits.push(`★${Math.round(region.interestScore * 100)}`);
+      infoBits.push(region.class);
+    }
+
+    return html`
+      <div class="mt-2 flex flex-col gap-1.5 rounded-md bg-neutral-100 p-2">
+        <div class="flex flex-wrap items-center gap-1">
+          ${tip(
+            t("capture.previewNavPrevKept"),
+            html`
+              <sonic-button
+                shape="circle"
+                variant="ghost"
+                type="neutral"
+                size="sm"
+                icon
+                ?disabled=${!canPrevKept || this.previewDetailBusy}
+                data-aria-label=${t("capture.previewNavPrevKept")}
+                @click=${() => void this.#navPreviewKept(-1)}
+              >
+                ${glIcon("chevrons-left", { size: "sm" })}
+              </sonic-button>
+            `,
+          )}
+          ${tip(
+            t("capture.previewNavPrev"),
+            html`
+              <sonic-button
+                shape="circle"
+                variant="ghost"
+                type="neutral"
+                size="sm"
+                icon
+                ?disabled=${!canPrev || this.previewDetailBusy}
+                data-aria-label=${t("capture.previewNavPrev")}
+                @click=${() => void this.#navPreview(-1)}
+              >
+                ${glIcon("chevron-left", { size: "sm" })}
+              </sonic-button>
+            `,
+          )}
+          <span
+            class="min-w-0 flex-1 truncate text-center font-mono text-[0.75rem] text-content"
+          >
+            ${posLabel}
+            ${infoBits.length
+              ? html`<span class="text-neutral-500"
+                  > · ${infoBits.join(" · ")}</span
+                >`
+              : nothing}
+          </span>
+          ${tip(
+            t("capture.previewNavNext"),
+            html`
+              <sonic-button
+                shape="circle"
+                variant="ghost"
+                type="neutral"
+                size="sm"
+                icon
+                ?disabled=${!canNext || this.previewDetailBusy}
+                data-aria-label=${t("capture.previewNavNext")}
+                @click=${() => void this.#navPreview(1)}
+              >
+                ${glIcon("chevron-right", { size: "sm" })}
+              </sonic-button>
+            `,
+          )}
+          ${tip(
+            t("capture.previewNavNextKept"),
+            html`
+              <sonic-button
+                shape="circle"
+                variant="ghost"
+                type="neutral"
+                size="sm"
+                icon
+                ?disabled=${!canNextKept || this.previewDetailBusy}
+                data-aria-label=${t("capture.previewNavNextKept")}
+                @click=${() => void this.#navPreviewKept(1)}
+              >
+                ${glIcon("chevrons-right", { size: "sm" })}
+              </sonic-button>
+            `,
+          )}
+        </div>
+        ${this.previewDetailBusy
+          ? html`<p class="m-0 text-xs text-neutral-500">
+              ${t("capture.previewDetailProcessing")}
+            </p>`
+          : nothing}
+        ${this.previewDetailMono
+          ? html`
+              <gl-slice-preview-wave
+                .pcm=${this.previewDetailMono}
+                .sampleRate=${this.#previewSampleRate}
+                .regions=${detailRegions}
+                .selectedIndex=${0}
+              ></gl-slice-preview-wave>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  #previewSummaryLabel(): string {
+    const result = this.previewResult;
+    if (!result || result.error) return "";
+    if (result.mode === "whole") return t("capture.previewSummaryWhole");
+    if (result.mode === "song") {
+      return tf("capture.previewSummarySong", {
+        kept: String(result.kept),
+        bpm: String(Math.round(result.bpm ?? 0)),
+        grid: songGridCaption(this.targetCapturesPerMin),
+      });
+    }
+    return tf("capture.previewSummary", {
+      kept: String(result.kept),
+      culled: String(result.culled),
+    });
+  }
+
   #renderFileModeRadios() {
     const modes: {
       value: FileProcessMode;
@@ -1290,6 +1712,21 @@ export class GlCapturePage extends LitElement {
     if (mode === this.fileProcessMode) return;
     this.fileProcessMode = mode;
     void this.#persistCapturePrefs();
+    this.#scheduleSlicePreview({ immediate: true });
+  };
+
+  #onSliceMinDurationChange = (e: Event): void => {
+    const raw = (e.target as HTMLInputElement).value.trim();
+    this.sliceMinDurationMs = raw === "" ? null : parseOptionalDurationMs(raw);
+    void this.#persistCapturePrefs();
+    this.#scheduleSlicePreview({ immediate: true });
+  };
+
+  #onSliceMaxDurationChange = (e: Event): void => {
+    const raw = (e.target as HTMLInputElement).value.trim();
+    this.sliceMaxDurationMs = raw === "" ? null : parseOptionalDurationMs(raw);
+    void this.#persistCapturePrefs();
+    this.#scheduleSlicePreview({ immediate: true });
   };
 
   #onAudioDeviceChange = (e: Event): void => {
@@ -1457,6 +1894,331 @@ export class GlCapturePage extends LitElement {
       ?.click();
   };
 
+  #pickPreviewFile = (): void => {
+    this.renderRoot
+      .querySelector<HTMLInputElement>("#slice-preview-audio")
+      ?.click();
+  };
+
+  #clearPreviewFile = (): void => {
+    this.#previewAbort?.abort();
+    this.#previewAbort = null;
+    if (this.#previewTimer != null) window.clearTimeout(this.#previewTimer);
+    this.#previewTimer = null;
+    this.#previewFile = null;
+    this.#previewPcm = null;
+    this.#previewMono = null;
+    this.#previewHuntHits = null;
+    this.#previewTempo = null;
+    this.#previewOpenFloor = null;
+    this.#previewDurationKey = "";
+    this.#previewProcessed.clear();
+    this.previewFileName = "";
+    this.previewResult = null;
+    this.previewBusy = false;
+    this.previewSelected = -1;
+    this.previewDetailBusy = false;
+    this.previewDetailMono = null;
+    this.previewDetailMeta = null;
+  };
+
+  async #onPreviewFile(ev: Event): Promise<void> {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0] ?? null;
+    input.value = "";
+    if (!file) return;
+    if (!isImportableAudio(file)) {
+      this.previewResult = {
+        durationMs: 0,
+        sampleRate: this.#previewSampleRate,
+        channelCount: 1,
+        mode: this.fileProcessMode,
+        regions: [],
+        kept: 0,
+        culled: 0,
+        error: "empty",
+      };
+      return;
+    }
+    this.#previewFile = file;
+    this.previewFileName = file.name;
+    this.previewResult = null;
+    this.previewSelected = -1;
+    this.previewDetailMono = null;
+    this.previewDetailMeta = null;
+    this.#previewProcessed.clear();
+    this.#previewHuntHits = null;
+    this.#previewTempo = null;
+    this.previewBusy = true;
+    try {
+      const decoded = await decodeAudioFileToPcm(file);
+      this.#previewPcm = decoded.pcm;
+      this.#previewSampleRate = decoded.sampleRate;
+      this.#previewChannelCount = decoded.channelCount;
+      this.#previewMono = toMonoPcm(decoded.pcm, decoded.channelCount);
+      this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
+    } catch {
+      this.#previewPcm = null;
+      this.#previewMono = null;
+      this.previewBusy = false;
+      this.previewResult = {
+        durationMs: 0,
+        sampleRate: this.#previewSampleRate,
+        channelCount: 1,
+        mode: this.fileProcessMode,
+        regions: [],
+        kept: 0,
+        culled: 0,
+        error: "empty",
+      };
+    }
+  }
+
+  #scheduleSlicePreview(opts?: {
+    immediate?: boolean;
+    freshHunt?: boolean;
+  }): void {
+    if (!this.#previewPcm) return;
+    if (opts?.freshHunt) {
+      this.#previewHuntHits = null;
+      this.#previewTempo = null;
+    }
+    if (this.#previewTimer != null) window.clearTimeout(this.#previewTimer);
+    this.#previewTimer = null;
+    if (opts?.immediate) {
+      void this.#runSlicePreview();
+      return;
+    }
+    this.#previewTimer = window.setTimeout(() => {
+      this.#previewTimer = null;
+      void this.#runSlicePreview();
+    }, 180);
+  }
+
+  async #runSlicePreview(): Promise<void> {
+    const pcm = this.#previewPcm;
+    if (!pcm) return;
+    this.#previewAbort?.abort();
+    const abort = new AbortController();
+    this.#previewAbort = abort;
+    this.previewBusy = true;
+    this.previewSelected = -1;
+    this.previewDetailMono = null;
+    this.previewDetailMeta = null;
+    this.#previewProcessed.clear();
+    const openFloor = sensitivityToOpenFloor(this.attackSensitivity);
+    const durationKey = `${this.sliceMinDurationMs ?? ""}:${this.sliceMaxDurationMs ?? ""}`;
+    if (
+      this.#previewOpenFloor != null &&
+      this.#previewOpenFloor !== openFloor
+    ) {
+      this.#previewHuntHits = null;
+    }
+    this.#previewOpenFloor = openFloor;
+    this.#previewDurationKey = durationKey;
+    const lengthFilter = this.#sliceLengthFilter();
+    try {
+      const result = await slicePreview.analyze({
+        pcm,
+        sampleRate: this.#previewSampleRate,
+        channelCount: this.#previewChannelCount,
+        mode: this.fileProcessMode,
+        targetPerMin: this.targetCapturesPerMin,
+        openFloorFactor: openFloor,
+        minDurationMs: lengthFilter.minMs,
+        maxDurationMs: lengthFilter.maxMs,
+        tempo: this.#previewTempo,
+        huntHits: this.#previewHuntHits,
+        signal: abort.signal,
+      });
+      if (abort.signal.aborted) return;
+      this.previewResult = result;
+      if (result.tempo) this.#previewTempo = result.tempo;
+      if (result.mode === "hunt" && !result.error) {
+        this.#previewHuntHits = result.regions.map((r) => ({
+          startFrame: r.startFrame,
+          endFrame: r.endFrame,
+          class: r.class,
+          kind: r.kind,
+          interestScore: r.interestScore,
+          durationMs: r.durationMs,
+        }));
+      }
+      const first =
+        result.error || result.regions.length === 0
+          ? -1
+          : result.regions.findIndex((r) => r.kept);
+      const autoIdx =
+        first >= 0 ? first : result.regions.length > 0 ? 0 : -1;
+      if (autoIdx >= 0) {
+        void this.#selectPreviewSlice(autoIdx, { play: false });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      this.previewResult = {
+        durationMs: 0,
+        sampleRate: this.#previewSampleRate,
+        channelCount: this.#previewChannelCount,
+        mode: this.fileProcessMode,
+        regions: [],
+        kept: 0,
+        culled: 0,
+        error: "empty",
+      };
+    } finally {
+      if (this.#previewAbort === abort) {
+        this.previewBusy = false;
+        this.#previewAbort = null;
+      }
+    }
+  }
+
+  #onPreviewSlicePlay = (e: Event): void => {
+    const index = (e as CustomEvent<{ index: number }>).detail?.index;
+    if (index == null) return;
+    void this.#selectPreviewSlice(index, { play: true });
+  };
+
+  #findKeptIndex(from: number, dir: -1 | 1): number {
+    const regions = this.previewResult?.regions;
+    if (!regions?.length) return -1;
+    let i = from;
+    if (i < 0) i = dir > 0 ? -1 : regions.length;
+    for (;;) {
+      i += dir;
+      if (i < 0 || i >= regions.length) return -1;
+      if (regions[i]?.kept) return i;
+    }
+  }
+
+  #navPreview = (dir: -1 | 1): void => {
+    const n = this.previewResult?.regions.length ?? 0;
+    if (n < 1) return;
+    const cur = this.previewSelected < 0 ? (dir > 0 ? -1 : n) : this.previewSelected;
+    const next = cur + dir;
+    if (next < 0 || next >= n) return;
+    void this.#selectPreviewSlice(next, { play: true });
+  };
+
+  #navPreviewKept = (dir: -1 | 1): void => {
+    const next = this.#findKeptIndex(this.previewSelected, dir);
+    if (next < 0) return;
+    void this.#selectPreviewSlice(next, { play: true });
+  };
+
+  async #selectPreviewSlice(
+    index: number,
+    opts: { play?: boolean } = {},
+  ): Promise<void> {
+    const result = this.previewResult;
+    const region = result?.regions[index];
+    if (!region || !this.#previewPcm) return;
+    this.previewSelected = index;
+    this.previewDetailMeta = {
+      durationMs: region.durationMs,
+      interestScore: region.interestScore,
+      tags: [],
+      class: region.class,
+      kept: region.kept,
+      analysis: null,
+    };
+
+    const gen = ++this.#previewSelectGen;
+    const cached = this.#previewProcessed.get(index);
+    if (cached) {
+      this.previewDetailMono = cached.mono;
+      this.previewDetailMeta = {
+        durationMs: cached.durationMs,
+        interestScore: cached.interestScore,
+        tags: cached.tags,
+        class: region.class,
+        kept: region.kept,
+        analysis: cached.analysis,
+      };
+      this.previewDetailBusy = false;
+      if (opts.play !== false) this.#auditionPreviewPcm(cached.pcm);
+      return;
+    }
+
+    this.previewDetailBusy = true;
+    this.previewDetailMono = null;
+    try {
+      // Yield so the UI can paint selection before polish.
+      await new Promise<void>((r) => setTimeout(r, 0));
+      if (gen !== this.#previewSelectGen) return;
+      const raw = sliceFrames(
+        this.#previewPcm,
+        this.#previewChannelCount,
+        region.startFrame,
+        region.endFrame,
+      );
+      if (raw.length === 0) return;
+      const polished = runProcessJob(
+        region.kind,
+        raw,
+        this.#previewSampleRate,
+        this.#previewChannelCount,
+      );
+      if (gen !== this.#previewSelectGen) return;
+      const mono = toMonoPcm(polished.pcm, this.#previewChannelCount);
+      const entry = {
+        pcm: polished.pcm,
+        mono,
+        durationMs: polished.durationMs,
+        interestScore: polished.interestScore,
+        tags: polished.tags,
+        analysis: polished.analysis,
+      };
+      this.#previewProcessed.set(index, entry);
+      this.previewDetailMono = mono;
+      this.previewDetailMeta = {
+        durationMs: entry.durationMs,
+        interestScore: entry.interestScore,
+        tags: entry.tags,
+        class: region.class,
+        kept: region.kept,
+        analysis: entry.analysis,
+      };
+      if (opts.play !== false) this.#auditionPreviewPcm(entry.pcm);
+    } catch (err) {
+      console.error("[glane] preview slice polish failed", err);
+      // Fallback: show / play raw slice.
+      if (gen !== this.#previewSelectGen) return;
+      const raw = sliceFrames(
+        this.#previewPcm,
+        this.#previewChannelCount,
+        region.startFrame,
+        region.endFrame,
+      );
+      this.previewDetailMono = toMonoPcm(raw, this.#previewChannelCount);
+      if (opts.play !== false) this.#auditionPreviewPcm(raw);
+    } finally {
+      if (gen === this.#previewSelectGen) this.previewDetailBusy = false;
+    }
+  }
+
+  #auditionPreviewPcm(pcm: Float32Array): void {
+    if (pcm.length === 0) return;
+    // Preview shares the engine — clear feed play chrome if it was active.
+    this.#auditionGen++;
+    clearSampleAudition();
+    this.#engine ??= new TransportEngine();
+    const buf = interleavedToAudioBuffer(
+      this.#engine.ctx,
+      pcm,
+      this.#previewSampleRate,
+      this.#previewChannelCount,
+    );
+    this.#engine.audition(buf, 8);
+  }
+
+  async #processPreviewFile(): Promise<void> {
+    const file = this.#previewFile;
+    if (!file || this.importBusy) return;
+    this.configModalOpen = false;
+    await this.#runImportFile(file);
+  }
+
   #cancelImport = (): void => {
     this.#importAbort?.abort();
   };
@@ -1465,7 +2227,12 @@ export class GlCapturePage extends LitElement {
     const input = ev.target as HTMLInputElement;
     const file = input.files?.[0] ?? null;
     input.value = "";
-    if (!file || this.importBusy) return;
+    if (!file) return;
+    await this.#runImportFile(file);
+  }
+
+  async #runImportFile(file: File): Promise<void> {
+    if (this.importBusy) return;
     if (this.listening) {
       this.warnings = [t("capture.importBlocked")];
       return;
@@ -1498,6 +2265,8 @@ export class GlCapturePage extends LitElement {
         projectId,
         captureName: name,
         openFloorFactor: sensitivityToOpenFloor(this.attackSensitivity),
+        minDurationMs: this.sliceMinDurationMs,
+        maxDurationMs: this.sliceMaxDurationMs,
         signal: abort.signal,
         onProgress: (p) => {
           this.importRatio = p.ratio;
@@ -1759,6 +2528,12 @@ export class GlCapturePage extends LitElement {
           hunt.channelCount,
         ),
       );
+      if (
+        !durationPassesSliceFilter(durationMs, this.#sliceLengthFilter())
+      ) {
+        this.liveState = "listening";
+        return;
+      }
       const interestScore = computeInterestScore({
         pcm: toMonoPcm(extraction.pcm, hunt.channelCount),
         sampleRate: hunt.sampleRate,
@@ -1904,6 +2679,12 @@ export class GlCapturePage extends LitElement {
   }
 
   async #audition(id: string): Promise<void> {
+    if (getSampleAuditionPlaying() === id) {
+      this.#auditionGen++;
+      this.#engine?.stop();
+      clearSampleAudition();
+      return;
+    }
     const sample = await db.samples.get(id);
     if (!sample || sample.deletedAt) return;
     this.#engine ??= new TransportEngine();
@@ -1915,15 +2696,19 @@ export class GlCapturePage extends LitElement {
       data.sampleRate,
       data.channelCount,
     );
-    this.playingId = id;
-    this.#engine.audition(buf, 5);
+    const gen = ++this.#auditionGen;
+    setSampleAuditionPlaying(id);
+    this.#engine.audition(buf, 5, () => {
+      if (gen === this.#auditionGen) clearSampleAudition();
+    });
   }
 
   async #removeExtracted(id: string): Promise<void> {
     await deleteSample(id);
-    if (this.playingId === id) {
+    if (getSampleAuditionPlaying() === id) {
+      this.#auditionGen++;
       this.#engine?.stop();
-      this.playingId = null;
+      clearSampleAudition();
     }
     this.#bumpFeed();
   }

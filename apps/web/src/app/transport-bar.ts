@@ -1,6 +1,9 @@
 /**
  * Shared transport chrome — editor + sequencer.
  * One large centered play/pause; no stop (pause keeps position).
+ *
+ * Both glyphs stay mounted; visibility is toggled via host `[playing]` so we
+ * never depend on Concorde active/swap or sonic-icon remount races.
  */
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
@@ -32,10 +35,16 @@ export class GlTransportBar extends LitElement {
       .play-btn {
         --sc-btn-min-height: 3.25rem;
       }
+      :host(:not([playing])) .glyph-pause {
+        display: none !important;
+      }
+      :host([playing]) .glyph-play {
+        display: none !important;
+      }
     `,
   ];
 
-  @property({ type: Boolean }) playing = false;
+  @property({ type: Boolean, reflect: true }) playing = false;
   @property({ type: Boolean }) loading = false;
   /** e.g. "0:12" — optional position readout */
   @property({ type: String }) clock = "";
@@ -80,13 +89,12 @@ export class GlTransportBar extends LitElement {
                 ?loading=${this.loading}
                 @click=${() => this.#emit(this.playing ? "pause" : "play")}
               >
-                ${this.loading
-                  ? nothing
-                  : this.playing
-                    ? glIcon("pause", { size: "xl" })
-                    : html`<span class="play-glyph"
-                        >${glIcon("play", { size: "xl" })}</span
-                      >`}
+                <span class="glyph-pause" aria-hidden="true"
+                  >${glIcon("pause", { size: "xl" })}</span
+                >
+                <span class="glyph-play play-glyph" aria-hidden="true"
+                  >${glIcon("play", { size: "xl" })}</span
+                >
               </sonic-button>
             `,
           )}

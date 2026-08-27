@@ -14,6 +14,9 @@ import {
 
 export type VoiceRelation = "independent" | "lock" | "respond" | "kinship";
 
+/** User preference for how melodic followers relate to the lead. */
+export type GenEnsembleRelation = "auto" | "lock" | "respond" | "kinship";
+
 export type EnsembleSectionKind =
   | "intro"
   | "verse"
@@ -362,8 +365,11 @@ export function planEnsemble(opts: {
   energy: number;
   sparse: boolean;
   musicStyle: MusicStyleId;
+  /** Force follower relation; `"auto"` keeps style + call–response logic. */
+  relationMode?: GenEnsembleRelation;
 }): EnsemblePlan {
   const { roles, rnd, callResponseMode, energy, sparse, musicStyle } = opts;
+  const relationMode: GenEnsembleRelation = opts.relationMode ?? "auto";
   const styleProfile = ensembleProfileForStyle(musicStyle);
   const relationByTrack: VoiceRelation[] = roles.map(() => "independent");
   const primaryLeadTrack = pickPrimaryTrack(roles);
@@ -381,9 +387,11 @@ export function planEnsemble(opts: {
   }
 
   const wantRespond =
-    callResponseMode === "on" ||
-    (callResponseMode === "auto" &&
-      rnd() < styleProfile.respondAutoChance);
+    relationMode === "respond" ||
+    (relationMode === "auto" &&
+      (callResponseMode === "on" ||
+        (callResponseMode === "auto" &&
+          rnd() < styleProfile.respondAutoChance)));
 
   let leadCell: readonly MelodyEvent[];
   let leadCellAlt: readonly MelodyEvent[];
@@ -396,8 +404,8 @@ export function planEnsemble(opts: {
     const pairAlt = pickCallResponsePair(rnd);
     leadCellAlt = pairAlt.call;
   } else {
-    leadCell = pickMelodyCell(rnd, sparse);
-    leadCellAlt = pickMelodyCell(rnd, sparse);
+    leadCell = pickMelodyCell(rnd, sparse ? "sparse" : "dense");
+    leadCellAlt = pickMelodyCell(rnd, "sparse");
     responseCell = pickCallResponsePair(rnd).response;
   }
 
@@ -418,6 +426,25 @@ export function planEnsemble(opts: {
 
   let hasRespond = false;
   for (const { role, i } of respondOrder) {
+    if (relationMode === "lock") {
+      relationByTrack[i] = "lock";
+      continue;
+    }
+    if (relationMode === "kinship") {
+      relationByTrack[i] = "kinship";
+      continue;
+    }
+    if (relationMode === "respond") {
+      if (!hasRespond) {
+        relationByTrack[i] = "respond";
+        hasRespond = true;
+      } else {
+        // Other followers support the dialogue rather than a second lead.
+        relationByTrack[i] =
+          role === "bass" || role === "chord" ? "lock" : "kinship";
+      }
+      continue;
+    }
     const preferRespond =
       wantRespond &&
       !hasRespond &&
@@ -435,7 +462,10 @@ export function planEnsemble(opts: {
     if (rel === "respond") hasRespond = true;
   }
 
-  if (callResponseMode === "on" && !hasRespond && respondOrder.length > 0) {
+  const forceRespond =
+    relationMode === "respond" ||
+    (relationMode === "auto" && callResponseMode === "on");
+  if (forceRespond && !hasRespond && respondOrder.length > 0) {
     const forced = respondOrder[0]!;
     relationByTrack[forced.i] = "respond";
   }
@@ -515,6 +545,201 @@ function shiftDegree(h: EnsembleHit, offset: number): EnsembleHit {
     return h.melodyDegree == null ? { ...h, melodyDegree: 0 } : { ...h };
   }
   return { ...h, melodyDegree: base + offset };
+}
+
+/** Chord-tone support line on the shared onset skeleton (bass / chord). */
+export function supportHitsFromSkeleton(opts: {
+  sharedOnsets: readonly number[];
+  role: "bass" | "chord";
+  beatsPerBar: number;
+  ppq: number;
+  sectionKind: EnsembleSectionKind;
+  family: StyleEnsembleFamily;
+  rnd: () => number;
+}): EnsembleHit[] {
+  if (opts.role === "bass") {
+    return bassHitsForBar(opts);
+  }
+  return chordHitsForBar(opts);
+}
+
+/**
+ * Bass line with motion — not a root drone on lead accents only.
+ * Patterns stay chord-relative (0 / 2 / 4 / 7); rhythm follows style + section.
+ */
+export function bassHitsForBar(opts: {
+  sharedOnsets: readonly number[];
+  beatsPerBar: number;
+  ppq: number;
+  sectionKind: EnsembleSectionKind;
+  family: StyleEnsembleFamily;
+  rnd: () => number;
+}): EnsembleHit[] {
+  const { beatsPerBar, ppq, sectionKind, family, rnd, sharedOnsets } = opts;
+  const tpb = beatsPerBar * ppq;
+  const skeleton = skeletonTicks(sharedOnsets, beatsPerBar, ppq);
+
+  type Step = { beat: number; degree: number; accent?: boolean };
+  const pickPattern = (): Step[] => {
+    const sparse =
+      sectionKind === "intro" ||
+      sectionKind === "outro" ||
+      sectionKind === "bridge";
+    const chorus =
+      sectionKind === "chorus" || sectionKind === "prechorus";
+
+    if (family === "electronic" || family === "hiphop") {
+      if (sparse) {
+        return [
+          { beat: 0, degree: 0, accent: true },
+          { beat: 2, degree: 0 },
+        ];
+      }
+      // Four-on-floor root with 5th / octave answers
+      const steps: Step[] = [
+        { beat: 0, degree: 0, accent: true },
+        { beat: 1, degree: chorus && rnd() < 0.5 ? 4 : 0 },
+        { beat: 2, degree: chorus ? 7 : 0, accent: true },
+        { beat: 3, degree: rnd() < 0.55 ? 4 : 0 },
+      ];
+      if (chorus && rnd() < 0.4) {
+        steps.push({ beat: 3.5, degree: 0 });
+      }
+      return steps;
+    }
+
+    if (family === "jazz" || family === "folk") {
+      // Walking quarters
+      const walk: Step[] = [
+        { beat: 0, degree: 0, accent: true },
+        { beat: 1, degree: rnd() < 0.5 ? 2 : 4 },
+        { beat: 2, degree: rnd() < 0.5 ? 4 : 7, accent: true },
+        { beat: 3, degree: rnd() < 0.45 ? 5 : 2 },
+      ];
+      if (sparse) return walk.filter((s) => s.beat === 0 || s.beat === 2);
+      return walk;
+    }
+
+    if (family === "reggae" || family === "groove") {
+      // Offbeat lean + root anchors
+      return sparse
+        ? [
+            { beat: 0, degree: 0, accent: true },
+            { beat: 2.5, degree: 4 },
+          ]
+        : [
+            { beat: 0, degree: 0, accent: true },
+            { beat: 1.5, degree: 4 },
+            { beat: 2, degree: 0, accent: true },
+            { beat: 3.5, degree: chorus ? 7 : 4 },
+          ];
+    }
+
+    // popRock / ambient default: root–5th–root–octave with syncopation
+    if (sparse) {
+      return [
+        { beat: 0, degree: 0, accent: true },
+        { beat: 2, degree: rnd() < 0.5 ? 4 : 0 },
+      ];
+    }
+    const steps: Step[] = [
+      { beat: 0, degree: 0, accent: true },
+      { beat: 1, degree: rnd() < 0.4 ? 2 : 4 },
+      { beat: 2, degree: 0, accent: true },
+      { beat: 3, degree: chorus ? 7 : 4 },
+    ];
+    if (chorus && rnd() < 0.45) {
+      steps.splice(1, 0, { beat: 0.5, degree: 0 });
+    }
+    if (rnd() < 0.35) {
+      steps.push({ beat: 3.5, degree: 0 });
+    }
+    return steps;
+  };
+
+  const steps = pickPattern();
+  const hits: EnsembleHit[] = steps.map((s) => {
+    let tick = Math.round(s.beat * ppq) % tpb;
+    // Nudge toward nearest lead accent when close (ensemble glue)
+    if (skeleton.length > 0) {
+      let best = tick;
+      let bestD = Infinity;
+      for (const sk of skeleton) {
+        const d = Math.min(
+          Math.abs(sk - tick),
+          tpb - Math.abs(sk - tick),
+        );
+        if (d < bestD && d <= ppq * 0.35) {
+          bestD = d;
+          best = sk;
+        }
+      }
+      if (s.accent && bestD < Infinity) tick = best;
+    }
+    return {
+      tickInBar: tick,
+      gainDb: s.accent ? 0.5 : -1.2,
+      accent: !!s.accent,
+      melodyDegree: s.degree,
+    };
+  });
+
+  hits.sort((a, b) => a.tickInBar - b.tickInBar);
+  return hits.length > 0
+    ? hits
+    : [{ tickInBar: 0, gainDb: 0, accent: true, melodyDegree: 0 }];
+}
+
+function chordHitsForBar(opts: {
+  sharedOnsets: readonly number[];
+  beatsPerBar: number;
+  ppq: number;
+  sectionKind: EnsembleSectionKind;
+  family: StyleEnsembleFamily;
+  rnd: () => number;
+}): EnsembleHit[] {
+  const {
+    sharedOnsets,
+    beatsPerBar,
+    ppq,
+    sectionKind,
+    family,
+    rnd,
+  } = opts;
+  const skeleton = skeletonTicks(sharedOnsets, beatsPerBar, ppq);
+  if (skeleton.length === 0) {
+    return [
+      {
+        tickInBar: 0,
+        gainDb: 0,
+        accent: true,
+        melodyDegree: 2,
+      },
+    ];
+  }
+
+  const dense =
+    sectionKind === "chorus" || sectionKind === "prechorus";
+  const sparse =
+    sectionKind === "intro" ||
+    sectionKind === "outro" ||
+    sectionKind === "bridge";
+
+  let ticks = [...skeleton];
+  if (sparse) {
+    ticks = skeleton.filter(
+      (_, i) => i === 0 || i === skeleton.length - 1,
+    );
+  } else if (!dense) {
+    ticks = skeleton.filter((t, i) => i === 0 || i % 2 === 0 || t === 0);
+  }
+
+  return ticks.map((t, i) => ({
+    tickInBar: t,
+    gainDb: i === 0 ? 0.4 : -1.4,
+    accent: i === 0 || (dense && i % 2 === 0),
+    melodyDegree: lockDegreeOffset("chord", rnd, family),
+  }));
 }
 
 /** Place response cell on the second half-bar (call–response). */
@@ -632,6 +857,8 @@ export const ensemble = {
   extractSharedOnsets,
   melodyCellToArpCell,
   lockDegreeOffset,
+  supportHitsFromSkeleton,
+  bassHitsForBar,
   resolveSectionRelation,
   respondPlacementMode,
   isCallBar,

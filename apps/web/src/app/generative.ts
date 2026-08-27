@@ -18,6 +18,10 @@ import {
   type TrackFx,
 } from "@glane/core-model";
 import { ensemble } from "./generative-ensemble";
+import type {
+  GenEnsembleRelation,
+  VoiceRelation,
+} from "./generative-ensemble";
 import {
   buildSectionHarmonyTimeline,
   pickArpCell,
@@ -52,6 +56,7 @@ export type {
   GrooveKind,
   MusicStyleId,
 } from "./generative-styles";
+export type { GenEnsembleRelation, VoiceRelation } from "./generative-ensemble";
 export { MUSIC_STYLE_IDS, MUSIC_STYLE_PROFILES } from "./generative-styles";
 export {
   styleSuggestedTempoBars,
@@ -183,9 +188,16 @@ export type SequenceTrackPlan = {
   fx: TrackFx;
 };
 
+export type SequenceEnsembleSummary = {
+  relationMode: GenEnsembleRelation;
+  relations: VoiceRelation[];
+  primaryLeadTrack: number | null;
+};
+
 export type SequencePlanResult = {
   clips: SequenceClipPlan[];
   tracks: SequenceTrackPlan[];
+  ensemble?: SequenceEnsembleSummary;
 };
 
 type SectionKind =
@@ -210,16 +222,16 @@ type SongSection = {
 /**
  * Widen quiet↔loud contrast: energy still lifts overall, but sparse sections
  * stay sparse and choruses stay denser than a flat multiplier would allow.
+ * Quiet bases must not climb into mid-density (flattens verse↔chorus).
  */
 function sectionDensityBoost(base: number, energy: number): number {
   const e = clamp(energy, 0, 1);
   if (base < 0.55) {
-    // Quiet sections: mild lift only
-    return clamp(base * (0.85 + e * 0.25), 0.12, 0.7);
+    return clamp(base * (0.92 + e * 0.12), 0.12, 0.55);
   }
   if (base > 1) {
     // Peaks: push further with energy
-    return clamp(base * (0.9 + e * 0.35), 0.9, 1.55);
+    return clamp(base * (0.9 + e * 0.4), 0.95, 1.65);
   }
   return clamp(base * (0.8 + e * 0.4), 0.4, 1.25);
 }
@@ -497,11 +509,18 @@ function pickHomeSampleForKind(
     let sc =
       scoreSampleForRole(s, role, variety) +
       spectralClashPenalty(s, role, occupied);
+    // Soft penalty when alternatives exist; chorus hard-prefer below.
     if (avoidIds.has(s.id) && pool.length > 1) sc += 2.8;
     if (variety > 0) sc += (rnd() - 0.5) * variety * 4;
     return { item: s, score: sc };
   });
-  const best = pickScored(scored, rnd, variety);
+  // Chorus must sound distinct from verse when the pool has ≥2 samples.
+  const chorusPool =
+    kind === "chorus" && avoidIds.size > 0
+      ? scored.filter((x) => !avoidIds.has(x.item.id))
+      : scored;
+  const pickFrom = chorusPool.length > 0 ? chorusPool : scored;
+  const best = pickScored(pickFrom, rnd, variety);
   assigned.set(kind, best);
   return best;
 }
@@ -547,72 +566,85 @@ function registerSpectralOccupancy(
 }
 
 /**
- * Soft gate: should this role place hits on this bar of the section?
- * Creates audible silence / strip-downs (intro entrance, bridge drop, outro fade).
+ * Deterministic presence schedule for a role on a section bar.
+ * Soft RNG (±5%) only at thresholds so form stays audible (anti-boue / anti-vide).
  */
-function sectionAllowsRole(
+export function sectionAllowsRole(
   role: ExprRole,
-  section: SongSection,
+  section: Pick<SongSection, "kind" | "bars">,
   barInSection: number,
   energy: number,
   rnd: () => number,
 ): boolean {
   const { kind, bars } = section;
+  const last = barInSection >= Math.max(0, bars - 1);
   const progress =
     bars <= 1 ? 0.5 : clamp(barInSection / Math.max(1, bars - 1), 0, 1);
   const e = clamp(energy, 0, 1);
+  /** Soften a hard gate near the threshold only. */
+  const soft = (hard: boolean, margin = 0.05): boolean => {
+    if (hard) return rnd() >= margin * (1 - e * 0.5);
+    return rnd() < margin * (0.5 + e * 0.5);
+  };
 
   switch (kind) {
     case "intro": {
-      // Progressive entrance — space first, kit & lead later
-      if (role === "fx") return rnd() < 0.2 + e * 0.15;
-      if (role === "snare") return progress > 0.55 && rnd() < 0.25 + e * 0.2;
-      if (role === "hat") return progress > 0.35 && rnd() < 0.3 + e * 0.25;
-      if (role === "kick" || role === "perc")
-        return progress > 0.15 || rnd() < 0.35 + e * 0.2;
-      if (role === "lead") return progress > 0.6 && rnd() < 0.28 + e * 0.22;
-      if (role === "arp") return progress > 0.35 && rnd() < 0.4 + e * 0.25;
-      if (role === "chord") return rnd() < 0.4 + e * 0.15;
-      if (role === "bass") return progress > 0.1 || rnd() < 0.55;
-      // texture / loop: often present but thinned by density + stride
-      return rnd() < 0.7 + e * 0.15;
+      // Beds from bar 0; kit enters mid; lead on last half
+      if (role === "texture" || role === "loop") return soft(true);
+      if (role === "chord") return soft(true);
+      if (role === "bass") return soft(progress >= 0.08 || bars <= 2);
+      if (role === "kick") return soft(progress >= 0.25);
+      if (role === "perc") return soft(progress >= 0.35);
+      if (role === "hat") return soft(progress >= 0.45);
+      if (role === "snare") return soft(progress >= 0.55);
+      if (role === "arp") return soft(progress >= 0.4);
+      if (role === "lead") return soft(progress >= 0.5 || last);
+      if (role === "fx") return soft(progress >= 0.6 && e > 0.4);
+      return soft(progress >= 0.3);
     }
     case "verse": {
-      if (role === "lead") return rnd() < 0.45 + e * 0.3;
-      if (role === "arp") return rnd() < 0.55 + e * 0.25;
-      if (role === "fx") return rnd() < 0.3 + e * 0.2;
-      if (role === "hat") return rnd() < 0.75 + e * 0.15;
+      if (role === "fx") return soft(false);
+      if (role === "texture") return soft(barInSection % 2 === 0);
+      if (role === "lead") return soft(true); // present but thinned in evolve
+      if (role === "arp") return soft(barInSection % 2 === 0 || e > 0.55);
+      if (role === "hat") return soft(true);
       return true;
     }
     case "prechorus": {
-      // Build: almost full, lead still restrained
-      if (role === "lead") return rnd() < 0.55 + e * 0.3;
-      if (role === "arp") return rnd() < 0.7 + e * 0.2;
-      if (role === "fx") return rnd() < 0.4 + e * 0.25;
+      if (role === "fx") return soft(progress >= 0.4);
+      if (role === "lead") return soft(true);
       return true;
     }
     case "chorus":
       return true;
     case "bridge": {
-      // Breakdown / drop: strip kit & bass, keep beds + colour
-      if (role === "kick" || role === "snare")
-        return rnd() < 0.12 + e * 0.12;
-      if (role === "hat") return rnd() < 0.18 + e * 0.15;
-      if (role === "perc") return rnd() < 0.3 + e * 0.2;
-      if (role === "bass") return rnd() < 0.35 + e * 0.2;
-      if (role === "chord") return rnd() < 0.55 + e * 0.2;
+      // Stable drop: silence kit on even bars; keep beds / colour
+      const kitDrop = barInSection % 2 === 0;
+      if (role === "kick" || role === "snare") return soft(!kitDrop && e > 0.55);
+      if (role === "hat") return soft(!kitDrop);
+      if (role === "perc") return soft(barInSection % 2 === 1);
+      if (role === "bass") return soft(barInSection % 2 === 1 || e > 0.65);
+      if (role === "chord") return soft(true);
       return true;
     }
     case "outro": {
-      // Progressive exit — more silence toward the end
-      const keep = 1 - progress * 0.9;
-      if (isDrumRole(role)) return rnd() < keep * (0.35 + e * 0.2);
-      if (role === "lead") return rnd() < keep * 0.35;
-      if (role === "arp") return rnd() < keep * 0.4;
-      if (role === "bass" || role === "chord")
-        return rnd() < keep * 0.55 + 0.1;
-      if (role === "fx") return rnd() < keep * 0.4;
-      return rnd() < keep + 0.2;
+      // Last bar: keep melodic / bed accents; kit mostly gone
+      if (last) {
+        if (role === "lead" || role === "bass" || role === "chord") return true;
+        if (role === "texture" || role === "loop") return true;
+        if (role === "arp") return soft(e > 0.45);
+        if (role === "kick") return soft(false);
+        if (isDrumRole(role)) return soft(false);
+        if (role === "fx") return soft(false);
+        return soft(true);
+      }
+      const keep = 1 - progress * 0.85;
+      if (isDrumRole(role)) return soft(progress < 0.45 && keep > 0.4);
+      if (role === "lead") return soft(progress < 0.75);
+      if (role === "arp") return soft(progress < 0.65);
+      if (role === "bass" || role === "chord") return soft(progress < 0.85);
+      if (role === "fx") return soft(progress < 0.5);
+      return soft(progress < 0.9);
     }
     default:
       return true;
@@ -1485,6 +1517,26 @@ export function planSongForm(
     ];
   }
 
+  // Song form: widen verse↔chorus, handoff intro, clearer outro (anti-flat form).
+  if (!ambient) {
+    for (const u of units) {
+      if (u.kind === "intro") {
+        u.fillLastBar = true;
+        u.densityMul = clamp(u.densityMul * 1.3, 0.22, 0.48);
+      } else if (u.kind === "verse") {
+        u.densityMul = clamp(u.densityMul * 0.82, 0.35, 0.72);
+        u.gainBiasDb -= 0.7;
+      } else if (u.kind === "chorus") {
+        u.densityMul = clamp(u.densityMul * 1.12, 1.05, 1.65);
+        u.gainBiasDb += 0.7;
+      } else if (u.kind === "outro") {
+        u.fillLastBar = false;
+        u.gainBiasDb -= 1.2;
+        u.densityMul = clamp(u.densityMul * 0.9, 0.15, 0.4);
+      }
+    }
+  }
+
   const totalW = units.reduce((s, u) => s + u.weight, 0);
   const raw = units.map((u) => ({
     ...u,
@@ -1710,6 +1762,14 @@ function evolveMotifHits(
     if (role === "lead") {
       hits = hits.filter((h) => h.accent || rnd() < 0.4 + energy * 0.2);
     }
+    // Keep kit/bass accents reliable so verse never feels empty
+    if ((role === "kick" || role === "bass" || role === "snare") && dens >= 0.35) {
+      const accents = hits.filter((h) => h.accent);
+      if (accents.length > 0) hits = accents.length >= 2 ? accents : hits;
+      else if (hits.length === 0) {
+        hits.push({ tickInBar: 0, gainDb: section.gainBiasDb, accent: true });
+      }
+    }
   }
 
   if (section.kind === "prechorus") {
@@ -1777,26 +1837,75 @@ function evolveMotifHits(
   }
 
   if (section.kind === "outro") {
-    const keep = 1 - (barInSection / Math.max(1, section.bars)) * 0.85;
-    hits = hits.filter((h) => h.accent || rnd() < keep * 0.7);
-    if (isDrumRole(role)) {
-      hits = hits.filter((h) => h.accent && rnd() < keep);
+    if (last) {
+      // Final bar: accents only — clear last phrase, not a random fade cut
+      hits = hits.filter((h) => h.accent);
+      if (
+        hits.length === 0 &&
+        (role === "lead" ||
+          role === "bass" ||
+          role === "chord" ||
+          role === "texture" ||
+          role === "loop")
+      ) {
+        hits.push({
+          tickInBar: 0,
+          gainDb: section.gainBiasDb,
+          accent: true,
+          melodyDegree: role === "lead" ? 0 : undefined,
+        });
+      }
+    } else {
+      const keep = 1 - (barInSection / Math.max(1, section.bars)) * 0.85;
+      hits = hits.filter((h) => h.accent || rnd() < keep * 0.7);
+      if (isDrumRole(role)) {
+        hits = hits.filter((h) => h.accent && rnd() < keep);
+      }
     }
   }
 
-  if (last && section.fillLastBar && isDrumRole(role) && energy > 0.35) {
-    // Fills only into active sections — not into quiet outros/bridges
-    if (
+  if (last && section.fillLastBar && energy > 0.35) {
+    const handoff =
       section.kind === "chorus" ||
       section.kind === "prechorus" ||
-      section.kind === "verse"
-    ) {
+      section.kind === "verse" ||
+      section.kind === "intro";
+    if (handoff && isDrumRole(role)) {
       const fillStep =
         role === "hat" ? Math.floor(ppq / 4) : Math.floor(ppq / 2);
       const from = Math.floor(tpb * 0.5);
       for (let t = from; t < tpb; t += Math.max(1, fillStep)) {
         if (rnd() < 0.45 + section.evolve * 0.3 + energy * 0.15) {
           hits.push({ tickInBar: t, gainDb: -1.5 + rnd(), accent: false });
+        }
+      }
+    }
+    // Melodic / bass pickup into the next section (beats 3–4)
+    if (
+      handoff &&
+      (role === "lead" || role === "bass") &&
+      (section.kind === "verse" ||
+        section.kind === "prechorus" ||
+        section.kind === "intro")
+    ) {
+      const t3 = Math.floor(3 * ppq) % tpb;
+      const t25 = Math.floor(2.5 * ppq) % tpb;
+      if (!hits.some((h) => Math.abs(h.tickInBar - t3) < 2)) {
+        hits.push({
+          tickInBar: t3,
+          gainDb: -0.5,
+          accent: true,
+          melodyDegree: role === "lead" ? 4 : 0,
+        });
+      }
+      if (role === "lead" && rnd() < 0.55 + energy * 0.2) {
+        if (!hits.some((h) => Math.abs(h.tickInBar - t25) < 2)) {
+          hits.push({
+            tickInBar: t25,
+            gainDb: -2,
+            accent: false,
+            melodyDegree: 2,
+          });
         }
       }
     }
@@ -1818,16 +1927,19 @@ function evolveMotifHits(
     }
   }
 
-  // Foundation roles: only force a hit in active sections — silence is intentional elsewhere
+  // Foundation roles: force a hit in active / intro beds — silence is intentional elsewhere
   if (
     hits.length === 0 &&
     (role === "kick" || role === "bass" || role === "loop" || role === "texture")
   ) {
     const forceFoundation =
-      (section.kind === "verse" ||
+      ((section.kind === "verse" ||
         section.kind === "chorus" ||
         section.kind === "prechorus") &&
-      dens >= 0.4;
+        dens >= 0.35) ||
+      (section.kind === "intro" &&
+        (role === "texture" || role === "loop" || role === "bass") &&
+        dens >= 0.2);
     if (forceFoundation) {
       hits.push({ tickInBar: 0, gainDb: section.gainBiasDb, accent: true });
     }
@@ -2146,7 +2258,7 @@ export function scaleCompatibleTransposes(
 
 /**
  * Pitch-classes (semitones above tonic) allowed for this hit.
- * Bass/chord stay on the chord; lead accents too; weak lead beats may pass.
+ * Bass/chord stay on the chord; lead accents too; weak lead = chord + approach.
  */
 function harmonicAllowedRels(
   role: ExprRole,
@@ -2155,9 +2267,11 @@ function harmonicAllowedRels(
   chordTones: readonly ChordTone[],
   accent: boolean,
 ): readonly number[] {
-  const toneRels = (tones: readonly ChordTone[]): number[] => {
+  const tones =
+    chordTones.length > 0 ? chordTones : ([0, 2, 4] as const);
+  const toneRels = (list: readonly ChordTone[]): number[] => {
     const out: number[] = [];
-    for (const tone of tones) {
+    for (const tone of list) {
       const semis = chordToneSemis(scale, chordDegree, tone);
       const rel = ((semis % 12) + 12) % 12;
       if (!out.includes(rel)) out.push(rel);
@@ -2166,25 +2280,46 @@ function harmonicAllowedRels(
   };
 
   if (role === "bass") {
-    // Root on accents; root + fifth on weak beats (no random scale wander).
-    return accent
-      ? toneRels([0])
-      : toneRels([0, 4]);
+    // Accents: root. Weak: root / 3rd / 5th (walking, not scale wander).
+    return accent ? toneRels([0]) : toneRels([0, 2, 4]);
   }
   if (role === "chord") {
-    return toneRels(chordTones.length > 0 ? chordTones : [0, 2, 4]);
+    return toneRels(tones);
   }
   if (role === "arp") {
-    // Strict chord tones (incl. octave / 7th via cell degree → snap window).
-    return toneRels(chordTones.length > 0 ? chordTones : [0, 2, 4]);
+    return toneRels(tones);
   }
   if (role === "lead") {
-    if (accent) {
-      return toneRels(chordTones.length > 0 ? chordTones : [0, 2, 4]);
+    if (accent) return toneRels(tones);
+    // Weak beats: chord tones + diatonic neighbours (passing / approach).
+    const chord = toneRels(tones);
+    const out = [...chord];
+    for (const tone of tones) {
+      const idx = (chordDegree + tone) % scale.length;
+      for (const d of [-1, 1] as const) {
+        const n = (((idx + d) % scale.length) + scale.length) % scale.length;
+        const rel = scale[n]!;
+        if (!out.includes(rel)) out.push(rel);
+      }
     }
-    return scale;
+    return out;
   }
   return scale;
+}
+
+/** Snap chord-relative cell degree to triad/7th/octave (anti false-notes). */
+export function snapChordRelativeDegree(degree: number, accent: boolean): number {
+  const tones = accent ? [0, 2, 4, 7] : [0, 2, 4, 5, 7];
+  let best = 0;
+  let bestDist = Infinity;
+  for (const t of tones) {
+    const d = Math.abs(degree - t);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return best;
 }
 
 /** Roles / samples that must stay on the song scale. */
@@ -2390,31 +2525,44 @@ function pickPitchSemitones(opts: {
   }
 
   let degree = scale[degreeHint % scale.length] ?? 0;
+  let md = melodyDegree;
+  if (
+    md != null &&
+    (role === "lead" || role === "arp" || role === "bass" || role === "chord")
+  ) {
+    md = snapChordRelativeDegree(md, accent !== false);
+  }
   if (
     (role === "lead" ||
       role === "arp" ||
       role === "bass" ||
       role === "chord") &&
-    melodyDegree != null
+    md != null
   ) {
     // Cell / lock degrees are chord-relative: transpose onto current chord root.
-    const md = melodyDegree + degreeHint;
-    const oct = Math.floor(md / scale.length);
+    const idx = md + degreeHint;
+    const oct = Math.floor(idx / scale.length);
     degree =
-      (scale[((md % scale.length) + scale.length) % scale.length] ?? 0) +
+      (scale[((idx % scale.length) + scale.length) % scale.length] ?? 0) +
       oct * 12;
   } else if (role === "chord" && tones.length > 0) {
     const tone = tones[(toneIndex ?? 0) % tones.length]!;
     degree = chordToneSemis(scale, degreeHint, tone);
   } else if (role === "bass") {
-    // Prefer chord root; weak beats may target the fifth via allowedRels snap.
-    const tone: ChordTone = accent === false && rnd() < 0.35 ? 4 : 0;
+    const tone: ChordTone =
+      accent === false ? (rnd() < 0.45 ? 4 : rnd() < 0.35 ? 2 : 0) : 0;
     degree = chordToneSemis(scale, degreeHint, tone);
   }
 
   let octave = 0;
-  if (role === "bass") octave = pickInt(rnd, -1, 0);
-  else if (role === "lead" || role === "arp") {
+  if (role === "bass") {
+    // Occasional octave jump on weak / chorus for motion (not always low drone).
+    octave =
+      accent === false && section.kind === "chorus" && rnd() < 0.4
+        ? 0
+        : pickInt(rnd, -1, 0);
+    if (!accent && rnd() < 0.2) octave = 0;
+  } else if (role === "lead" || role === "arp") {
     octave = pickInt(rnd, 0, 1);
     if (
       role === "lead" &&
@@ -4088,6 +4236,10 @@ export function planSequence(opts: {
   stutter?: GenTriState;
   callResponse?: GenTriState;
   /**
+   * Melodic follower arrangement vs lead: lock / respond / kinship, or auto.
+   */
+  ensembleRelation?: GenEnsembleRelation;
+  /**
    * Keep native sample pitch: no semitone transpose, no resample stretch,
    * no melody/chord tone targeting. `"auto"` / `"off"` = unlocked.
    */
@@ -4204,6 +4356,12 @@ export function planSequence(opts: {
   const reverseMode: GenTriState = opts.reverse ?? "auto";
   const stutterMode: GenTriState = opts.stutter ?? "auto";
   const callResponseMode: GenTriState = opts.callResponse ?? "auto";
+  const ensembleRelation: GenEnsembleRelation =
+    opts.ensembleRelation === "lock" ||
+    opts.ensembleRelation === "respond" ||
+    opts.ensembleRelation === "kinship"
+      ? opts.ensembleRelation
+      : "auto";
   const lockPitch = opts.lockPitch === "on";
   const lockTempoPow2 = opts.lockTempoPow2 === "on";
   const forbidPitchStretch = opts.forbidPitchStretch === "on";
@@ -4322,6 +4480,7 @@ export function planSequence(opts: {
     energy,
     sparse: drumsVsTexture < 0.4,
     musicStyle,
+    relationMode: ensembleRelation,
   });
   const ensembleStyle = ensemblePlan.styleProfile;
   const hasMelodicRespond = ensemblePlan.relationByTrack.some(
@@ -4330,7 +4489,15 @@ export function planSequence(opts: {
 
   // Kit call–response pairs: lead↔perc, hat↔snare (melodic dialogue is EnsemblePlan).
   const respondTracks = new Set<number>();
-  if (callResponseMode !== "off") {
+  const kitCallResponse: GenTriState =
+    ensembleRelation === "respond"
+      ? "on"
+      : ensembleRelation === "lock" || ensembleRelation === "kinship"
+        ? callResponseMode === "on"
+          ? "on"
+          : "off"
+        : callResponseMode;
+  if (kitCallResponse !== "off") {
     const leadIdx = roles.indexOf("lead");
     const percIdx = roles.indexOf("perc");
     const hatIdx = roles.indexOf("hat");
@@ -4338,8 +4505,8 @@ export function planSequence(opts: {
     if (leadIdx >= 0 && percIdx >= 0) respondTracks.add(percIdx);
     if (hatIdx >= 0 && snareIdx >= 0) {
       if (
-        callResponseMode === "on" ||
-        (callResponseMode === "auto" && rnd() < 0.45)
+        kitCallResponse === "on" ||
+        (kitCallResponse === "auto" && rnd() < 0.45)
       ) {
         respondTracks.add(hatIdx);
       }
@@ -4422,25 +4589,26 @@ export function planSequence(opts: {
           ? ensemblePlan.leadCell
           : voiceRel === "respond" && ensemblePlan.responseCell
             ? ensemblePlan.responseCell
-            : (ensemblePlan.leadCell ?? pickMelodyCell(rnd, sparseMel))
+            : (ensemblePlan.leadCell ??
+              pickMelodyCell(rnd, sparseMel ? "sparse" : "dense"))
         : null;
     const leadCellAlt =
       !lockPitch && role === "lead"
         ? isPrimaryMelodic && ensemblePlan.leadCellAlt
           ? ensemblePlan.leadCellAlt
-          : (ensemblePlan.leadCellAlt ?? pickMelodyCell(rnd, sparseMel))
+          : (ensemblePlan.leadCellAlt ?? pickMelodyCell(rnd, "sparse"))
         : null;
     const arpCell =
       !lockPitch && role === "arp"
         ? coupleArp && coupledArp
           ? coupledArp
-          : pickArpCell(rnd, sparseMel || energy < 0.4)
+          : pickArpCell(rnd, sparseMel || energy < 0.4 ? "sparse" : "dense")
         : null;
     const arpCellAlt =
       !lockPitch && role === "arp"
         ? coupleArp && coupledArpAlt
           ? coupledArpAlt
-          : pickArpCell(rnd, true)
+          : pickArpCell(rnd, "sparse")
         : null;
 
     const humanizeMs =
@@ -4549,14 +4717,17 @@ export function planSequence(opts: {
           ),
         );
 
-        // Stick to the section home sample; rare fill ornament only at high variation.
+        // Stick to the section home sample; ornaments on last bar / bridge / prechorus.
         let sample = homeSample;
         const lastBar = b + step >= section.bars;
         const allowOrnament =
-          variation > 0.6 &&
+          variation > 0.35 &&
           samplePool.length > 1 &&
-          (lastBar || section.altSample || section.kind === "bridge");
-        if (allowOrnament && rnd() < (variation - 0.6) * 0.5) {
+          (lastBar ||
+            section.altSample ||
+            section.kind === "bridge" ||
+            section.kind === "prechorus");
+        if (allowOrnament && rnd() < (variation - 0.35) * 0.55) {
           // Prefer an ornament that still respects the role band when possible.
           let bestOrn = samplePool.find((s) => s.id !== homeSample.id) ?? homeSample;
           let bestSc = Infinity;
@@ -4609,9 +4780,9 @@ export function planSequence(opts: {
         if (role === "arp" && (arpCell || arpCellAlt)) {
           // Library tonal oneshots sequenced on chord tones from the harmony timeline.
           const cell =
-            section.kind === "bridge" || section.kind === "outro"
-              ? (arpCellAlt ?? arpCell!)
-              : arpCell!;
+            section.kind === "chorus" || section.kind === "prechorus"
+              ? arpCell!
+              : (arpCellAlt ?? arpCell!);
           hits = arpCellToHits(cell, ppq, beatsPerBar, groove);
           if (section.kind === "intro" || section.kind === "outro") {
             hits = hits.filter((h) => h.accent || rnd() < 0.35);
@@ -4631,9 +4802,9 @@ export function planSequence(opts: {
             );
           } else {
             const cell =
-              section.kind === "bridge" || section.kind === "outro"
-                ? (leadCellAlt ?? leadCell!)
-                : leadCell!;
+              section.kind === "chorus" || section.kind === "prechorus"
+                ? leadCell!
+                : (leadCellAlt ?? leadCell!);
             hits = melodyCellToHits(cell, ppq, beatsPerBar, groove);
             if (section.kind === "intro" || section.kind === "outro") {
               hits = hits.filter((h) => h.accent || rnd() < 0.28);
@@ -4646,6 +4817,36 @@ export function planSequence(opts: {
             if (roles.includes("arp") && rnd() < 0.45) {
               hits = hits.filter((h) => h.accent || rnd() < 0.35);
             }
+          }
+        } else if (role === "bass" && !lockPitch) {
+          hits = ensemble.bassHitsForBar({
+            sharedOnsets:
+              ensemblePlan.sharedOnsets.length > 0
+                ? ensemblePlan.sharedOnsets
+                : [0, 8],
+            beatsPerBar,
+            ppq,
+            sectionKind: section.kind,
+            family: ensembleStyle.family,
+            rnd,
+          });
+        } else if (
+          role === "chord" &&
+          !lockPitch &&
+          voiceRel !== "independent" &&
+          ensemblePlan.sharedOnsets.length > 0
+        ) {
+          hits = ensemble.supportHitsFromSkeleton({
+            sharedOnsets: ensemblePlan.sharedOnsets,
+            role: "chord",
+            beatsPerBar,
+            ppq,
+            sectionKind: section.kind,
+            family: ensembleStyle.family,
+            rnd,
+          });
+          if (section.kind === "verse") {
+            hits = hits.filter((h) => h.accent || rnd() < 0.55);
           }
         } else {
           hits = evolveMotifHits(baseMotif, {
@@ -4673,7 +4874,9 @@ export function planSequence(opts: {
           if (
             sectionVoiceRel === "respond" &&
             !isPrimaryMelodic &&
-            role !== "lead"
+            role !== "lead" &&
+            role !== "bass" &&
+            role !== "chord"
           ) {
             const cell =
               ensemblePlan.responseCell ?? ensemblePlan.leadCell;
@@ -4683,7 +4886,11 @@ export function planSequence(opts: {
                   ? ensemble.applyRespondFullBar(cell, beatsPerBar, ppq)
                   : ensemble.applyRespond(cell, beatsPerBar, ppq);
             }
-          } else if (sectionVoiceRel === "lock") {
+          } else if (
+            sectionVoiceRel === "lock" &&
+            role !== "bass" &&
+            role !== "chord"
+          ) {
             hits = ensemble.applyLock(
               hits,
               ensemblePlan.sharedOnsets,
@@ -5098,5 +5305,13 @@ export function planSequence(opts: {
       a.trackId.localeCompare(b.trackId) ||
       a.sampleId.localeCompare(b.sampleId),
   );
-  return { clips, tracks: trackPlans };
+  return {
+    clips,
+    tracks: trackPlans,
+    ensemble: {
+      relationMode: ensembleRelation,
+      relations: ensemblePlan.relationByTrack,
+      primaryLeadTrack: ensemblePlan.primaryLeadTrack,
+    },
+  };
 }

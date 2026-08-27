@@ -48,6 +48,16 @@ export type UserPrefs = {
    * Live mic ignores this (always hunt).
    */
   fileProcessMode?: FileProcessMode;
+  /**
+   * Optional slice length floor (ms). Empty / unset → no min filter.
+   * Post-detect: drop sounds shorter than this (does not crop).
+   */
+  sliceMinDurationMs?: number | null;
+  /**
+   * Optional slice length ceiling (ms). Empty / unset → no max filter.
+   * Post-detect: drop sounds longer than this (does not crop).
+   */
+  sliceMaxDurationMs?: number | null;
   /** Preferred MediaDeviceInfo.deviceId for capture (empty = browser default). */
   captureAudioDeviceId?: string;
   /**

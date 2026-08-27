@@ -32,6 +32,10 @@ import {
   decodeAudioFileToPcm,
   isImportableAudio,
 } from "./sample-actions.js";
+import {
+  durationPassesSliceFilter,
+  resolveSliceDurationFilter,
+} from "./slice-duration.js";
 
 export const FILE_HUNT_NOTES = "glane:file-hunt";
 export const FILE_SONG_NOTES = "glane:file-song";
@@ -61,6 +65,8 @@ export type ImportForHuntOpts = {
   openFloorFactor?: number;
   /** Overrides prefs when set. */
   mode?: FileProcessMode;
+  minDurationMs?: number | null;
+  maxDurationMs?: number | null;
   signal?: AbortSignal;
   onProgress?: (p: ImportForHuntProgress) => void;
   /** Fired after each persisted sample (UI feed). */
@@ -282,9 +288,19 @@ async function processHunt(
   let skippedVoice = 0;
   let offset = 0;
   let sinceYield = 0;
+  const lengthFilter = resolveSliceDurationFilter({
+    minMs: opts.minDurationMs,
+    maxMs: opts.maxDurationMs,
+  });
 
   const handle = async (extraction: Extraction | null): Promise<void> => {
     if (!extraction) return;
+    const durationMs = durationMsFromPcm(
+      extraction.pcm,
+      sampleRate,
+      session.channelCount,
+    );
+    if (!durationPassesSliceFilter(durationMs, lengthFilter)) return;
     const saved = await persistExtraction({
       extraction,
       session,
@@ -391,6 +407,10 @@ async function processSong(
   const samples: Sample[] = [];
   const bpmTag = `bpm:${Math.round(sliced.bpm)}`;
   const gridTag = `grid:${sliced.beatsPerSlice}`;
+  const lengthFilter = resolveSliceDurationFilter({
+    minMs: opts.minDurationMs,
+    maxMs: opts.maxDurationMs,
+  });
 
   for (let i = 0; i < sliced.slices.length; i++) {
     throwIfAborted(signal);
@@ -400,6 +420,7 @@ async function processSong(
       1,
       durationMsFromPcm(slicePcm, sampleRate, ch),
     );
+    if (!durationPassesSliceFilter(durationMs, lengthFilter)) continue;
     const sourceOffsetMs = Math.round((slice.start / sampleRate) * 1000);
     const saved = await persistSample({
       pcm: slicePcm,
@@ -533,6 +554,16 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
   const targetPerMin =
     prefs?.targetCapturesPerMin ?? DEFAULT_TARGET_CAPTURES_PER_MIN;
   const excludeVoice = !prefs || prefs.voicePolicy === "exclude";
+  const lengthFilter = resolveSliceDurationFilter({
+    minMs:
+      opts.minDurationMs !== undefined
+        ? opts.minDurationMs
+        : prefs?.sliceMinDurationMs,
+    maxMs:
+      opts.maxDurationMs !== undefined
+        ? opts.maxDurationMs
+        : prefs?.sliceMaxDurationMs,
+  });
 
   const captureName =
     (opts.captureName ?? "").trim() || stripAudioExt(file.name) || "Fichier";
@@ -555,6 +586,8 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
         session,
         captureName,
         targetPerMin,
+        minDurationMs: lengthFilter.minMs,
+        maxDurationMs: lengthFilter.maxMs,
       });
     }
     if (mode === "whole") {
@@ -573,6 +606,8 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
       session,
       captureName,
       excludeVoice,
+      minDurationMs: lengthFilter.minMs,
+      maxDurationMs: lengthFilter.maxMs,
     });
   } catch (err) {
     const ended = nowIso();

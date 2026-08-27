@@ -60,6 +60,110 @@ describe("planEnsemble", () => {
     }
     assert.ok(locks > 15);
   });
+  it("forces lock on all melodic followers when relationMode is lock", () => {
+    const rnd = mulberry32(9);
+    const plan = ensemble.plan({
+      roles: ["kick", "lead", "arp", "bass", "chord"],
+      rnd,
+      callResponseMode: "on",
+      energy: 0.6,
+      sparse: false,
+      musicStyle: "jazz",
+      relationMode: "lock",
+    });
+    assert.equal(plan.primaryLeadTrack, 1);
+    for (const i of [2, 3, 4]) {
+      assert.equal(plan.relationByTrack[i], "lock");
+    }
+  });
+
+  it("forces a respond partner when relationMode is respond", () => {
+    const rnd = mulberry32(3);
+    const plan = ensemble.plan({
+      roles: ["lead", "arp", "bass"],
+      rnd,
+      callResponseMode: "off",
+      energy: 0.5,
+      sparse: false,
+      musicStyle: "techno",
+      relationMode: "respond",
+    });
+    assert.ok(plan.relationByTrack.includes("respond"));
+    assert.equal(plan.relationByTrack[0], "independent");
+  });
+
+  it("forces kinship on followers when relationMode is kinship", () => {
+    const rnd = mulberry32(5);
+    const plan = ensemble.plan({
+      roles: ["lead", "arp", "bass"],
+      rnd,
+      callResponseMode: "on",
+      energy: 0.7,
+      sparse: false,
+      musicStyle: "pop",
+      relationMode: "kinship",
+    });
+    assert.equal(plan.relationByTrack[1], "kinship");
+    assert.equal(plan.relationByTrack[2], "kinship");
+  });
+});
+
+describe("supportHitsFromSkeleton", () => {
+  it("places chord hits on the shared onset skeleton", () => {
+    const shared = [0, 4, 8, 12];
+    const rnd = mulberry32(1);
+    const chord = ensemble.supportHitsFromSkeleton({
+      sharedOnsets: shared,
+      role: "chord",
+      beatsPerBar: 4,
+      ppq: 96,
+      sectionKind: "chorus",
+      family: "electronic",
+      rnd,
+    });
+    assert.ok(chord.length >= 2);
+    for (const h of chord) {
+      assert.ok(h.melodyDegree != null);
+    }
+  });
+});
+
+describe("bassHitsForBar", () => {
+  it("gives bass motion beyond a single root drone", () => {
+    const rnd = mulberry32(2);
+    const bass = ensemble.bassHitsForBar({
+      sharedOnsets: [0, 8],
+      beatsPerBar: 4,
+      ppq: 96,
+      sectionKind: "chorus",
+      family: "popRock",
+      rnd,
+    });
+    assert.ok(bass.length >= 3, "bass should have several hits per bar");
+    const degrees = new Set(bass.map((h) => h.melodyDegree ?? 0));
+    assert.ok(
+      degrees.size >= 2,
+      "bass should move between chord tones, not only root",
+    );
+    for (const h of bass) {
+      const d = h.melodyDegree ?? 0;
+      assert.ok([0, 2, 4, 5, 7].includes(d), `unexpected bass degree ${d}`);
+    }
+  });
+
+  it("keeps a downbeat root accent", () => {
+    const bass = ensemble.bassHitsForBar({
+      sharedOnsets: [0],
+      beatsPerBar: 4,
+      ppq: 96,
+      sectionKind: "verse",
+      family: "electronic",
+      rnd: mulberry32(0),
+    });
+    const down = bass.find((h) => h.tickInBar <= 2);
+    assert.ok(down?.accent);
+    assert.equal(down?.melodyDegree, 0);
+  });
 });
 
 describe("applyLock", () => {

@@ -58,6 +58,10 @@ export type EnvelopeHunterOpts = {
   openFloorFactor?: number;
   /** Interleaved channel count (1 = mono, 2 = stereo). Default 1. */
   channelCount?: number;
+  /** Overrides live.minDurationMs (event cannot close sooner). */
+  minDurationMs?: number;
+  /** Overrides live.maxDurationMs (forced close). */
+  maxDurationMs?: number;
 };
 
 export class EnvelopeHunter {
@@ -65,6 +69,8 @@ export class EnvelopeHunter {
   readonly channelCount: number;
   readonly floor: AdaptiveNoiseFloor;
   #openFloorFactor: number;
+  #minDurationMs: number;
+  #maxDurationMs: number;
   #lastState: CaptureLiveState = "idle";
   #cooldownUntil = 0;
   #openHold = 0;
@@ -87,6 +93,11 @@ export class EnvelopeHunter {
     this.channelCount = Math.min(2, Math.max(1, Math.floor(opts.channelCount ?? 1)));
     this.#openFloorFactor =
       opts.openFloorFactor ?? DSP_THRESHOLDS.live.openFloorFactor;
+    this.#minDurationMs =
+      opts.minDurationMs ?? DSP_THRESHOLDS.live.minDurationMs;
+    this.#maxDurationMs =
+      opts.maxDurationMs ?? DSP_THRESHOLDS.live.maxDurationMs;
+    this.#normalizeDurationBounds();
     this.floor = new AdaptiveNoiseFloor(
       sampleRate,
       DSP_THRESHOLDS.live.envelopeHop,
@@ -111,6 +122,14 @@ export class EnvelopeHunter {
     return this.#openFloorFactor;
   }
 
+  get minDurationMs(): number {
+    return this.#minDurationMs;
+  }
+
+  get maxDurationMs(): number {
+    return this.#maxDurationMs;
+  }
+
   /** Live-tweak attack sensitivity (clamped to openFloorMin…Max). */
   setOpenFloorFactor(factor: number): void {
     const { openFloorMin, openFloorMax } = DSP_THRESHOLDS.live;
@@ -118,6 +137,30 @@ export class EnvelopeHunter {
       openFloorMax,
       Math.max(openFloorMin, factor),
     );
+  }
+
+  setMinDurationMs(ms: number): void {
+    this.#minDurationMs = ms;
+    this.#normalizeDurationBounds();
+  }
+
+  setMaxDurationMs(ms: number): void {
+    this.#maxDurationMs = ms;
+    this.#normalizeDurationBounds();
+  }
+
+  #normalizeDurationBounds(): void {
+    const live = DSP_THRESHOLDS.live;
+    let min = Math.max(20, Math.min(60_000, this.#minDurationMs));
+    let max = Math.max(50, Math.min(120_000, this.#maxDurationMs));
+    if (min > max) {
+      const mid = min;
+      min = max;
+      max = mid;
+    }
+    // Keep at least the hard DSP floor for oneshots.
+    this.#minDurationMs = Math.max(live.minDurationMs * 0.25, min);
+    this.#maxDurationMs = Math.max(this.#minDurationMs, max);
   }
 
   /**
@@ -189,9 +232,9 @@ export class EnvelopeHunter {
       ),
     );
     const maxSamples =
-      Math.floor((live.maxDurationMs / 1000) * this.sampleRate) * ch;
+      Math.floor((this.#maxDurationMs / 1000) * this.sampleRate) * ch;
     const minSamples =
-      Math.floor((live.minDurationMs / 1000) * this.sampleRate) * ch;
+      Math.floor((this.#minDurationMs / 1000) * this.sampleRate) * ch;
     const postRoll =
       Math.floor((live.postRollMs / 1000) * this.sampleRate) * ch;
     const preRollN =

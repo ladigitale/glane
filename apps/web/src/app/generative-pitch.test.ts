@@ -11,9 +11,41 @@ import {
   clipStretchFactors,
   resampleStretchPitchSemis,
   scaleCompatibleTransposes,
+  snapChordRelativeDegree,
 } from "./generative.js";
 
 const MAJOR = [0, 2, 4, 5, 7, 9, 11];
+
+describe("snapChordRelativeDegree", () => {
+  it("snaps accents to triad / octave", () => {
+    assert.equal(snapChordRelativeDegree(1, true), 0);
+    assert.equal(snapChordRelativeDegree(3, true), 2);
+    assert.equal(snapChordRelativeDegree(6, true), 7);
+  });
+});
+
+describe("pickSectionProgression harmony", () => {
+  it("adds default triad voicings and lengthens short verse cycles", () => {
+    const rnd = () => 0.1;
+    // Force pop bank path
+    const verse = pickSectionProgression("verse", "pop", false, rnd);
+    assert.ok(verse.every((e) => (e.tones?.length ?? 0) >= 2));
+    const totalBars = verse.reduce((s, e) => s + (e.bars ?? 1), 0);
+    assert.ok(totalBars >= 4);
+  });
+
+  it("cadences chorus toward tonic", () => {
+    let sawTonicEnd = false;
+    for (let i = 0; i < 20; i++) {
+      const rnd = () => (i * 0.05) % 1;
+      const chorus = pickSectionProgression("chorus", "pop", false, rnd);
+      const last = chorus[chorus.length - 1];
+      if (last?.degree === 0) sawTonicEnd = true;
+      assert.ok(last?.tones && last.tones.length >= 2);
+    }
+    assert.ok(sawTonicEnd);
+  });
+});
 
 describe("scaleCompatibleTransposes", () => {
   it("does not keep off-scale unison when the pitch window is empty", () => {

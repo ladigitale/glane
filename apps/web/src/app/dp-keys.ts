@@ -158,3 +158,16 @@ export type SeqDrawerForm = {
 };
 
 export const seqDrawerKey = new DataProviderKey<SeqDrawerForm>("glSeqDrawer");
+
+/**
+ * One-shot sample audition (library / capture / seq drawer).
+ * List rows live inside sonic-queue — buttons subscribe here so play/pause
+ * chrome updates when playback ends without remounting the queue.
+ */
+export type SampleAuditionDp = {
+  playingId: string | null;
+};
+
+export const sampleAuditionKey = new DataProviderKey<SampleAuditionDp>(
+  "glSampleAudition",
+);

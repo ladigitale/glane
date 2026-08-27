@@ -135,6 +135,7 @@ export function renderMoreMenu(opts: {
               }
               return html`
                 <sonic-menu-item
+                  minWidth="10rem"
                   ?disabled=${item.disabled}
                   ?active=${item.active}
                   type=${item.danger ? "danger" : "default"}

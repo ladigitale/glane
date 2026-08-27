@@ -329,6 +329,91 @@ export const MELODY_CELLS: readonly (readonly MelodyEvent[])[] = [
     { degree: 2, sixteenths: 4 },
     { degree: 0, sixteenths: 4 },
   ],
+  // Sparse verse: held tonic → fifth
+  [
+    { degree: 0, sixteenths: 10, accent: true },
+    { degree: 4, sixteenths: 6 },
+  ],
+  // Sparse verse: root–third breathe
+  [
+    { degree: 0, sixteenths: 6, accent: true },
+    { degree: 2, sixteenths: 10 },
+  ],
+  // Sparse: octave drop answer prep
+  [
+    { degree: 7, sixteenths: 8, accent: true },
+    { degree: 0, sixteenths: 8 },
+  ],
+  // Dense chorus hook 1–5–1–6
+  [
+    { degree: 0, sixteenths: 2, accent: true },
+    { degree: 4, sixteenths: 2 },
+    { degree: 0, sixteenths: 2 },
+    { degree: 5, sixteenths: 2 },
+    { degree: 4, sixteenths: 4 },
+    { degree: 2, sixteenths: 4 },
+  ],
+  // Dense chorus: syncopated climb
+  [
+    { degree: 0, sixteenths: 2, accent: true },
+    { degree: 2, sixteenths: 1 },
+    { degree: 4, sixteenths: 1 },
+    { degree: 5, sixteenths: 2 },
+    { degree: 7, sixteenths: 2, accent: true },
+    { degree: 5, sixteenths: 2 },
+    { degree: 4, sixteenths: 2 },
+    { degree: 2, sixteenths: 4 },
+  ],
+  // Dense: repeated motif + leap
+  [
+    { degree: 0, sixteenths: 2, accent: true },
+    { degree: 2, sixteenths: 2 },
+    { degree: 0, sixteenths: 2 },
+    { degree: 2, sixteenths: 2 },
+    { degree: 4, sixteenths: 2 },
+    { degree: 7, sixteenths: 2 },
+    { degree: 4, sixteenths: 4 },
+  ],
+  // Dense: gallop turnaround
+  [
+    { degree: 4, sixteenths: 2, accent: true },
+    { degree: 5, sixteenths: 1 },
+    { degree: 4, sixteenths: 1 },
+    { degree: 2, sixteenths: 2 },
+    { degree: 0, sixteenths: 2 },
+    { degree: 2, sixteenths: 2 },
+    { degree: 4, sixteenths: 2 },
+    { degree: 0, sixteenths: 4, accent: true },
+  ],
+  // Mid: question rise
+  [
+    { degree: 0, sixteenths: 4, accent: true },
+    { degree: 2, sixteenths: 4 },
+    { degree: 4, sixteenths: 4 },
+    { degree: 5, sixteenths: 4 },
+  ],
+  // Mid: resolve fall
+  [
+    { degree: 5, sixteenths: 4, accent: true },
+    { degree: 4, sixteenths: 4 },
+    { degree: 2, sixteenths: 4 },
+    { degree: 0, sixteenths: 4 },
+  ],
+  // Pickup into downbeat (transition-friendly)
+  [
+    { degree: 2, sixteenths: 2 },
+    { degree: 4, sixteenths: 2 },
+    { degree: 0, sixteenths: 8, accent: true },
+    { degree: 4, sixteenths: 4 },
+  ],
+  // Pedal + neighbour
+  [
+    { degree: 0, sixteenths: 4, accent: true },
+    { degree: 1, sixteenths: 2 },
+    { degree: 0, sixteenths: 2 },
+    { degree: 0, sixteenths: 4 },
+    { degree: 2, sixteenths: 4 },
+  ],
 ];
 
 export type HarmonicPalette =
@@ -377,6 +462,40 @@ function pickFrom(
   return bank[Math.floor(rnd() * bank.length)] ?? bank[0]!;
 }
 
+function withDefaultVoicing(
+  prog: readonly ChordEvent[],
+): ChordEvent[] {
+  return prog.map((ev) => ({
+    ...ev,
+    tones: ev.tones ?? ([0, 2, 4] as const),
+  }));
+}
+
+/** Slow harmonic rhythm on short 4-chord loops (verse / intro). */
+function lengthenShortCycle(
+  prog: readonly ChordEvent[],
+): ChordEvent[] {
+  if (prog.length === 0 || prog.length > 4) return [...prog];
+  if (prog.some((e) => (e.bars ?? 1) > 1)) return [...prog];
+  return prog.map((ev) => ({ ...ev, bars: 2 }));
+}
+
+/** Prefer a V→I (or v→i) close when the section should cadence. */
+function ensureCadentialClose(
+  prog: readonly ChordEvent[],
+  minor: boolean,
+): ChordEvent[] {
+  if (prog.length === 0) return [...prog];
+  const last = prog[prog.length - 1]!;
+  if (last.degree === 0) return withDefaultVoicing(prog);
+  const dominant = minor ? 4 : 4;
+  return withDefaultVoicing([
+    ...prog.slice(0, -1),
+    { degree: dominant, bars: last.bars ?? 1, tones: [0, 2, 4] },
+    { degree: 0, bars: 1, tones: [0, 2, 4] },
+  ]);
+}
+
 /** Pick a progression tailored to section role (chorus lift, bridge contrast). */
 export function pickSectionProgression(
   kind: HarmonySectionKind,
@@ -385,39 +504,52 @@ export function pickSectionProgression(
   rnd: () => number,
 ): readonly ChordEvent[] {
   if (palette === "ambient") {
-    return pickProgressionBank("ambient", minor, rnd);
+    return withDefaultVoicing(pickProgressionBank("ambient", minor, rnd));
   }
   if (kind === "chorus" || kind === "prechorus") {
-    if (palette === "jazz") return pickProgressionBank("jazz", minor, rnd);
-    return pickFrom(minor ? CHORUS_MINOR : CHORUS_POP, rnd);
+    const raw =
+      palette === "jazz"
+        ? pickProgressionBank("jazz", minor, rnd)
+        : pickFrom(minor ? CHORUS_MINOR : CHORUS_POP, rnd);
+    return ensureCadentialClose(raw, minor);
   }
   if (kind === "bridge") {
-    if (palette === "jazz") return pickProgressionBank("jazz", minor, rnd);
-    if (palette === "modal") return pickProgressionBank("modal", minor, rnd);
-    return pickFrom(minor ? BRIDGE_MINOR : BRIDGE_POP, rnd);
+    const raw =
+      palette === "jazz"
+        ? pickProgressionBank("jazz", minor, rnd)
+        : palette === "modal"
+          ? pickProgressionBank("modal", minor, rnd)
+          : pickFrom(minor ? BRIDGE_MINOR : BRIDGE_POP, rnd);
+    return withDefaultVoicing(raw);
   }
   if (kind === "outro") {
-    // Settle on tonic / plagal colour
     const settle: readonly ChordEvent[] =
       rnd() < 0.5
         ? [
-            { degree: 3, bars: 1 },
-            { degree: 0, bars: Math.max(1, 3) },
+            { degree: 3, bars: 1, tones: [0, 2, 4] },
+            { degree: 0, bars: Math.max(1, 3), tones: [0, 2, 4] },
           ]
         : [
-            { degree: 4, bars: 1 },
-            { degree: 0, bars: Math.max(1, 3) },
+            { degree: 4, bars: 1, tones: [0, 2, 4] },
+            { degree: 0, bars: Math.max(1, 3), tones: [0, 2, 4] },
           ];
     return settle;
   }
   if (kind === "intro") {
     const home = pickProgressionBank(palette, minor, rnd);
-    // Intro often holds the first chord longer
     const first = home[0];
-    if (!first) return home;
-    return [{ ...first, bars: Math.max(2, first.bars ?? 1) }, ...home.slice(1)];
+    if (!first) return withDefaultVoicing(home);
+    return lengthenShortCycle(
+      withDefaultVoicing([
+        { ...first, bars: Math.max(2, first.bars ?? 1) },
+        ...home.slice(1),
+      ]),
+    );
   }
-  return pickProgressionBank(palette, minor, rnd);
+  // verse / default
+  return lengthenShortCycle(
+    withDefaultVoicing(pickProgressionBank(palette, minor, rnd)),
+  );
 }
 
 /** Expand chord events into a per-bar degree (+ optional tones) timeline. */
@@ -489,13 +621,43 @@ export function buildSectionHarmonyTimeline(
 
 export function pickMelodyCell(
   rnd: () => number,
-  sparse: boolean,
+  sparseOrMode: boolean | "sparse" | "dense" | "any" = false,
 ): readonly MelodyEvent[] {
-  const pool = sparse
-    ? MELODY_CELLS.filter((c) => c.reduce((s, e) => s + e.sixteenths, 0) >= 12)
-    : MELODY_CELLS;
+  const mode =
+    sparseOrMode === true || sparseOrMode === "sparse"
+      ? "sparse"
+      : sparseOrMode === "dense"
+        ? "dense"
+        : "any";
+  const scored = MELODY_CELLS.map((c) => {
+    const n = c.length;
+    const avg =
+      c.reduce((s, e) => s + e.sixteenths, 0) / Math.max(1, n);
+    // Sparse = fewer events / longer notes; dense = busier cells
+    let w = 1;
+    if (mode === "sparse") w = n <= 3 ? 3 : n <= 4 ? 2 : 0.35;
+    else if (mode === "dense") w = n >= 6 ? 3 : n >= 5 ? 2 : 0.4;
+    if (mode === "sparse" && avg >= 6) w *= 1.4;
+    if (mode === "dense" && avg <= 3) w *= 1.3;
+    return { c, w };
+  });
+  const pool =
+    mode === "any"
+      ? MELODY_CELLS
+      : scored.filter((x) => x.w >= 1).map((x) => x.c);
   const src = pool.length > 0 ? pool : MELODY_CELLS;
-  return src[Math.floor(rnd() * src.length)] ?? src[0]!;
+  if (mode === "any") {
+    return src[Math.floor(rnd() * src.length)] ?? src[0]!;
+  }
+  const weights = scored.filter((x) => src.includes(x.c));
+  let sum = 0;
+  for (const x of weights) sum += x.w;
+  let r = rnd() * sum;
+  for (const x of weights) {
+    r -= x.w;
+    if (r <= 0) return x.c;
+  }
+  return src[0]!;
 }
 
 /** Call / response melody pairs for antiphonal arrangement. */
@@ -547,6 +709,97 @@ export const CALL_RESPONSE_PAIRS: readonly CallResponsePair[] = [
       { degree: 0, sixteenths: 4 },
       { degree: 2, sixteenths: 4 },
       { degree: 0, sixteenths: 4 },
+    ],
+  },
+  // Short call ↔ dense chorus answer
+  {
+    call: [
+      { degree: 0, sixteenths: 8, accent: true },
+      { degree: 4, sixteenths: 8 },
+    ],
+    response: [
+      { degree: 0, sixteenths: 2, accent: true },
+      { degree: 2, sixteenths: 2 },
+      { degree: 4, sixteenths: 2 },
+      { degree: 5, sixteenths: 2 },
+      { degree: 4, sixteenths: 4 },
+      { degree: 2, sixteenths: 4 },
+    ],
+  },
+  // Rising question ↔ falling resolve
+  {
+    call: [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 2, sixteenths: 4 },
+      { degree: 4, sixteenths: 4 },
+      { degree: 5, sixteenths: 4 },
+    ],
+    response: [
+      { degree: 5, sixteenths: 4, accent: true },
+      { degree: 4, sixteenths: 4 },
+      { degree: 2, sixteenths: 4 },
+      { degree: 0, sixteenths: 4 },
+    ],
+  },
+  // Leap call ↔ stepwise fill
+  {
+    call: [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 7, sixteenths: 4 },
+      { degree: 4, sixteenths: 8 },
+    ],
+    response: [
+      { degree: 4, sixteenths: 2 },
+      { degree: 3, sixteenths: 2 },
+      { degree: 2, sixteenths: 2 },
+      { degree: 1, sixteenths: 2 },
+      { degree: 0, sixteenths: 8, accent: true },
+    ],
+  },
+  // Syncopated call ↔ on-beat answer
+  {
+    call: [
+      { degree: 0, sixteenths: 2, accent: true },
+      { degree: 4, sixteenths: 2 },
+      { degree: 7, sixteenths: 4 },
+      { degree: 5, sixteenths: 4 },
+      { degree: 4, sixteenths: 4 },
+    ],
+    response: [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 4, sixteenths: 4 },
+      { degree: 5, sixteenths: 4 },
+      { degree: 4, sixteenths: 4 },
+    ],
+  },
+  // Octave call ↔ triad response
+  {
+    call: [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 7, sixteenths: 4 },
+      { degree: 0, sixteenths: 8 },
+    ],
+    response: [
+      { degree: 0, sixteenths: 2, accent: true },
+      { degree: 2, sixteenths: 2 },
+      { degree: 4, sixteenths: 4 },
+      { degree: 2, sixteenths: 4 },
+      { degree: 0, sixteenths: 4 },
+    ],
+  },
+  // Minor-colour call ↔ plagal-ish answer
+  {
+    call: [
+      { degree: 0, sixteenths: 4, accent: true },
+      { degree: 5, sixteenths: 4 },
+      { degree: 3, sixteenths: 4 },
+      { degree: 0, sixteenths: 4 },
+    ],
+    response: [
+      { degree: 3, sixteenths: 4 },
+      { degree: 5, sixteenths: 4 },
+      { degree: 4, sixteenths: 4 },
+      { degree: 0, sixteenths: 4, accent: true },
     ],
   },
 ];
@@ -662,11 +915,36 @@ export const ARP_CELLS: readonly (readonly ArpEvent[])[] = [
 
 export function pickArpCell(
   rnd: () => number,
-  sparse: boolean,
+  sparseOrMode: boolean | "sparse" | "dense" | "any" = false,
 ): readonly ArpEvent[] {
-  const pool = sparse
-    ? ARP_CELLS.filter((c) => c.reduce((s, e) => s + e.sixteenths, 0) >= 12)
-    : ARP_CELLS;
+  const mode =
+    sparseOrMode === true || sparseOrMode === "sparse"
+      ? "sparse"
+      : sparseOrMode === "dense"
+        ? "dense"
+        : "any";
+  const scored = ARP_CELLS.map((c) => {
+    const sounding = c.filter((e) => e.degree != null).length;
+    let w = 1;
+    if (mode === "sparse") w = sounding <= 4 ? 3 : 0.4;
+    else if (mode === "dense") w = sounding >= 6 ? 3 : sounding >= 5 ? 2 : 0.4;
+    return { c, w };
+  });
+  const pool =
+    mode === "any"
+      ? ARP_CELLS
+      : scored.filter((x) => x.w >= 1).map((x) => x.c);
   const src = pool.length > 0 ? pool : ARP_CELLS;
-  return src[Math.floor(rnd() * src.length)] ?? src[0]!;
+  if (mode === "any") {
+    return src[Math.floor(rnd() * src.length)] ?? src[0]!;
+  }
+  const weights = scored.filter((x) => src.includes(x.c));
+  let sum = 0;
+  for (const x of weights) sum += x.w;
+  let r = rnd() * sum;
+  for (const x of weights) {
+    r -= x.w;
+    if (r <= 0) return x.c;
+  }
+  return src[0]!;
 }

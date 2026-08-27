@@ -7,37 +7,20 @@ import {
   ensurePrefs,
 } from "./db.js";
 import { deleteSample } from "./sample-actions.js";
+import { INTEREST_CULL, targetKeepCount } from "./interest-cull-plan.js";
+
+export { INTEREST_CULL, targetKeepCount } from "./interest-cull-plan.js";
 
 export const SAMPLES_CULLED_EVENT = "glane:samples-culled";
 
 /** Matches import-for-hunt session notes — no density cull for these. */
 const CULL_EXEMPT_NOTES = new Set(["glane:file-song", "glane:file-whole"]);
-export const INTEREST_CULL = {
-  /** Keep about target×minutes; slight slack before deleting. */
-  headroom: 1.15,
-  minKeep: 4,
-  /** Floor elapsed so a short burst does not cull everything. */
-  minElapsedMs: 20_000,
-} as const;
 
 export type CullResult = {
   culledIds: string[];
   kept: number;
   target: number;
 };
-
-/** Soft-cap for samples in a hunt, toward target captures/min. */
-export function targetKeepCount(
-  sessionDurationMs: number,
-  targetPerMin: number,
-): number {
-  const minutes =
-    Math.max(INTEREST_CULL.minElapsedMs, sessionDurationMs) / 60_000;
-  return Math.max(
-    INTEREST_CULL.minKeep,
-    Math.ceil(minutes * targetPerMin * INTEREST_CULL.headroom),
-  );
-}
 
 /** Provisional / polished interest — enough to rank before polish queue. */
 function isInterestCullCandidate(s: Sample): boolean {

@@ -80,7 +80,7 @@ import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
 import type { MoreMenuEntry } from "../more-menu.js";
 import { chromeMore, renderMoreMenu } from "../more-menu.js";
-import { renderSamplePlayButton } from "../sample-play-button.js";
+import { renderSamplePlayButton, setSampleAuditionPlaying, getSampleAuditionPlaying, clearSampleAudition } from "../sample-play-button.js";
 import { tip } from "../tip.js";
 import { patchSampleInQueue } from "../sample-queue-patch.js";
 import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
@@ -164,7 +164,6 @@ export class GlLibraryPage extends LitElement {
   @state() private sieveIndex = 0;
   @state() private sieveIds: string[] = [];
   @state() private sieveSample: Sample | null = null;
-  @state() private playingId: string | null = null;
   @state() private batchBusy = false;
   @state() private separatingId: string | null = null;
   @state() private separateProgress = "";
@@ -179,6 +178,7 @@ export class GlLibraryPage extends LitElement {
   #pointerStartX = 0;
   #pointerStartY = 0;
   #engine: TransportEngine | null = null;
+  #auditionGen = 0;
   #lastTapAt = 0;
   #lastTapId: string | null = null;
   #unsubDemucs: (() => void) | null = null;
@@ -227,6 +227,7 @@ export class GlLibraryPage extends LitElement {
     this.#unsubDemucs?.();
     this.#unsubDenoise?.();
     this.#engine?.stop();
+    clearSampleAudition();
     super.disconnectedCallback();
   }
 
@@ -671,7 +672,7 @@ export class GlLibraryPage extends LitElement {
 
   #renderSampleRow = (s: Sample) => {
     const isSel = this.selected.has(s.id);
-    const playing = this.playingId === s.id;
+    const playing = getSampleAuditionPlaying() === s.id;
     return html`
       <sonic-tr type=${playing ? "info" : nothing}>
         <sonic-td width="2.5rem" vAlign="middle" align="center">
@@ -720,7 +721,7 @@ export class GlLibraryPage extends LitElement {
           @click=${(e: Event) => e.stopPropagation()}
         >
           ${renderSamplePlayButton({
-            playing,
+            sampleId: s.id,
             onClick: () => void this.#audition(s),
           })}
         </sonic-td>
@@ -1041,9 +1042,10 @@ export class GlLibraryPage extends LitElement {
     try {
       await deleteSamples(ids);
       this.selected = new Set();
-      if (this.playingId && ids.includes(this.playingId)) {
+      if (getSampleAuditionPlaying() && ids.includes(getSampleAuditionPlaying()!)) {
+        this.#auditionGen++;
         this.#engine?.stop();
-        this.playingId = null;
+        clearSampleAudition();
       }
       await this.#reload();
     } finally {
@@ -1170,6 +1172,12 @@ export class GlLibraryPage extends LitElement {
   }
 
   async #audition(s: Sample): Promise<void> {
+    if (getSampleAuditionPlaying() === s.id) {
+      this.#auditionGen++;
+      this.#engine?.stop();
+      clearSampleAudition();
+      return;
+    }
     this.#engine ??= new TransportEngine();
     const data = await loadSampleAudio(s);
     if (!data) {
@@ -1183,8 +1191,11 @@ export class GlLibraryPage extends LitElement {
       data.sampleRate,
       data.channelCount,
     );
-    this.playingId = s.id;
-    this.#engine.audition(buf, 5);
+    const gen = ++this.#auditionGen;
+    setSampleAuditionPlaying(s.id);
+    this.#engine.audition(buf, 5, () => {
+      if (gen === this.#auditionGen) clearSampleAudition();
+    });
   }
 
   #renderSieve() {
@@ -1567,9 +1578,10 @@ export class GlLibraryPage extends LitElement {
     });
     if (!ok) return;
     await deleteSample(s.id);
-    if (this.playingId === s.id) {
+    if (getSampleAuditionPlaying() === s.id) {
+      this.#auditionGen++;
       this.#engine?.stop();
-      this.playingId = null;
+      clearSampleAudition();
     }
     await this.#reload();
   }

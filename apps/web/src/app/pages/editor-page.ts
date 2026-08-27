@@ -24,6 +24,12 @@ import {
   toMonoPcm,
 } from "@glane/audio-dsp";
 import { TransportEngine, bakeTrackFx } from "@glane/audio-engine";
+import {
+  requestTurntableMotionPermission,
+  startTurntableGyro,
+  turntableMotionSupport,
+  type TurntableGyroHandle,
+} from "../turntable-gyro.js";
 import { sampleOpfs } from "@glane/audio-io";
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -179,6 +185,7 @@ export class GlEditorPage extends LitElement {
   @state() private waveCtx: { x: number; y: number } | null = null;
   @state() private infoOpen = false;
   @state() private settingsOpen = false;
+  @state() private turntableOn = false;
 
   #engine: TransportEngine | null = null;
   /** Working PCM — @state so `.pcm` reaches the timeline after async load. */
@@ -191,6 +198,12 @@ export class GlEditorPage extends LitElement {
   #raf = 0;
   /** Manual seek-bar / playhead scrub — owns position over transport RAF. */
   #scrubbing = false;
+  #tapeRaf = 0;
+  /** Resume transport after tape scrub if it was playing. */
+  #resumeAfterTape = false;
+  #turntable: TurntableGyroHandle | null = null;
+  #turntableRate = 0;
+  #turntableRaf = 0;
   /** Bumps on stop / superseding restart — only latest play arm may start. */
   #playGen = 0;
   /** In-memory PCM clipboard for copy / cut / paste (AudioRoom-style). */
@@ -391,6 +404,19 @@ export class GlEditorPage extends LitElement {
         ?disabled=${!this.#viewBuffer}
         @gl-transport=${this.#onTransport}
       ></gl-transport-bar>
+      ${this.turntableOn
+        ? html`<button
+            type="button"
+            class="mx-3 mb-2 flex items-center gap-2 rounded-md bg-primary/15 px-3 py-2 text-left text-sm text-primary"
+            @click=${() => this.#stopTurntable()}
+          >
+            ${glIcon("refresh-cw", { size: "sm" })}
+            <span class="min-w-0 flex-1">${t("editor.turntableOn")}</span>
+            <span class="shrink-0 text-xs opacity-80"
+              >${t("editor.turntableStop")}</span
+            >
+          </button>`
+        : nothing}
       ${this.#renderStretchModal()}
       ${this.#renderDynamicsModal()}
       ${this.#renderForceRoleModal()}
@@ -572,6 +598,7 @@ export class GlEditorPage extends LitElement {
 
   #onTimelineSeek = (e: CustomEvent<{ sample: number }>): void => {
     this.#seekTo(e.detail.sample);
+    if (this.#scrubbing) this.#driveTape(this.playheadSample);
   };
 
   #onTimelineView = (
@@ -662,16 +689,30 @@ export class GlEditorPage extends LitElement {
   }
 
   #onScrubStart = (): void => {
-    this.#scrubbing = true;
+    if (this.turntableOn) {
+      this.#scrubbing = true;
+      return;
+    }
+    this.#beginTapeScrub(this.playheadSample);
   };
 
   #onScrubEnd = (): void => {
-    this.#scrubbing = false;
+    if (this.turntableOn) {
+      this.#scrubbing = false;
+      this.#driveTurntable(this.#turntableRate);
+      this.#editTimeline()?.followPlayheadNow();
+      return;
+    }
+    void this.#endTapeScrub();
     this.#editTimeline()?.followPlayheadNow();
   };
 
   #onSeekBarStart = (): void => {
-    this.#scrubbing = true;
+    if (this.turntableOn) {
+      this.#scrubbing = true;
+      return;
+    }
+    this.#beginTapeScrub(this.playheadSample);
   };
 
   #onSeekBar = (e: CustomEvent<{ value: number }>): void => {
@@ -679,9 +720,139 @@ export class GlEditorPage extends LitElement {
   };
 
   #onSeekBarEnd = (): void => {
-    this.#scrubbing = false;
+    if (this.turntableOn) {
+      this.#scrubbing = false;
+      this.#driveTurntable(this.#turntableRate);
+      this.#editTimeline()?.followPlayheadNow();
+      return;
+    }
+    void this.#endTapeScrub();
     this.#editTimeline()?.followPlayheadNow();
   };
+
+  #beginTapeScrub(_relSample: number): void {
+    this.#scrubbing = true;
+    if (this.playing) {
+      this.#resumeAfterTape = true;
+      this.#haltPlay();
+    } else {
+      this.#resumeAfterTape = false;
+    }
+    cancelAnimationFrame(this.#tapeRaf);
+    const tick = () => {
+      if (!this.#scrubbing) return;
+      this.#driveTape(this.playheadSample);
+      this.#tapeRaf = requestAnimationFrame(tick);
+    };
+    this.#tapeRaf = requestAnimationFrame(tick);
+  }
+
+  async #endTapeScrub(): Promise<void> {
+    this.#scrubbing = false;
+    cancelAnimationFrame(this.#tapeRaf);
+    this.#tapeRaf = 0;
+    this.#engine?.endTapeScrub();
+    if (this.#resumeAfterTape) {
+      this.#resumeAfterTape = false;
+      await this.#restartPlayFrom(this.playheadSample);
+    }
+  }
+
+  #driveTape(relSample: number): void {
+    if (!this.#engine || !this.#viewBuffer) return;
+    this.#engine.tapeScrub([
+      {
+        key: "edit",
+        buffer: this.#viewBuffer,
+        sample: relSample,
+      },
+    ]);
+  }
+
+  #turntableVoice() {
+    if (!this.#viewBuffer) return null;
+    const { loopA, loopB } = this.#loopRel();
+    const sr = this.#engine?.sampleRate ?? this.#sampleRate;
+    return {
+      key: "edit",
+      buffer: this.#viewBuffer,
+      sample: this.playheadSample,
+      loopStartSec: loopA / sr,
+      loopEndSec: Math.max(loopA / sr + 0.001, loopB / sr),
+    };
+  }
+
+  #driveTurntable(rate: number): void {
+    if (!this.#engine || !this.#viewBuffer || !this.turntableOn) return;
+    if (!this.#scrubbing) {
+      const heard = this.#engine.tapeAudioSample("edit");
+      if (heard != null) {
+        const { loopA, loopB } = this.#loopRel();
+        let s = heard;
+        if (loopB > loopA + 1) {
+          const len = loopB - loopA;
+          let rel = (s - loopA) % len;
+          if (rel < 0) rel += len;
+          s = loopA + rel;
+        }
+        this.playheadSample = Math.max(
+          0,
+          Math.min(this.#viewBuffer.length - 1, Math.round(s)),
+        );
+        this.#editTimeline()?.followPlayheadNow();
+      }
+    }
+    const voice = this.#turntableVoice();
+    if (!voice) return;
+    this.#engine.tapeSpin([voice], rate);
+  }
+
+  async #toggleTurntable(): Promise<void> {
+    if (this.turntableOn) {
+      this.#stopTurntable();
+      return;
+    }
+    const support = turntableMotionSupport();
+    if (support === "unsupported") {
+      toast(t("editor.turntableUnsupported"), "error");
+      return;
+    }
+    const ok = await requestTurntableMotionPermission();
+    if (!ok) {
+      toast(t("editor.turntableDenied"), "error");
+      return;
+    }
+    if (!this.#engine || !this.#viewBuffer) return;
+    if (this.playing) this.#haltPlay();
+    if (this.#scrubbing) void this.#endTapeScrub();
+    await this.#engine.ctx.resume();
+    this.turntableOn = true;
+    this.#turntableRate = 0;
+    this.#turntable = startTurntableGyro((rate) => {
+      this.#turntableRate = rate;
+    });
+    cancelAnimationFrame(this.#turntableRaf);
+    const tick = () => {
+      if (!this.turntableOn) return;
+      this.#driveTurntable(this.#turntableRate);
+      this.#turntableRaf = requestAnimationFrame(tick);
+    };
+    this.#turntableRaf = requestAnimationFrame(tick);
+    this.#syncChromeMore();
+    toast(t("editor.turntableOn"), "success");
+  }
+
+  #stopTurntable(): void {
+    if (!this.turntableOn && !this.#turntable) return;
+    this.turntableOn = false;
+    this.#turntable?.stop();
+    this.#turntable = null;
+    this.#turntableRate = 0;
+    cancelAnimationFrame(this.#turntableRaf);
+    this.#turntableRaf = 0;
+    this.#engine?.endTapeScrub();
+    this.#syncChromeMore();
+  }
 
   /** Push selection → transport loop bounds used by playheadSample(). */
   #syncLiveLoop(): void {
@@ -737,6 +908,7 @@ export class GlEditorPage extends LitElement {
 
   async #handleTransport(action: TransportAction): Promise<void> {
     if (!this.#engine || !this.#viewBuffer) return;
+    if (this.turntableOn) this.#stopTurntable();
     if (action === "pause") {
       this.#haltPlay();
       return;
@@ -812,6 +984,14 @@ export class GlEditorPage extends LitElement {
         icon: "undo",
         disabled: this.historyLen === 0,
         onClick: () => void this.#undo(),
+      },
+      {
+        label: this.turntableOn
+          ? t("editor.turntableStop")
+          : t("editor.turntable"),
+        icon: "refresh-cw",
+        disabled: !this.#viewBuffer,
+        onClick: () => void this.#toggleTurntable(),
       },
       { section: t("editor.sectionClipboard") },
       {
@@ -2240,6 +2420,7 @@ export class GlEditorPage extends LitElement {
     window.removeEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
     window.removeEventListener("beforeunload", this.#onBeforeUnload);
     this.#unsubProc?.();
+    this.#stopTurntable();
     this.#haltPlay();
     super.disconnectedCallback();
   }
