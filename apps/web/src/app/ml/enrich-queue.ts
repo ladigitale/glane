@@ -1,7 +1,7 @@
 import { sampleOpfs } from "@glane/audio-io";
 import { toMonoPcm } from "@glane/audio-dsp";
 import {
-  enrichWithClassifier,
+  enrichFromLabels,
   ML_TAG,
   stripMlTags,
 } from "@glane/audio-ml";
@@ -9,7 +9,7 @@ import type { SampleClass } from "@glane/core-model";
 import { nowIso } from "@glane/core-model";
 import { db, ensurePrefs } from "../db.js";
 import { mlOptsFromPrefs } from "./ml-prefs.js";
-import { getYamnetClassifier } from "./yamnet-mediapipe.js";
+import { yamnetClient } from "./yamnet-client.js";
 import { buildAutoSampleName } from "../sample-auto-name.js";
 import { SAMPLE_UPDATED_EVENT } from "../process-queue.js";
 
@@ -19,6 +19,7 @@ const pending = new Set<string>();
 
 /**
  * T2 YAMNet enrichment after polish (ADR-0020). Non-blocking; fail-soft.
+ * Classify runs in a Dedicated Worker so MediaPipe WASM does not jank the UI.
  */
 export async function enqueueYamnetEnrich(
   sampleId: string,
@@ -57,14 +58,12 @@ export async function enqueueYamnetEnrich(
     }
 
     try {
-      const classifier = await getYamnetClassifier();
-      const result = await enrichWithClassifier(
-        sample.tags ?? [],
-        toMonoPcm(audio.pcm, audio.channelCount ?? 1),
-        audio.sampleRate,
-        classifier,
-        { minScore: ml.yamnetMinScore, maxLabels: ml.yamnetMaxLabels },
-      );
+      const mono = toMonoPcm(audio.pcm, audio.channelCount ?? 1);
+      const labels = await yamnetClient.classify(mono, audio.sampleRate);
+      const result = enrichFromLabels(sample.tags ?? [], labels, {
+        minScore: ml.yamnetMinScore,
+        maxLabels: ml.yamnetMaxLabels,
+      });
 
       const fresh = await db.samples.get(sampleId);
       if (!fresh || fresh.deletedAt) return;

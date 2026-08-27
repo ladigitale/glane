@@ -17,6 +17,7 @@ let classifierPromise: Promise<AudioClassifierPort> | null = null;
 
 /**
  * Lazy MediaPipe YAMNet classifier (main thread or worker).
+ * Prefer {@link yamnetClient} on the UI thread — `classify` is sync WASM.
  * WASM from same-origin `/ml/mediapipe-wasm`; model from CORP CDN → Cache Storage.
  */
 export async function getYamnetClassifier(): Promise<AudioClassifierPort> {
@@ -29,7 +30,8 @@ export async function getYamnetClassifier(): Promise<AudioClassifierPort> {
   return classifierPromise;
 }
 
-async function createYamnetClassifier(): Promise<AudioClassifierPort> {
+/** Bootstrap used by the YAMNet dedicated worker (and main-thread fallback). */
+export async function createYamnetClassifier(): Promise<AudioClassifierPort> {
   const mp: MediaPipeAudio = await import("@mediapipe/tasks-audio");
   const wasmRoot = `${import.meta.env.BASE_URL}ml/mediapipe-wasm`.replace(
     /\/?$/,

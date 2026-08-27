@@ -124,9 +124,20 @@ function inferKind(sample: {
   return "oneshot";
 }
 
+type PendingMl = {
+  sampleId: string;
+  force: boolean;
+  replaceClap: boolean;
+};
+
+async function yieldToUi(): Promise<void> {
+  await new Promise<void>((r) => setTimeout(r, 0));
+}
+
 /**
  * Persistent polish queue (Dexie). Survives F5 / navigation.
  * Capture writes raw PCM instantly; polish runs in a worker.
+ * YAMNet/CLAP wait until the polish queue is idle so they do not jank the bar.
  */
 export const processQueue = (() => {
   const listeners = new Set<Listener>();
@@ -134,12 +145,22 @@ export const processQueue = (() => {
   let pumping = false;
   let started = false;
   let currentSampleId: string | null = null;
+  /** Session-local done count for the progress bar (`done > 0` only). */
+  let doneSession = 0;
+  let emitRaf: number | null = null;
+  let drainingMl = false;
   /** After polish, re-run YAMNet / CLAP even if tags already exist. */
   const forceMl = new Set<string>();
+  /** ML deferred until polish pending+running === 0. */
+  const mlPending = new Map<string, PendingMl>();
 
   function emit(): void {
-    void snapshot().then((s) => {
-      for (const l of listeners) l(s);
+    if (emitRaf != null) return;
+    emitRaf = requestAnimationFrame(() => {
+      emitRaf = null;
+      void snapshot().then((s) => {
+        for (const l of listeners) l(s);
+      });
     });
   }
 
@@ -156,25 +177,64 @@ export const processQueue = (() => {
     );
   }
 
-  async function snapshot(): Promise<ProcessQueueSnapshot> {
-    const rows = await db.processJobs
+  function scheduleMl(
+    sampleId: string,
+    opts: { force?: boolean; replaceClap?: boolean } = {},
+  ): void {
+    const prev = mlPending.get(sampleId);
+    mlPending.set(sampleId, {
+      sampleId,
+      force: Boolean(opts.force) || Boolean(prev?.force),
+      replaceClap: Boolean(opts.replaceClap) || Boolean(prev?.replaceClap),
+    });
+    void drainMlWhenIdle();
+  }
+
+  async function drainMlWhenIdle(): Promise<void> {
+    if (drainingMl || mlPending.size === 0) return;
+    if (pumping) return;
+    const open = await db.processJobs
       .where("status")
-      .anyOf(["pending", "running", "done", "error"])
-      .toArray();
-    let pending = 0;
-    let running = 0;
-    let done = 0;
-    let error = 0;
-    for (const j of rows) {
-      if (j.status === "pending") pending++;
-      else if (j.status === "running") running++;
-      else if (j.status === "done") done++;
-      else if (j.status === "error") error++;
+      .anyOf(["pending", "running"])
+      .count();
+    if (open > 0) return;
+
+    drainingMl = true;
+    try {
+      while (mlPending.size > 0) {
+        const stillOpen = await db.processJobs
+          .where("status")
+          .anyOf(["pending", "running"])
+          .count();
+        if (stillOpen > 0 || pumping) break;
+        const batch = [...mlPending.values()];
+        mlPending.clear();
+        for (const item of batch) {
+          await enqueueYamnetEnrich(item.sampleId, {
+            force: item.force,
+          }).catch(() => undefined);
+          await enqueueClapEmbed(item.sampleId, {
+            replace: item.replaceClap,
+          }).catch(() => undefined);
+          await yieldToUi();
+        }
+      }
+    } finally {
+      drainingMl = false;
+      if (mlPending.size > 0 && !pumping) void drainMlWhenIdle();
     }
+  }
+
+  async function snapshot(): Promise<ProcessQueueSnapshot> {
+    const [pending, running, error] = await Promise.all([
+      db.processJobs.where("status").equals("pending").count(),
+      db.processJobs.where("status").equals("running").count(),
+      db.processJobs.where("status").equals("error").count(),
+    ]);
     return {
       pending,
       running,
-      done,
+      done: doneSession,
       error,
       remaining: pending + running,
       backlog: pending + running,
@@ -244,6 +304,7 @@ export const processQueue = (() => {
     pumping = false;
     currentSampleId = null;
     emit();
+    await yieldToUi();
     void pump();
   }
 
@@ -252,6 +313,7 @@ export const processQueue = (() => {
     if (!job) {
       pumping = false;
       currentSampleId = null;
+      await yieldToUi();
       void pump();
       return;
     }
@@ -307,10 +369,7 @@ export const processQueue = (() => {
         })
         .catch(() => undefined);
       const force = forceMl.delete(msg.sampleId);
-      void enqueueYamnetEnrich(msg.sampleId, { force }).catch(() => undefined);
-      void enqueueClapEmbed(msg.sampleId, {
-        replace: force,
-      }).catch(() => undefined);
+      scheduleMl(msg.sampleId, { force, replaceClap: force });
     } else {
       forceMl.delete(msg.sampleId);
     }
@@ -320,10 +379,12 @@ export const processQueue = (() => {
       status: "done",
       updatedAt: nowIso(),
     });
+    doneSession += 1;
     pumping = false;
     currentSampleId = null;
     notifyProcessed(msg.sampleId);
     emit();
+    await yieldToUi();
     void pump();
   }
 
@@ -338,6 +399,7 @@ export const processQueue = (() => {
       open.find((j) => j.status === "running");
     if (!job) {
       emit();
+      void drainMlWhenIdle();
       return;
     }
 
@@ -496,8 +558,7 @@ export const processQueue = (() => {
       characterizePcm(audio.pcm, audio.sampleRate, audio.channelCount),
       sample.loopScore,
     );
-    void enqueueYamnetEnrich(sampleId, { force: true }).catch(() => undefined);
-    void enqueueClapEmbed(sampleId, { replace: true }).catch(() => undefined);
+    scheduleMl(sampleId, { force: true, replaceClap: true });
     notifyProcessed(sampleId);
     emit();
     return true;

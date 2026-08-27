@@ -206,6 +206,8 @@ export class GlEditorPage extends LitElement {
   #turntableRaf = 0;
   /** Bumps on stop / superseding restart — only latest play arm may start. */
   #playGen = 0;
+  /** Supersede in-flight #load (polish mid-play / sampleId change). */
+  #loadGen = 0;
   /** In-memory PCM clipboard for copy / cut / paste (AudioRoom-style). */
   #clipboard: Float32Array | null = null;
   /** Skip leave prompt after delete (sample already gone). */
@@ -475,7 +477,19 @@ export class GlEditorPage extends LitElement {
   }
 
   async #load(): Promise<void> {
+    // Polish / sampleId change must not orphan a looping AudioContext.
+    this.#stopTurntable();
+    this.#haltPlay();
+    const prevEngine = this.#engine;
+    this.#engine = null;
+    if (prevEngine) {
+      prevEngine.stop();
+      void prevEngine.ctx.close().catch(() => undefined);
+    }
+
+    const gen = ++this.#loadGen;
     this.sample = (await db.samples.get(this.sampleId)) ?? null;
+    if (gen !== this.#loadGen) return;
     this.#history = [];
     this.historyLen = 0;
     this.previewFx = { ...DEFAULT_TRACK_FX };
@@ -492,11 +506,19 @@ export class GlEditorPage extends LitElement {
     let master: Float32Array | null = null;
     if (this.sample) {
       const data = await loadSampleAudio(this.sample);
+      if (gen !== this.#loadGen) {
+        this.#disposeEngine();
+        return;
+      }
       if (data) {
         this.#sampleRate = data.sampleRate;
         this.#channelCount = data.channelCount ?? 1;
         master = data.pcm;
       }
+    }
+    if (gen !== this.#loadGen) {
+      this.#disposeEngine();
+      return;
     }
     if (!master || master.length === 0) {
       this.#channelCount = 1;
@@ -519,6 +541,10 @@ export class GlEditorPage extends LitElement {
       .where("entityId")
       .equals(this.sampleId)
       .sortBy("clientSeq");
+    if (gen !== this.#loadGen) {
+      this.#disposeEngine();
+      return;
+    }
     this.ops = saved
       .filter((o) => o.entityType === "sample_edit")
       .map((o) => o.payload as unknown as EditorOp);
@@ -546,6 +572,14 @@ export class GlEditorPage extends LitElement {
       this.selEnd = this.state.endSample;
     }
     this.#rebuildView();
+  }
+
+  #disposeEngine(): void {
+    const eng = this.#engine;
+    this.#engine = null;
+    if (!eng) return;
+    eng.stop();
+    void eng.ctx.close().catch(() => undefined);
   }
 
   #rebuildView(): void {
@@ -2421,7 +2455,9 @@ export class GlEditorPage extends LitElement {
     window.removeEventListener("beforeunload", this.#onBeforeUnload);
     this.#unsubProc?.();
     this.#stopTurntable();
+    this.#loadGen++;
     this.#haltPlay();
+    this.#disposeEngine();
     super.disconnectedCallback();
   }
 }
