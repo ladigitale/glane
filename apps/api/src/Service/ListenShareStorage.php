@@ -58,8 +58,12 @@ final class ListenShareStorage
         if ($file->getSize() === false || $file->getSize() > self::MAX_BYTES) {
             throw new \InvalidArgumentException('file_too_large');
         }
-        $mime = (string) ($file->getMimeType() ?? '');
         $name = strtolower($file->getClientOriginalName());
+        // Prefer client MIME — getMimeType() needs symfony/mime (throws if missing).
+        $mime = (string) ($file->getClientMimeType() ?? '');
+        if ($mime === '' && class_exists(\Symfony\Component\Mime\MimeTypes::class)) {
+            $mime = (string) ($file->getMimeType() ?? '');
+        }
         if (!str_contains($mime, 'audio') && !str_ends_with($name, '.mp3')) {
             throw new \InvalidArgumentException('invalid_mime');
         }
