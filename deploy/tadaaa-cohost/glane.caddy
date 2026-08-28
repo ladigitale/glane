@@ -19,6 +19,8 @@
 
 {$GLANE_API_SERVER_NAME:glane-api.example.com} {
 	encode zstd gzip
+	# COEP on the app requires CORP (or CORS) for cross-origin media (listen MP3).
+	header Cross-Origin-Resource-Policy cross-origin
 	reverse_proxy glane-php:80 {
 		header_up X-Forwarded-Proto {scheme}
 		header_up X-Forwarded-Host {host}

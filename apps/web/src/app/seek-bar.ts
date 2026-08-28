@@ -1,10 +1,12 @@
 /**
  * YouTube-style progress scrubber — fixed under transport, above the DAW scroll.
  * Click / drag seeks; optional view window = visible timeline slice on the global bar.
+ * To-start button sits left of the track.
  */
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
+import { glIcon } from "./icon.js";
 import { t } from "./i18n/messages.js";
 import { tip } from "./tip.js";
 
@@ -141,39 +143,66 @@ export class GlSeekBar extends LitElement {
     const widthPct = showView
       ? Math.min(100 - leftPct, Math.max(0, ((v1 - v0) / max) * 100))
       : 0;
-    return tip(
-      t("transport.position"),
-      html`
-        <div
-          class="wrap relative flex h-touch cursor-pointer select-none items-center px-3 touch-none outline-none ${this
-            .dragging
-            ? "dragging"
-            : ""}"
-          role="slider"
-          tabindex="0"
-          aria-valuemin="0"
-          aria-valuemax=${Math.round(max)}
-          aria-valuenow=${Math.round(this.value)}
-          aria-label=${t("transport.position")}
-          aria-disabled=${this.disabled ? "true" : "false"}
-          @pointerdown=${this.#onDown}
-          @keydown=${this.#onKey}
-        >
-          <div class="track">
-            ${showView
-              ? html`<div
-                  class="view"
-                  style="left:${leftPct}%;width:${widthPct}%"
-                ></div>`
-              : nothing}
-            <div class="fill" style="width:${pct}%"></div>
-            <div class="thumb" style="left:${pct}%"></div>
-          </div>
-        </div>
-      `,
-      { class: "block w-full" },
-    );
+    return html`
+      <div class="flex w-full items-center gap-1">
+        ${tip(
+          t("transport.toStart"),
+          html`
+            <sonic-button
+              shape="circle"
+              variant="ghost"
+              type="neutral"
+              size="sm"
+              icon
+              ?disabled=${this.disabled}
+              data-aria-label=${t("transport.toStart")}
+              @click=${this.#toStart}
+            >
+              ${glIcon("skip-back", { size: "sm" })}
+            </sonic-button>
+          `,
+        )}
+        ${tip(
+          t("transport.position"),
+          html`
+            <div
+              class="wrap relative flex h-touch cursor-pointer select-none items-center px-2 touch-none outline-none ${this
+                .dragging
+                ? "dragging"
+                : ""}"
+              role="slider"
+              tabindex="0"
+              aria-valuemin="0"
+              aria-valuemax=${Math.round(max)}
+              aria-valuenow=${Math.round(this.value)}
+              aria-label=${t("transport.position")}
+              aria-disabled=${this.disabled ? "true" : "false"}
+              @pointerdown=${this.#onDown}
+              @keydown=${this.#onKey}
+            >
+              <div class="track">
+                ${showView
+                  ? html`<div
+                      class="view"
+                      style="left:${leftPct}%;width:${widthPct}%"
+                    ></div>`
+                  : nothing}
+                <div class="fill" style="width:${pct}%"></div>
+                <div class="thumb" style="left:${pct}%"></div>
+              </div>
+            </div>
+          `,
+          { class: "block min-w-0 flex-1" },
+        )}
+      </div>
+    `;
   }
+
+  #toStart = (e: Event): void => {
+    e.stopPropagation();
+    if (this.disabled) return;
+    this.#emitSeek(0);
+  };
 
   #ratioAtClientX(clientX: number): number {
     const track = this.renderRoot.querySelector(".track") as HTMLElement | null;

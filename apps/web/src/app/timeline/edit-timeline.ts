@@ -7,8 +7,12 @@ import { WaveformRenderer } from "@glane/waveform";
 import {
   GestureFsm,
   LONGPRESS_MS,
+  MOVE_THRESHOLD_PX,
   type GestureKind,
 } from "@glane/gestures";
+
+/** OS-like double-click window (match sequencer). */
+const DOUBLE_TAP_MS = 500;
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { PropertyValues } from "lit";
@@ -204,6 +208,11 @@ export class GlEditTimeline extends LitElement {
   #longpressOpened = false;
   #holdLastX = 0;
   #holdLastY = 0;
+  /** Double-tap on loop-move grip → select full trim region. */
+  #lastSelMoveTapAt = 0;
+  #selMoveOriginX = 0;
+  #selMoveOriginY = 0;
+  #selMoveMoved = false;
   #scrollInertia = new TimelineScrollInertia();
 
   override firstUpdated(): void {
@@ -518,7 +527,7 @@ export class GlEditTimeline extends LitElement {
                 ? html`<div
                     class="handle loop-move"
                     style="left:${toPx(selL)}px;width:${Math.max(2, toPx(selR - selL))}px"
-                    title="Déplacer la boucle"
+                    title="Déplacer la boucle · double-tap = tout"
                     @pointerdown=${(e: PointerEvent) =>
                       this.#beginHandle(e, "sel-move")}
                   ></div>`
@@ -647,14 +656,35 @@ export class GlEditTimeline extends LitElement {
     );
   }
 
+  #selectAllSel(): void {
+    const a = Math.min(this.startSample, this.endSample);
+    const b = Math.max(this.startSample, this.endSample);
+    if (b <= a + 1) return;
+    this.selStart = a;
+    this.selEnd = b;
+    this.requestUpdate();
+    this.#emitSel(true);
+  }
+
   #beginHandle(e: PointerEvent, mode: DragMode): void {
     e.stopPropagation();
     e.preventDefault();
+    if (mode === "sel-move") {
+      const now = performance.now();
+      if (e.detail >= 2 || now - this.#lastSelMoveTapAt < DOUBLE_TAP_MS) {
+        this.#lastSelMoveTapAt = 0;
+        this.#selectAllSel();
+        return;
+      }
+    }
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     this.#drag = mode;
     this.#dragOriginSample = this.#sampleAtClientX(e.clientX);
     if (mode === "sel-move") {
       this.#selBeforeDrag = { start: this.selStart, end: this.selEnd };
+      this.#selMoveOriginX = e.clientX;
+      this.#selMoveOriginY = e.clientY;
+      this.#selMoveMoved = false;
     }
     if (mode === "scrub") {
       // Delta scrub + center follow (same as play), priority over pan.
@@ -853,6 +883,16 @@ export class GlEditTimeline extends LitElement {
       return;
     }
     if (this.#drag === "sel-move") {
+      if (!this.#selMoveMoved) {
+        if (
+          Math.hypot(e.clientX - this.#selMoveOriginX, e.clientY - this.#selMoveOriginY) <
+          MOVE_THRESHOLD_PX
+        ) {
+          return;
+        }
+        this.#selMoveMoved = true;
+        this.#lastSelMoveTapAt = 0;
+      }
       const sample = this.#sampleAtClientX(e.clientX);
       const a0 = Math.min(this.#selBeforeDrag.start, this.#selBeforeDrag.end);
       const b0 = Math.max(this.#selBeforeDrag.start, this.#selBeforeDrag.end);
@@ -1040,6 +1080,9 @@ export class GlEditTimeline extends LitElement {
         this.#emitSeek(this.#dragOriginSample || a);
         this.requestUpdate();
         return;
+      }
+      if (mode === "sel-move" && !this.#selMoveMoved) {
+        this.#lastSelMoveTapAt = performance.now();
       }
       this.#emitSel(true);
     }

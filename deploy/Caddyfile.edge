@@ -30,6 +30,8 @@
 
 	handle {
 		encode zstd gzip
+		# App COEP require-corp → cross-origin media needs CORP (listen MP3).
+		header Cross-Origin-Resource-Policy cross-origin
 		reverse_proxy php:80 {
 			header_up X-Forwarded-Proto {scheme}
 			header_up X-Forwarded-Host {host}

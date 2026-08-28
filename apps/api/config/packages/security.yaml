@@ -34,8 +34,8 @@ when@dev:
             - { path: ^/api/auth/login, roles: PUBLIC_ACCESS }
             - { path: ^/api/auth/register, roles: PUBLIC_ACCESS }
             - { path: ^/api/publish/soundcloud/callback, roles: PUBLIC_ACCESS }
-            - { path: ^/api/listens/[^/]+$, methods: [GET], roles: PUBLIC_ACCESS }
-            - { path: ^/api/listens/[^/]+/audio$, methods: [GET], roles: PUBLIC_ACCESS }
+            - { path: ^/api/listens/[^/]+$, methods: [GET, HEAD], roles: PUBLIC_ACCESS }
+            - { path: ^/api/listens/[^/]+/audio$, methods: [GET, HEAD], roles: PUBLIC_ACCESS }
             - { path: ^/api/docs, roles: PUBLIC_ACCESS }
             - { path: ^/api, roles: PUBLIC_ACCESS }
 
@@ -45,8 +45,8 @@ when@prod:
             - { path: ^/api/auth/login, roles: PUBLIC_ACCESS }
             - { path: ^/api/auth/register, roles: PUBLIC_ACCESS }
             - { path: ^/api/publish/soundcloud/callback, roles: PUBLIC_ACCESS }
-            - { path: ^/api/listens/[^/]+$, methods: [GET], roles: PUBLIC_ACCESS }
-            - { path: ^/api/listens/[^/]+/audio$, methods: [GET], roles: PUBLIC_ACCESS }
+            - { path: ^/api/listens/[^/]+$, methods: [GET, HEAD], roles: PUBLIC_ACCESS }
+            - { path: ^/api/listens/[^/]+/audio$, methods: [GET, HEAD], roles: PUBLIC_ACCESS }
             - { path: ^/api/health, roles: PUBLIC_ACCESS }
             - { path: ^/api/docs, roles: PUBLIC_ACCESS }
             - { path: ^/api, roles: IS_AUTHENTICATED_FULLY }

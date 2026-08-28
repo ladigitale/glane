@@ -775,6 +775,8 @@ export class GlSequencerPage extends LitElement {
   #dragStartTrackId = "";
   #lastTapClipId: string | null = null;
   #lastTapAt = 0;
+  /** Double-tap on loop-move grip → select full sequence. */
+  #lastLoopMoveTapAt = 0;
   #selDragging = false;
   /** Edge auto-pan while dragging loop selection / edges. */
   #selEdgeScrollRaf = 0;
@@ -1508,11 +1510,6 @@ export class GlSequencerPage extends LitElement {
           @gl-seek=${this.#onSeekBar}
           @gl-seek-end=${this.#onSeekBarEnd}
         ></gl-seek-bar>
-        <span
-          class="view-mode min-w-[2.6rem] shrink-0 select-none text-right font-mono text-[0.6rem] lowercase tracking-wide text-neutral-500"
-          title=${t("tl.viewModeHint")}
-          >${this.viewMode === "vue" ? t("tl.view") : t("tl.global")}</span
-        >
       </div>
       <div class="transport-wrap shrink-0 px-4 pb-2.5 max-md:px-2.5 max-md:pb-2">
         <gl-transport-bar
@@ -5679,17 +5676,35 @@ export class GlSequencerPage extends LitElement {
     window.addEventListener("pointercancel", up);
   };
 
+  #selectAllLoop(): void {
+    const end = this.#projectLengthTick();
+    if (end <= 0) return;
+    this.selStartTick = 0;
+    this.selEndTick = end;
+    this.#syncTransportLoop();
+    if (this.playing) void this.#resyncSchedule();
+  }
+
   #loopMoveDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     if (this.selStartTick == null || this.selEndTick == null) return;
+    const now = performance.now();
+    if (e.detail >= 2 || now - this.#lastLoopMoveTapAt < DOUBLE_TAP_MS) {
+      this.#lastLoopMoveTapAt = 0;
+      this.#selectAllLoop();
+      return;
+    }
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     const a0 = Math.min(this.selStartTick, this.selEndTick);
     const b0 = Math.max(this.selStartTick, this.selEndTick);
     const width = Math.max(1, b0 - a0);
     const originTick = this.#tickAtClamped(e.clientX);
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    let moved = false;
     const apply = (clientX: number) => {
       const delta = this.#tickAtClamped(clientX) - originTick;
       let nextA = a0 + delta;
@@ -5708,6 +5723,13 @@ export class GlSequencerPage extends LitElement {
       this.#syncTransportLoop();
     };
     const move = (ev: PointerEvent) => {
+      if (!moved) {
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < MOVE_THRESHOLD_PX) {
+          return;
+        }
+        moved = true;
+        this.#lastLoopMoveTapAt = 0;
+      }
       this.#onSelDragMove(ev.clientX, apply);
     };
     const up = () => {
@@ -5715,6 +5737,7 @@ export class GlSequencerPage extends LitElement {
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
       this.#stopSelEdgeScroll();
+      if (!moved) this.#lastLoopMoveTapAt = performance.now();
       this.#syncTransportLoop();
       if (this.playing) void this.#resyncSchedule();
     };

@@ -485,7 +485,7 @@ const fr = {
   "seq.placeSample": "Glisser sur une piste pour placer",
   "seq.editBpm": "Changer le tempo",
   "seq.editBars": "Changer la durée",
-  "seq.loopMove": "Déplacer la boucle",
+  "seq.loopMove": "Déplacer la boucle · double-tap = tout",
   "seq.seqEndDrag": "Glisser pour changer la durée",
   "seq.crossfade": "Crossfade",
   "seq.loopSel": "Sélection = boucle",
@@ -495,6 +495,7 @@ const fr = {
   "seq.dropDelete": "Supprimer (déposer ici)",
   "seq.dropCancel": "Annuler (déposer ici)",
   "transport.position": "Position",
+  "transport.toStart": "Retour au début",
   "sample.missing": "Son introuvable.",
   "sample.class": "Classe",
   "sample.subclass": "Sous-classe",
@@ -879,9 +880,6 @@ const fr = {
   "dialog.discard": "Ne pas enregistrer",
   "editor.unsaved": "Enregistrer les modifications de ce son ?",
   "library.renamePrompt": "Nom du son",
-  "tl.view": "vue",
-  "tl.global": "global",
-  "tl.viewModeHint": "Fenêtre visible sur la timeline (vue libre / suivi global)",
 } as const;
 
 const en: Record<keyof typeof fr, string> = {
@@ -1360,7 +1358,7 @@ const en: Record<keyof typeof fr, string> = {
   "seq.placeSample": "Drag onto a track to place",
   "seq.editBpm": "Change tempo",
   "seq.editBars": "Change length",
-  "seq.loopMove": "Move loop",
+  "seq.loopMove": "Move loop · double-tap = all",
   "seq.seqEndDrag": "Drag to change length",
   "seq.crossfade": "Crossfade",
   "seq.loopSel": "Selection = loop",
@@ -1370,6 +1368,7 @@ const en: Record<keyof typeof fr, string> = {
   "seq.dropDelete": "Delete (drop here)",
   "seq.dropCancel": "Cancel (drop here)",
   "transport.position": "Position",
+  "transport.toStart": "Back to start",
   "sample.missing": "Sound not found.",
   "sample.class": "Class",
   "sample.subclass": "Subclass",
@@ -1753,9 +1752,6 @@ const en: Record<keyof typeof fr, string> = {
   "dialog.discard": "Don't save",
   "editor.unsaved": "Save changes to this sound?",
   "library.renamePrompt": "Sound name",
-  "tl.view": "view",
-  "tl.global": "global",
-  "tl.viewModeHint": "Visible window on the timeline (free view / global follow)",
 };
 
 export type MessageKey = keyof typeof fr;

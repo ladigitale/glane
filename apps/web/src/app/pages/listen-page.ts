@@ -76,6 +76,7 @@ export class GlListenPage extends LitElement {
                   ? html`<audio
                       class="w-full"
                       controls
+                      crossorigin="anonymous"
                       preload="metadata"
                       src=${audioSrc}
                     ></audio>`

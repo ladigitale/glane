@@ -151,6 +151,8 @@ final class ListenShareController extends AbstractController
 
         $response = new BinaryFileResponse($path);
         $response->headers->set('Content-Type', 'audio/mpeg');
+        // Front is COEP require-corp (ADR-0015); <audio src> is no-cors → needs CORP.
+        $response->headers->set('Cross-Origin-Resource-Policy', 'cross-origin');
         $response->setContentDisposition(ResponseHeaderBag::DISPOSITION_INLINE, 'listen.mp3');
 
         return $response;
