@@ -65,6 +65,9 @@ final class ListenShareController extends AbstractController
             );
         } catch (\InvalidArgumentException $e) {
             return $this->json(['error' => $e->getMessage()], Response::HTTP_BAD_REQUEST);
+        } catch (\LogicException $e) {
+            // Symfony UploadedFile::getMimeType without symfony/mime — never surface raw message.
+            return $this->json(['error' => 'invalid_mime'], Response::HTTP_BAD_REQUEST);
         } catch (\Throwable $e) {
             return $this->json(['error' => $e->getMessage()], Response::HTTP_INTERNAL_SERVER_ERROR);
         }

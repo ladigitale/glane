@@ -59,12 +59,22 @@ final class ListenShareStorage
             throw new \InvalidArgumentException('file_too_large');
         }
         $name = strtolower($file->getClientOriginalName());
-        // Prefer client MIME — getMimeType() needs symfony/mime (throws if missing).
+        // Do not call UploadedFile::getMimeType() — it requires symfony/mime
+        // (CVE-2026-45067 / 45070 on unpatched 7.1.x mail helpers we do not need).
         $mime = (string) ($file->getClientMimeType() ?? '');
-        if ($mime === '' && class_exists(\Symfony\Component\Mime\MimeTypes::class)) {
-            $mime = (string) ($file->getMimeType() ?? '');
+        $path = $file->getPathname();
+        if (is_file($path) && \function_exists('finfo_open')) {
+            $finfo = finfo_open(\FILEINFO_MIME_TYPE);
+            if ($finfo !== false) {
+                $detected = finfo_file($finfo, $path);
+                finfo_close($finfo);
+                if (\is_string($detected) && $detected !== '') {
+                    $mime = $detected;
+                }
+            }
         }
-        if (!str_contains($mime, 'audio') && !str_ends_with($name, '.mp3')) {
+        $okMime = str_starts_with($mime, 'audio/') || $mime === 'application/octet-stream';
+        if (!$okMime && !str_ends_with($name, '.mp3')) {
             throw new \InvalidArgumentException('invalid_mime');
         }
 

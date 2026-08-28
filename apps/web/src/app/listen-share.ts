@@ -27,7 +27,11 @@ async function publishListen(opts: {
   if (!auth.getJwt()) return { ok: false, error: "authentication_required" };
 
   const body = new FormData();
-  body.append("audio", opts.mp3, "listen.mp3");
+  const audio =
+    opts.mp3.type === "audio/mpeg" || opts.mp3.type.startsWith("audio/")
+      ? opts.mp3
+      : new Blob([opts.mp3], { type: "audio/mpeg" });
+  body.append("audio", audio, "listen.mp3");
   body.append("title", opts.title);
   body.append("visibility", opts.visibility);
   if (opts.localProjectId) body.append("localProjectId", opts.localProjectId);
