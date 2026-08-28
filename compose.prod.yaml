@@ -58,6 +58,11 @@ services:
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://app.example.com}
       FRONT_URL: ${FRONT_URL:-https://app.example.com}
       APP_LISTEN_DIR: /app/var/listens
+      APP_AUTH_REGISTER_ENABLED: ${APP_AUTH_REGISTER_ENABLED:-0}
+      APP_LISTEN_TTL_DAYS: ${APP_LISTEN_TTL_DAYS:-30}
+      APP_LISTEN_PURGE_AFTER_DAYS: ${APP_LISTEN_PURGE_AFTER_DAYS:-7}
+      APP_LISTEN_MAX_ACTIVE: ${APP_LISTEN_MAX_ACTIVE:-10}
+      APP_LISTEN_MAX_BYTES_PER_USER: ${APP_LISTEN_MAX_BYTES_PER_USER:-524288000}
       JWT_SECRET_KEY: /app/config/jwt/private.pem
       JWT_PUBLIC_KEY: /app/config/jwt/public.pem
       JWT_PASSPHRASE: ${JWT_PASSPHRASE:-glane}

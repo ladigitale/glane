@@ -21,6 +21,16 @@ import { paletteKey, prefsFormKey, projectPickKey } from "./dp-keys.js";
 import type { PrefsForm } from "./dp-keys.js";
 import "./locale-switch.js";
 import { glDialog } from "./dialog.js";
+import {
+  blockReasonKey,
+  fallbackRoute,
+  loadReadiness,
+  routeReady,
+  routeSection,
+  sectionReady,
+  type GlSection,
+  type Readiness,
+} from "./feature-readiness.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
 import { glBrandMark, glIcon } from "./icon.js";
 import { tip } from "./tip.js";
@@ -44,6 +54,7 @@ import "./pages/sequencer-page.js";
 import "./pages/privacy-page.js";
 import "./pages/diagnostic-page.js";
 import "./pages/landing-page.js";
+import "./pages/workspace-hub-page.js";
 import "./pages/account-page.js";
 import "./pages/listen-page.js";
 
@@ -113,6 +124,18 @@ export class GlApp extends LitElement {
         flex: 1;
         min-height: 0;
       }
+      main:has(gl-workspace-hub-page) {
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      main > gl-workspace-hub-page {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
       /* Ghost [active] uses --sc-base-100 — same as header bg-neutral-100 → invisible. */
       sonic-menu-item[active]::part(button) {
         background: var(--sc-base-200);
@@ -179,11 +202,15 @@ export class GlApp extends LitElement {
   @state()
   chromeMoreItems: ChromeMoreState["items"] = [];
 
+  @state()
+  private readiness: Readiness = { projectId: null, sampleCount: 0 };
+
   #unsubProc: (() => void) | null = null;
   #unsubChromeMore: (() => void) | null = null;
   #path = location.pathname;
   #raf = 0;
   #leaveGuardBusy = false;
+  #navBusy = false;
 
   @handle(projectPickKey.projectId)
   onProjectIdFromForm(id: string): void {
@@ -201,6 +228,7 @@ export class GlApp extends LitElement {
       this.chromeMoreItems = s.items;
     });
     window.addEventListener("keydown", this.#onKey);
+    window.addEventListener("popstate", this.#onPopState);
     window.addEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     this.#raf = requestAnimationFrame(this.#watchLocation);
     void ensurePrefs().then((p) => {
@@ -223,6 +251,7 @@ export class GlApp extends LitElement {
 
   override disconnectedCallback(): void {
     window.removeEventListener("keydown", this.#onKey);
+    window.removeEventListener("popstate", this.#onPopState);
     window.removeEventListener(PROJECT_CHANGE_EVENT, this.#onProjectChange);
     cancelAnimationFrame(this.#raf);
     this.#unsubChromeMore?.();
@@ -232,6 +261,10 @@ export class GlApp extends LitElement {
   }
 
   /** Sync route when Concorde menu pushState (no popstate) or navigate(). */
+  #onPopState = (): void => {
+    void this.#onPathChange(location.pathname);
+  };
+
   #watchLocation = (): void => {
     if (location.pathname !== this.#path && !this.#leaveGuardBusy) {
       void this.#onPathChange(location.pathname);
@@ -240,47 +273,74 @@ export class GlApp extends LitElement {
   };
 
   async #onPathChange(nextPath: string): Promise<void> {
-    if (this.#leaveGuardBusy || nextPath === this.#path) return;
-    const fromRoute = this.route;
+    if (this.#leaveGuardBusy || this.#navBusy) return;
     const toRoute = parsePath(nextPath);
-    if (this.#routeNeedsProject(toRoute)) {
-      const cur = await projectWorkspace.ensure();
-      if (!cur) {
-        history.replaceState({}, "", pathFor({ name: "landing" }));
-        this.#path = "/";
-        this.route = { name: "landing" };
-        return;
+    if (nextPath === this.#path) {
+      if (toRoute.name !== this.route.name) {
+        this.route = toRoute;
+        chromeMore.clear();
       }
-    }
-    const leavingEditor =
-      fromRoute.name === "sample" &&
-      (toRoute.name !== "sample" || toRoute.id !== fromRoute.id);
-
-    if (leavingEditor) {
-      const editor = this.renderRoot?.querySelector(
-        "gl-editor-page",
-      ) as GlEditorPage | null;
-      if (editor?.isDirty) {
-        this.#leaveGuardBusy = true;
-        // Keep the editor mounted while the dialog runs.
-        history.replaceState({}, "", this.#path);
-        try {
-          const ok = await editor.confirmLeave();
-          if (!ok) return;
-          history.pushState({}, "", nextPath);
-          this.#path = nextPath;
-          this.route = toRoute;
-        } finally {
-          this.#leaveGuardBusy = false;
-        }
-        return;
-      }
+      return;
     }
 
+    const fromRoute = this.route;
+    const fromPath = this.#path;
+    this.#navBusy = true;
     this.#path = nextPath;
-    this.route = toRoute;
-    // Drop page chrome more immediately; the new page republishes if needed.
-    chromeMore.clear();
+
+    try {
+      const leavingEditor =
+        fromRoute.name === "sample" &&
+        (toRoute.name !== "sample" || toRoute.id !== fromRoute.id);
+
+      if (leavingEditor) {
+        const editor = this.renderRoot?.querySelector(
+          "gl-editor-page",
+        ) as GlEditorPage | null;
+        if (editor?.isDirty) {
+          this.#leaveGuardBusy = true;
+          this.#path = fromPath;
+          history.replaceState({}, "", fromPath);
+          try {
+            const ok = await editor.confirmLeave();
+            if (!ok) return;
+            this.#path = nextPath;
+            history.pushState({}, "", nextPath);
+          } finally {
+            this.#leaveGuardBusy = false;
+          }
+        }
+      }
+
+      if (this.#routeNeedsProject(toRoute)) {
+        const cur = await projectWorkspace.ensure();
+        if (!cur) {
+          history.replaceState({}, "", pathFor({ name: "landing" }));
+          this.#path = "/";
+          this.route = { name: "landing" };
+          return;
+        }
+        const readiness = await loadReadiness(cur.id);
+        this.readiness = readiness;
+        if (!routeReady(toRoute, readiness)) {
+          const section = routeSection(toRoute);
+          const fallback = section
+            ? fallbackRoute(section, readiness)
+            : { name: "landing" as const };
+          history.replaceState({}, "", pathFor(fallback));
+          this.#path = pathFor(fallback);
+          this.route = fallback;
+          const key = section ? blockReasonKey(section, readiness) : null;
+          if (key) void glDialog.alert(t(key));
+          return;
+        }
+      }
+
+      this.route = toRoute;
+      chromeMore.clear();
+    } finally {
+      this.#navBusy = false;
+    }
   }
 
   #onProjectChange = (): void => {
@@ -295,15 +355,29 @@ export class GlApp extends LitElement {
     this.projects = list;
     this.currentProjectId = current?.id ?? "";
     set(projectPickKey, { projectId: current?.id ?? "" });
+    this.readiness = await loadReadiness(current?.id);
     if (!current && this.#routeNeedsProject(this.route)) {
       history.replaceState({}, "", pathFor({ name: "landing" }));
       this.#path = "/";
       this.route = { name: "landing" };
+      return;
+    }
+    if (current && this.#routeNeedsProject(this.route)) {
+      if (!routeReady(this.route, this.readiness)) {
+        const section = routeSection(this.route);
+        const fallback = section
+          ? fallbackRoute(section, this.readiness)
+          : { name: "landing" as const };
+        history.replaceState({}, "", pathFor(fallback));
+        this.#path = pathFor(fallback);
+        this.route = fallback;
+      }
     }
   }
 
   #routeNeedsProject(route: Route): boolean {
     switch (route.name) {
+      case "workspace":
       case "capture":
       case "library":
       case "sample":
@@ -336,25 +410,34 @@ export class GlApp extends LitElement {
     this.themeMode = themeMeta(theme).dark ? "dark" : "light";
   }
 
-  #navLinks(): { href: string; label: string; icon: string; route: Route }[] {
+  #navLinks(): {
+    href: string;
+    label: string;
+    icon: string;
+    route: Route;
+    section: GlSection;
+  }[] {
     return [
       {
         href: pathFor({ name: "capture" }),
         label: t("nav.capture"),
         icon: "mic",
         route: { name: "capture" },
+        section: "capture",
       },
       {
         href: pathFor({ name: "synth" }),
         label: t("nav.synth"),
         icon: "sliders",
         route: { name: "synth" },
+        section: "synth",
       },
       {
         href: pathFor({ name: "library" }),
         label: t("nav.library"),
         icon: "library",
         route: { name: "library" },
+        section: "library",
       },
       {
         href: pathFor({
@@ -367,6 +450,7 @@ export class GlApp extends LitElement {
           name: "project",
           id: this.currentProjectId || undefined,
         },
+        section: "project",
       },
     ];
   }
@@ -402,6 +486,9 @@ export class GlApp extends LitElement {
 
   /** Selected nav item from app route (SPA + /project/:id). */
   #navActive(link: { route: Route }): boolean {
+    if (link.route.name === "workspace") {
+      return this.route.name === "workspace";
+    }
     const name = link.route.name;
     if (this.route.name === "sample") {
       // Clip → editor from arrangement keeps "Arrangement" highlighted.
@@ -429,6 +516,7 @@ export class GlApp extends LitElement {
         : t("nav.library");
     }
     if (name === "session") return t("nav.capture");
+    if (name === "workspace") return t("hub.title");
     const link = [...this.#navLinks(), ...this.#accessLinks()].find(
       (l) => l.route.name === name,
     );
@@ -456,14 +544,17 @@ export class GlApp extends LitElement {
 
   /** Parent in the app chrome hierarchy (not browser history). */
   #chromeParentRoute(): Route {
-    // Editor (/sample/:id) sits under library; all other chrome pages under home.
-    return this.route.name === "sample"
-      ? { name: "library" }
-      : { name: "landing" };
+    if (this.route.name === "sample") return { name: "library" };
+    if (this.route.name === "workspace") return { name: "landing" };
+    if (this.#routeNeedsProject(this.route)) return { name: "workspace" };
+    return { name: "landing" };
   }
 
   #chromeParentLabel(): string {
-    return this.route.name === "sample" ? t("nav.library") : t("nav.home");
+    if (this.route.name === "sample") return t("nav.library");
+    if (this.route.name === "workspace") return t("nav.home");
+    if (this.#routeNeedsProject(this.route)) return t("hub.title");
+    return t("nav.home");
   }
 
   #breadcrumb() {
@@ -640,7 +731,13 @@ export class GlApp extends LitElement {
   }
 
   #linkMenu(
-    links: { href: string; label: string; icon: string; route: Route }[],
+    links: {
+      href: string;
+      label: string;
+      icon: string;
+      route: Route;
+      section?: GlSection;
+    }[],
   ) {
     return html`
       <div
@@ -653,26 +750,89 @@ export class GlApp extends LitElement {
           size="sm"
           @click=${this.#closeNavPop}
         >
-          ${links.map(
-            (l) => html`
+          ${links.map((l) => {
+            const locked =
+              l.section !== undefined &&
+              !sectionReady(l.section, this.readiness);
+            const lockKey = l.section
+              ? blockReasonKey(l.section, this.readiness)
+              : null;
+            return html`
               <sonic-menu-item
-                href=${l.href}
-                ?pushState=${true}
+                href=${locked ? nothing : l.href}
+                ?pushState=${!locked}
                 ?active=${this.#navActive(l)}
+                title=${locked && lockKey ? t(lockKey) : nothing}
+                @click=${locked
+                  ? (e: Event) => {
+                      e.preventDefault();
+                      if (lockKey) void glDialog.alert(t(lockKey));
+                    }
+                  : nothing}
               >
                 ${glIcon(l.icon, { slot: "prefix", size: "xs" })}
                 ${l.label}
+                ${locked
+                  ? glIcon("lock", { slot: "suffix", size: "xs" })
+                  : nothing}
               </sonic-menu-item>
-            `,
-          )}
+            `;
+          })}
         </sonic-menu>
       </div>
     `;
   }
 
-  /** Project chrome: Capture / Library / Synth / Arrangement. */
+  /** Project chrome: hub + Capture / Library / Synth / Arrangement. */
   #sectionMenu() {
-    return this.#linkMenu(this.#navLinks());
+    return html`
+      <div
+        slot="content"
+        class="max-h-[min(36rem,calc(100dvh-5.5rem))] overflow-y-auto overscroll-contain"
+      >
+        <sonic-menu
+          direction="column"
+          align="left"
+          size="sm"
+          @click=${this.#closeNavPop}
+        >
+          <sonic-menu-item
+            href=${pathFor({ name: "workspace" })}
+            ?pushState=${true}
+            ?active=${this.route.name === "workspace"}
+          >
+            ${glIcon("layout-grid", { slot: "prefix", size: "xs" })}
+            ${t("hub.title")}
+          </sonic-menu-item>
+          <sonic-divider></sonic-divider>
+          ${this.#navLinks().map((l) => {
+            const locked =
+              !sectionReady(l.section, this.readiness);
+            const lockKey = blockReasonKey(l.section, this.readiness);
+            return html`
+              <sonic-menu-item
+                href=${locked ? nothing : l.href}
+                ?pushState=${!locked}
+                ?active=${this.#navActive(l)}
+                title=${locked ? t(lockKey!) : nothing}
+                @click=${locked
+                  ? (e: Event) => {
+                      e.preventDefault();
+                      void glDialog.alert(t(lockKey!));
+                    }
+                  : nothing}
+              >
+                ${glIcon(l.icon, { slot: "prefix", size: "xs" })}
+                ${l.label}
+                ${locked
+                  ? glIcon("lock", { slot: "suffix", size: "xs" })
+                  : nothing}
+              </sonic-menu-item>
+            `;
+          })}
+        </sonic-menu>
+      </div>
+    `;
   }
 
   /** Access chrome: Compte / Vie privée / Diagnostic. */
@@ -874,7 +1034,7 @@ export class GlApp extends LitElement {
             : nothing}
           <main>
             <div
-              class="mb-1 flex min-h-7 shrink-0 items-center gap-2 overflow-visible px-3 pt-3 sm:px-4"
+              class="mb-4 flex min-h-7 shrink-0 items-center gap-2 overflow-visible px-3 pt-4 sm:px-4"
             >
               ${this.#breadcrumb()}
               <div class="ml-auto shrink-0">${this.#breadcrumbMore()}</div>
@@ -891,6 +1051,8 @@ export class GlApp extends LitElement {
     switch (this.route.name) {
       case "landing":
         return html`<gl-landing-page></gl-landing-page>`;
+      case "workspace":
+        return html`<gl-workspace-hub-page></gl-workspace-hub-page>`;
       case "account":
         return html`<gl-account-page></gl-account-page>`;
       case "listen":
@@ -915,13 +1077,38 @@ export class GlApp extends LitElement {
     }
   }
 
-  #palette(links: { href: string; label: string; icon: string; route: Route }[]) {
+  #palette(
+    links: {
+      href: string;
+      label: string;
+      icon: string;
+      route: Route;
+      section?: GlSection;
+    }[],
+  ) {
     const q = this.paletteFilter.toLowerCase();
     const items = [
+      ...(this.currentProjectId
+        ? [
+            {
+              label: t("hub.title"),
+              icon: "layout-grid",
+              run: () => navigate({ name: "workspace" }),
+            },
+          ]
+        : []),
       ...links.map((l) => ({
         label: l.label,
         icon: l.icon,
-        run: () => navigate(l.route),
+        section: l.section,
+        run: () => {
+          if (l.section && !sectionReady(l.section, this.readiness)) {
+            const key = blockReasonKey(l.section, this.readiness);
+            if (key) void glDialog.alert(t(key));
+            return;
+          }
+          navigate(l.route);
+        },
       })),
       ...this.#accessLinks().map((l) => ({
         label: l.label,
@@ -941,11 +1128,18 @@ export class GlApp extends LitElement {
       {
         label: "Créer un clip (projet)",
         icon: "music",
-        run: () =>
+        section: "project" as GlSection,
+        run: () => {
+          if (!sectionReady("project", this.readiness)) {
+            const key = blockReasonKey("project", this.readiness);
+            if (key) void glDialog.alert(t(key));
+            return;
+          }
           navigate({
             name: "project",
             id: this.currentProjectId || undefined,
-          }),
+          });
+        },
       },
     ].filter((i) => i.label.toLowerCase().includes(q));
 
@@ -1021,7 +1215,7 @@ export class GlApp extends LitElement {
     const p = await projectWorkspace.create(name);
     this.currentProjectId = p.id;
     await this.#refreshProjects();
-    navigate({ name: "project", id: p.id });
+    navigate({ name: "workspace" });
   }
 
   async #renameProject(): Promise<void> {
@@ -1049,7 +1243,7 @@ export class GlApp extends LitElement {
     const p = await projectWorkspace.duplicate(cur.id, name);
     this.currentProjectId = p.id;
     await this.#refreshProjects();
-    navigate({ name: "project", id: p.id });
+    navigate({ name: "workspace" });
   }
 
   async #deleteProject(): Promise<void> {

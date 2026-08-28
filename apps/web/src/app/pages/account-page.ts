@@ -87,7 +87,10 @@ export class GlAccountPage extends LitElement {
     const r = await auth.register(this.formUser.trim(), this.formPass);
     this.busy = false;
     if (!r.ok) {
-      this.error = t("account.error");
+      this.error =
+        r.error === "registration_disabled"
+          ? t("account.registerDisabled")
+          : t("account.error");
       return;
     }
     this.message = t("account.registerOk");

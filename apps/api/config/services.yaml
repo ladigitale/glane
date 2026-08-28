@@ -3,6 +3,16 @@ parameters:
     app.listen_dir: '%env(default:app.listen_dir_fallback:APP_LISTEN_DIR)%'
     app.listen_dir_fallback: '%kernel.project_dir%/var/listens'
     app.public_url_fallback: ''
+    app.auth_register_enabled: '%env(bool:default:app.auth_register_enabled_default:APP_AUTH_REGISTER_ENABLED)%'
+    app.auth_register_enabled_default: 'true'
+    app.listen_ttl_days: '%env(int:default:app.listen_ttl_days_default:APP_LISTEN_TTL_DAYS)%'
+    app.listen_ttl_days_default: 30
+    app.listen_purge_after_days: '%env(int:default:app.listen_purge_after_days_default:APP_LISTEN_PURGE_AFTER_DAYS)%'
+    app.listen_purge_after_days_default: 7
+    app.listen_max_active: '%env(int:default:app.listen_max_active_default:APP_LISTEN_MAX_ACTIVE)%'
+    app.listen_max_active_default: 10
+    app.listen_max_bytes_per_user: '%env(int:default:app.listen_max_bytes_per_user_default:APP_LISTEN_MAX_BYTES_PER_USER)%'
+    app.listen_max_bytes_per_user_default: 524288000
 
 services:
     _defaults:

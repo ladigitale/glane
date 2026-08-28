@@ -4747,7 +4747,13 @@ export class GlSequencerPage extends LitElement {
         this.exportError =
           r.error === "authentication_required"
             ? t("export.listenNeedLogin")
-            : r.error;
+            : r.error === "file_too_large"
+              ? t("export.listenFileTooLarge")
+              : r.error === "quota_active_limit"
+                ? t("export.listenQuotaActive")
+                : r.error === "quota_bytes_limit"
+                  ? t("export.listenQuotaBytes")
+                  : r.error;
         exportToast.fail(this.exportError);
         return;
       }

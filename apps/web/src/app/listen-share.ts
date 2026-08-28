@@ -11,6 +11,8 @@ export type ListenMeta = {
   audioUrl?: string;
   durationMs?: number | null;
   revoked?: boolean;
+  expiresAt?: string | null;
+  expired?: boolean;
 };
 
 async function publishListen(opts: {

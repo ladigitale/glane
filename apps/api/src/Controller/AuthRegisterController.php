@@ -8,6 +8,7 @@ use App\Entity\User;
 use Doctrine\ORM\EntityManagerInterface;
 use Lexik\Bundle\JWTAuthenticationBundle\Services\JWTTokenManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -20,6 +21,8 @@ final class AuthRegisterController extends AbstractController
         private readonly EntityManagerInterface $em,
         private readonly UserPasswordHasherInterface $passwordHasher,
         private readonly JWTTokenManagerInterface $jwtManager,
+        #[Autowire('%app.auth_register_enabled%')]
+        private readonly bool $registerEnabled,
     ) {
     }
 
@@ -33,6 +36,10 @@ final class AuthRegisterController extends AbstractController
     #[Route('/api/auth/register', name: 'api_auth_register', methods: ['POST'])]
     public function __invoke(Request $request): JsonResponse
     {
+        if (!$this->registerEnabled) {
+            return $this->json(['error' => 'registration_disabled'], Response::HTTP_FORBIDDEN);
+        }
+
         $payload = json_decode($request->getContent(), true);
         if (!\is_array($payload)) {
             return $this->json(['error' => 'invalid_json'], Response::HTTP_BAD_REQUEST);

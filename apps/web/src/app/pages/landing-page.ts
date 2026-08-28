@@ -71,7 +71,6 @@ export class GlLandingPage extends LitElement {
         scrollbar-gutter: stable;
         pointer-events: auto;
         color: var(--sc-base-content);
-        /* A: let the WebGL scene read through the centered card */
         background: color-mix(in srgb, var(--sc-base) 72%, transparent);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
@@ -115,7 +114,8 @@ export class GlLandingPage extends LitElement {
 
   async #openProject(id: string): Promise<void> {
     await projectWorkspace.switchTo(id);
-    navigate({ name: "capture" });
+    await projectWorkspace.ensure();
+    navigate({ name: "workspace" });
   }
 
   async #createProject(): Promise<void> {
@@ -125,7 +125,8 @@ export class GlLandingPage extends LitElement {
     });
     if (name === null) return;
     await projectWorkspace.create(name);
-    navigate({ name: "capture" });
+    await projectWorkspace.ensure();
+    navigate({ name: "workspace" });
   }
 
   #goPrivacy(e: Event): void {

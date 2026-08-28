@@ -53,6 +53,9 @@ class ListenShare
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $revokedAt = null;
 
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $expiresAt = null;
+
     public function __construct(?string $id = null)
     {
         $this->id = $id ?? Uuid::v7()->toRfc4122();
@@ -162,6 +165,26 @@ class ListenShare
         return $this->revokedAt;
     }
 
+    public function getExpiresAt(): ?\DateTimeImmutable
+    {
+        return $this->expiresAt;
+    }
+
+    public function setExpiresAt(?\DateTimeImmutable $expiresAt): void
+    {
+        $this->expiresAt = $expiresAt;
+    }
+
+    public function isExpired(): bool
+    {
+        return $this->expiresAt !== null && $this->expiresAt <= new \DateTimeImmutable();
+    }
+
+    public function isActive(): bool
+    {
+        return $this->revokedAt === null && !$this->isExpired();
+    }
+
     public function revoke(): void
     {
         $this->revokedAt = new \DateTimeImmutable();
@@ -171,7 +194,7 @@ class ListenShare
 
     public function isPubliclyReadable(): bool
     {
-        return $this->revokedAt === null && $this->visibility === self::VIS_UNLISTED;
+        return $this->isActive() && $this->visibility === self::VIS_UNLISTED;
     }
 
     private function touch(): void

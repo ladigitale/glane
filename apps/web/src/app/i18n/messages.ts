@@ -192,6 +192,44 @@ const fr = {
   "landing.localTitle": "Local d’abord",
   "landing.localBody":
     "L’audio reste sur cet appareil jusqu’à ce que tu choisisses d’exporter ou de publier un lien d’écoute. Pas de marketplace : seulement ce que tu partages.",
+  "hub.kicker": "Projet",
+  "hub.title": "Tableau de bord",
+  "hub.intro":
+    "Quatre étapes pour transformer une promenade en matière sonore : capter le réel, trier ce qui mérite d’être gardé, inventer ce qui manque, puis donner forme à une écoute.",
+  "hub.ledeSamples": "{n} sons déjà glanés dans ce projet.",
+  "hub.sectionsTitle": "Sections",
+  "hub.sampleCount": "{n} sons",
+  "hub.stat.sessions": "{n} chasses",
+  "hub.stat.samples": "{n} sons",
+  "hub.stat.synthInLibrary": "{n} sons synthétisés en bibliothèque",
+  "hub.stat.duration": "{time}",
+  "hub.stat.clips": "{n} clips",
+  "hub.stat.bars": "{n} mesures",
+  "hub.open": "Ouvrir",
+  "hub.locked": "Indisponible",
+  "hub.step.capture.title": "Capture",
+  "hub.step.capture.baseline": "Glaner le réel — micro ou fichier.",
+  "hub.step.capture.desc":
+    "Le micro à l’affût ou un fichier importé : Glane écoute le bruit du monde, isole les fragments intéressants et les dépose ici — sans rien envoyer ailleurs.",
+  "hub.step.library.title": "Bibliothèque",
+  "hub.step.library.baseline": "Parcourir, filtrer, pré-écouter.",
+  "hub.step.library.desc":
+    "Ta réserve de prises : filtrer par session, classe ou tag, pré-écouter, comparer. C’est la matière première dont tu tireras les clips pour l’arrangement.",
+  "hub.step.synth.title": "Synthèse",
+  "hub.step.synth.baseline": "Inventer à partir de tes références.",
+  "hub.step.synth.desc":
+    "Quand le terrain ne suffit pas : génère textures et motifs à partir de tes références — ils rejoignent la même bibliothèque que les captures live.",
+  "hub.step.project.title": "Arrangement",
+  "hub.step.project.baseline": "Assembler et exporter une écoute.",
+  "hub.step.project.desc":
+    "Timeline, pistes, mix léger, export : assembler les morceaux glanés en une forme que tu peux partager ou garder pour toi.",
+  "hub.step.lockedBaseline": "Indisponible pour l’instant.",
+  "hub.step.lockedSamples":
+    "Commence par la capture ou la synthèse — cette section attend des sons dans le projet.",
+  "gate.needProject":
+    "Crée ou ouvre un projet pour accéder à cette section.",
+  "gate.needSamples":
+    "Enregistre ou importe des sons avant d’accéder à la bibliothèque ou à l’arrangement.",
   "account.title": "Compte",
   "account.username": "Identifiant",
   "account.password": "Mot de passe",
@@ -202,6 +240,7 @@ const fr = {
   "account.needApi": "Configure VITE_API_BASE_URL pour te connecter à l’API Glane.",
   "account.error": "Échec — vérifie identifiant et mot de passe.",
   "account.registerOk": "Compte créé.",
+  "account.registerDisabled": "Inscription fermée sur ce serveur.",
   "listen.missing": "Cette écoute est privée ou introuvable.",
   "listen.loading": "Chargement…",
   "export.listenLink": "Lien d’écoute",
@@ -212,6 +251,12 @@ const fr = {
   "export.listenNeedLogin": "Connecte-toi pour publier un lien d’écoute.",
   "export.listenPublished": "Lien prêt",
   "export.listenRevoke": "Rendre privé",
+  "export.listenFileTooLarge":
+    "Fichier trop lourd (max. 50 Mo). Raccourcis l’arrangement ou exporte en MP3 plus court.",
+  "export.listenQuotaActive":
+    "Limite atteinte — rends privés d’anciens liens ou attends leur expiration.",
+  "export.listenQuotaBytes":
+    "Quota disque atteint pour ton compte — supprime d’anciens liens d’écoute.",
 
   "project.switch": "Projet",
   "project.new": "Nouveau projet",
@@ -1023,6 +1068,43 @@ const en: Record<keyof typeof fr, string> = {
   "landing.localTitle": "Local first",
   "landing.localBody":
     "Audio stays on this device until you choose to export or publish a listen link. No marketplace — only what you share.",
+  "hub.kicker": "Project",
+  "hub.title": "Dashboard",
+  "hub.intro":
+    "Four steps to turn a walk into sound: capture the field, keep what’s worth keeping, invent what’s missing, then shape a listen.",
+  "hub.ledeSamples": "{n} sounds already gleaned in this project.",
+  "hub.sectionsTitle": "Sections",
+  "hub.sampleCount": "{n} sounds",
+  "hub.stat.sessions": "{n} capture sessions",
+  "hub.stat.samples": "{n} sounds",
+  "hub.stat.synthInLibrary": "{n} synth sounds in library",
+  "hub.stat.duration": "{time}",
+  "hub.stat.clips": "{n} clips",
+  "hub.stat.bars": "{n} bars",
+  "hub.open": "Open",
+  "hub.locked": "Unavailable",
+  "hub.step.capture.title": "Capture",
+  "hub.step.capture.baseline": "Glean the field — mic or file.",
+  "hub.step.capture.desc":
+    "Mic on standby or a file imported: Glane listens to the world’s noise, isolates interesting fragments and stores them here — nothing leaves your device.",
+  "hub.step.library.title": "Library",
+  "hub.step.library.baseline": "Browse, filter, preview.",
+  "hub.step.library.desc":
+    "Your reserve of takes: filter by session, class or tag, preview, compare. Raw material for the arrangement.",
+  "hub.step.synth.title": "Synth",
+  "hub.step.synth.baseline": "Invent from your references.",
+  "hub.step.synth.desc":
+    "When the field isn’t enough: generate textures and motifs from your references — they land in the same library as live captures.",
+  "hub.step.project.title": "Arrange",
+  "hub.step.project.baseline": "Assemble and export a listen.",
+  "hub.step.project.desc":
+    "Timeline, tracks, light mix, export: assemble gleaned pieces into a form you can share or keep to yourself.",
+  "hub.step.lockedBaseline": "Unavailable for now.",
+  "hub.step.lockedSamples":
+    "Start with capture or synth — this section waits for sounds in the project.",
+  "gate.needProject": "Create or open a project to access this section.",
+  "gate.needSamples":
+    "Record or import sounds before opening the library or arrangement.",
   "account.title": "Account",
   "account.username": "Username",
   "account.password": "Password",
@@ -1033,6 +1115,7 @@ const en: Record<keyof typeof fr, string> = {
   "account.needApi": "Set VITE_API_BASE_URL to connect to the Glane API.",
   "account.error": "Failed — check username and password.",
   "account.registerOk": "Account created.",
+  "account.registerDisabled": "Registration is closed on this server.",
   "listen.missing": "This listen is private or missing.",
   "listen.loading": "Loading…",
   "export.listenLink": "Listen link",
@@ -1043,6 +1126,12 @@ const en: Record<keyof typeof fr, string> = {
   "export.listenNeedLogin": "Sign in to publish a listen link.",
   "export.listenPublished": "Link ready",
   "export.listenRevoke": "Make private",
+  "export.listenFileTooLarge":
+    "File too large (max 50 MB). Shorten the arrangement or export a shorter MP3.",
+  "export.listenQuotaActive":
+    "Active listen link limit reached — revoke old links or wait for them to expire.",
+  "export.listenQuotaBytes":
+    "Storage quota reached for your account — remove old listen links.",
 
   "project.switch": "Project",
   "project.new": "New project",

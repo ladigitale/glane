@@ -37,7 +37,15 @@ final class ListenShareController extends AbstractController
 
         $file = $request->files->get('audio');
         if (!$file) {
-            return $this->json(['error' => 'missing_audio'], Response::HTTP_BAD_REQUEST);
+            $tooLarge = $request->headers->get('Content-Length') !== null
+                && (int) $request->headers->get('Content-Length') > 0
+                && 0 === \count($request->request->all())
+                && 0 === \count($request->files->all());
+
+            return $this->json(
+                ['error' => $tooLarge ? 'file_too_large' : 'missing_audio'],
+                Response::HTTP_BAD_REQUEST,
+            );
         }
 
         $title = trim((string) $request->request->get('title', ''));
@@ -110,7 +118,8 @@ final class ListenShareController extends AbstractController
             }
         }
         if (!empty($payload['revoke'])) {
-            $share->revoke();
+            $this->storage->revoke($share);
+            return $this->json($this->serialize($share));
         }
 
         $this->em->flush();
@@ -157,6 +166,8 @@ final class ListenShareController extends AbstractController
             'byteSize' => $share->getByteSize(),
             'url' => $front !== '' ? $front.'/listen/'.$share->getToken() : '/listen/'.$share->getToken(),
             'revoked' => $share->getRevokedAt() !== null,
+            'expiresAt' => $share->getExpiresAt()?->format(\DateTimeInterface::ATOM),
+            'expired' => $share->isExpired(),
         ];
         if ($includeAudio) {
             $data['audioUrl'] = '/api/listens/'.$share->getToken().'/audio';

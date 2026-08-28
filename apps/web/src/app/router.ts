@@ -1,5 +1,6 @@
 export type Route =
   | { name: "landing" }
+  | { name: "workspace" }
   | { name: "capture" }
   | { name: "library" }
   | { name: "sample"; id: string }
@@ -15,6 +16,7 @@ export function parsePath(pathname: string): Route {
   const p = pathname.replace(/\/+$/, "") || "/";
   if (p === "/") return { name: "landing" };
   if (p === "/capture") return { name: "capture" };
+  if (p === "/workspace") return { name: "workspace" };
   if (p === "/library") return { name: "library" };
   if (p === "/privacy") return { name: "privacy" };
   if (p === "/diagnostic") return { name: "diagnostic" };
@@ -35,6 +37,8 @@ export function pathFor(route: Route): string {
   switch (route.name) {
     case "landing":
       return "/";
+    case "workspace":
+      return "/workspace";
     case "capture":
       return "/capture";
     case "library":

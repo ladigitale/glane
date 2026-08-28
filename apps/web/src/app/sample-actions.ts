@@ -38,8 +38,28 @@ const EXPORT_SESSION_TITLE = "Exports";
 /** Marker on stub sessions that hold generated synth batches. */
 const SYNTH_SESSION_NOTES = "glane:synth";
 const SYNTH_SESSION_TITLE = "Synthèse";
-const SYNTH_TAG = "synth";
-const SYNTH_ORIGIN = "audio-synth";
+export const SYNTH_TAG = "synth";
+export const SYNTH_ORIGIN = "audio-synth";
+
+const STUB_SESSION_NOTES = new Set([
+  IMPORT_SESSION_NOTES,
+  EXPORT_SESSION_NOTES,
+  SYNTH_SESSION_NOTES,
+]);
+
+/** Import / export / synth stub — not a field capture hunt. */
+export function isStubSession(session: Session): boolean {
+  const notes = session.notes?.trim();
+  return !!notes && STUB_SESSION_NOTES.has(notes);
+}
+
+/** Sample produced by the synth generator and kept in the library. */
+export function isSynthSample(sample: Sample): boolean {
+  if (sample.deletedAt) return false;
+  return (
+    sample.originVersion === SYNTH_ORIGIN || sample.tags?.includes(SYNTH_TAG)
+  );
+}
 
 /** Soft-delete sample, drop OPFS clip, detach/remove clips that reference it. */
 export async function deleteSample(sampleId: string): Promise<void> {
