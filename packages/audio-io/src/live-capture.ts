@@ -117,10 +117,20 @@ export class LiveCapture {
     for (const w of warnings) this.#events.onWarning?.(w);
 
     try {
-      // Native hardware rate — avoid mic→48 kHz browser resample on mobile.
-      const ctx = new AudioContext({
-        latencyHint: "interactive",
-      });
+      // Match the capture track rate when the UA reports it — avoid
+      // USB 48 kHz → context 44.1 kHz resample. Omit latencyHint
+      // ("interactive" can latch a VoIP path on some mobiles).
+      const nativeRate = settings.sampleRate;
+      const ctxOpts: AudioContextOptions =
+        typeof nativeRate === "number" && nativeRate >= 8_000
+          ? { sampleRate: nativeRate }
+          : {};
+      let ctx: AudioContext;
+      try {
+        ctx = new AudioContext(ctxOpts);
+      } catch {
+        ctx = new AudioContext();
+      }
       this.#ctx = ctx;
       if (ctx.state === "suspended") await ctx.resume();
 

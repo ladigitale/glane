@@ -4,6 +4,7 @@ import {
   enrichFromLabels,
   ML_TAG,
   stripMlTags,
+  YAMNET_TAG_PREFIX,
 } from "@glane/audio-ml";
 import type { SampleClass } from "@glane/core-model";
 import { nowIso } from "@glane/core-model";
@@ -17,9 +18,13 @@ export const SAMPLE_ML_EVENT = "glane:sample-ml";
 
 const pending = new Set<string>();
 
+function hasYamnetLabelTags(tags: readonly string[]): boolean {
+  return tags.some((t) => t.startsWith(YAMNET_TAG_PREFIX));
+}
+
 /**
  * T2 YAMNet enrichment after polish (ADR-0020). Non-blocking; fail-soft.
- * Classify runs in a Dedicated Worker so MediaPipe WASM does not jank the UI.
+ * Classify is serialized on the UI thread (MediaPipe needs classic importScripts).
  */
 export async function enqueueYamnetEnrich(
   sampleId: string,
@@ -35,12 +40,9 @@ export async function enqueueYamnetEnrich(
     const sample = await db.samples.get(sampleId);
     if (!sample || sample.deletedAt) return;
     const tags = sample.tags ?? [];
-    if (
-      !opts?.force &&
-      (tags.includes(ML_TAG.done) || tags.includes(ML_TAG.yamnet))
-    ) {
-      return;
-    }
+    // Skip only when we already have semantic yamnet:* tags (unless force).
+    // ml:yamnet + ml:done with zero labels (failed/empty run) must be retryable.
+    if (!opts?.force && hasYamnetLabelTags(tags)) return;
     if (!tags.includes("processing:done")) return;
 
     await db.samples.update(sampleId, {
@@ -124,7 +126,8 @@ export async function enqueueYamnetEnrich(
       window.dispatchEvent(
         new CustomEvent(SAMPLE_ML_EVENT, { detail: { sampleId } }),
       );
-    } catch {
+    } catch (e) {
+      console.warn("[yamnet] enrich failed", sampleId, e);
       await markSkipped(sampleId);
     }
   } finally {

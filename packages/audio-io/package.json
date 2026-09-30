@@ -10,7 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/export/octatrack-ot.test.ts"
+    "test": "tsx --test src/export/octatrack-ot.test.ts src/capture/audio-capture-source.test.ts"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",

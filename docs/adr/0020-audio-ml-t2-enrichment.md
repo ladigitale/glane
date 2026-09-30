@@ -8,7 +8,7 @@ Heuristic classification (ADR-0006) covers realtime capture. Users want **stem s
 
 1. Keep T1 DSP / heuristics on the capture critical path.
 2. **Demucs** — HT-Demucs **FT bag** (4 StemSplit ONNX specialists, fp16weights). Dedicated Worker + WebGPU preferred; **one specialist session at a time** then release (peak RAM ≈ single model). Output tensor dims asserted `(1,4,2,N)`; only the matching stem row is kept per specialist. Optional stem subset via `mlDemucsStems`.
-3. **YAMNet** tags after polish when `mlYamnet` is on. Tunables: `mlYamnetMinScore`, `mlYamnetMaxLabels`, `mlYamnetAutoClass`.
+3. **YAMNet** tags after polish when `mlYamnet` is on. Tunables: `mlYamnetMinScore`, `mlYamnetMaxLabels`, `mlYamnetAutoClass`. Model weights served **same-origin** (`/ml/yamnet/yamnet.tflite`, Vite downloads on boot) because the Google CDN lacks CORP under COEP.
 4. **CLAP** (`Xenova/larger_clap_music_and_speech`, q8) — opt-in `mlClap` (default off). On-demand via “similar sounds” with confirm. Embeddings in `SampleAnalysis.features.clap` keyed by model id (stale checkpoints ignored). Tunables: `mlClapMinScore`, `mlClapLimit`.
 5. **RNNoise** (Xiph via `@shiguredo/rnnoise-wasm`) — library / editor batch and single-sample **denoise**. Creates a child sample (`stem:denoised`, parent `ml:denoise`). Chosen over DeepFilterNet3 for Apache-2.0, tiny footprint, and offline batch fit (DeepFilterNet is higher quality but needs a heavy multi-ONNX / proprietary browser stack). Speech-oriented; still useful on field takes with mic hiss / room / wind.
 6. Package `@glane/audio-ml` owns math / tags / ranking; app owns ORT / MediaPipe / Transformers.js / RNNoise wasm.

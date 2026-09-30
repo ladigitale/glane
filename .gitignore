@@ -23,6 +23,8 @@ apps/api/.env.local
 packages/*/dist/
 apps/web/dist/
 apps/web/public/ml/mediapipe-wasm/
+# YAMNet weights (Vite copy-ml-wasm downloads on demand).
+apps/web/public/ml/yamnet/
 # Copied by Vite plugin copy-ml-wasm (Transformers ORT for CLAP ?url imports).
 apps/web/src/app/ml/vendor/ort-tf/
 # Legacy ORT copies under public (safe to delete locally).

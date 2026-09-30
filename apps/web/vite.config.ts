@@ -1,10 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
+
+const YAMNET_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite";
+/** ~3.9 MiB — reject tiny / failed downloads. */
+const YAMNET_MIN_BYTES = 1_000_000;
 
 function resolvePkgDir(...parts: string[]): string | null {
   const candidates = [
@@ -29,9 +35,42 @@ function copyFile(src: string, dest: string): void {
   fs.copyFileSync(src, dest);
 }
 
+function ensureYamnetModel(): void {
+  const dest = path.join(rootDir, "public/ml/yamnet/yamnet.tflite");
+  try {
+    if (fs.existsSync(dest) && fs.statSync(dest).size >= YAMNET_MIN_BYTES) {
+      return;
+    }
+  } catch {
+    /* recreate */
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const tmp = `${dest}.tmp`;
+  try {
+    execFileSync("curl", ["-fsSL", "-o", tmp, YAMNET_MODEL_URL], {
+      stdio: "pipe",
+    });
+    if (!fs.existsSync(tmp) || fs.statSync(tmp).size < YAMNET_MIN_BYTES) {
+      throw new Error("yamnet download too small");
+    }
+    fs.renameSync(tmp, dest);
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* */
+    }
+    console.warn(
+      "[copy-ml-wasm] YAMNet model download failed — tags need public/ml/yamnet/yamnet.tflite",
+      e instanceof Error ? e.message : e,
+    );
+  }
+}
+
 /**
  * Same-origin ML WASM under COEP (ADR-0015).
  * - MediaPipe → public/ml/mediapipe-wasm
+ * - YAMNet tflite → public/ml/yamnet (CDN has no CORP)
  * - Transformers ORT → src/app/ml/vendor/ort-tf (Vite `?url`, not /public)
  * Demucs ORT: package exports `onnxruntime-web/…?url`.
  */
@@ -41,6 +80,7 @@ function copyMlWasm(): Plugin {
     if (mp) {
       copyDirFiles(mp, path.join(rootDir, "public/ml/mediapipe-wasm"));
     }
+    ensureYamnetModel();
     const tfOrt = resolvePkgDir("@huggingface", "transformers", "dist");
     if (tfOrt) {
       const dest = path.join(rootDir, "src/app/ml/vendor/ort-tf");

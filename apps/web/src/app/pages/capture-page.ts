@@ -5,6 +5,7 @@ import {
   type Session,
 } from "@glane/core-model";
 import {
+  FIELD_CONSTRAINTS,
   LiveCapture,
   sampleOpfs,
   type LevelMeter,
@@ -1836,8 +1837,10 @@ export class GlCapturePage extends LitElement {
     let inputs = devices.filter((d) => d.kind === "audioinput");
     if (inputs.some((d) => !d.label) && !this.micOpen) {
       try {
+        // Same voice-off bag as capture — `{ audio: true }` latches AGC
+        // on mobile and USB streams stay compressed afterwards.
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
+          audio: FIELD_CONSTRAINTS,
         });
         stream.getTracks().forEach((tr) => tr.stop());
         devices = await navigator.mediaDevices.enumerateDevices();
