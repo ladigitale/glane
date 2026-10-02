@@ -140,6 +140,10 @@ export type SequenceSampleIn = {
   pitchHz?: number;
   noteName?: string;
   harmonicity?: number;
+  /** Pitch tracker confidence 0..1 (optional analysis). */
+  pitchConfidence?: number;
+  /** Pitch drift on sustain (cents stddev); high → treat as texture. */
+  pitchDriftCents?: number;
   centroidHz?: number;
   transientDensity?: number;
   analysisBpm?: number;
@@ -729,8 +733,100 @@ function lengthTickToMs(ticks: number, bpm: number, ppq: number): number {
   return (ticks / ppq) * (60 / bpm) * 1000;
 }
 
-function hzToMidi(hz: number): number {
+/** Continuous MIDI from Hz (A4=440 → 69). Never round — justesse §5bis. */
+export function hzToMidi(hz: number): number {
   return 69 + 12 * Math.log2(hz / 440);
+}
+
+/** Exact retune so sounding = targetMidi + tuningOffset (equal-tempered). */
+export function exactPitchSemitones(
+  targetMidi: number,
+  sourceMidi: number,
+  stretchPitchSemis = 0,
+  tuningOffsetCents = 0,
+): number {
+  return (
+    targetMidi + tuningOffsetCents / 100 - sourceMidi - stretchPitchSemis
+  );
+}
+
+/**
+ * Melodic eligibility: needs a fundamental, enough confidence, low drift.
+ * Near ±50¢ with weak confidence → exclude (class flip risk).
+ */
+export function isMelodicPitchReliable(s: SequenceSampleIn): boolean {
+  const midi = sampleSourceMidi(s);
+  if (midi == null) return false;
+  const conf =
+    s.pitchConfidence ??
+    s.confidence ??
+    (s.harmonicity != null && Number.isFinite(s.harmonicity)
+      ? Math.min(1, Math.max(0, s.harmonicity))
+      : 0.55);
+  const drift = s.pitchDriftCents ?? 0;
+  if (!(conf >= 0.45) || drift > 25) return false;
+  const centsFromEt = (midi - Math.round(midi)) * 100;
+  if (Math.abs(centsFromEt) > 45 && conf < 0.6) return false;
+  return true;
+}
+
+/** Weighted median cents-from-ET of reliable tonal samples (library tuning). */
+export function estimateLibraryTuningOffsetCents(
+  samples: readonly SequenceSampleIn[],
+): { offsetCents: number; dispersionCents: number } {
+  const rows: { c: number; w: number }[] = [];
+  for (const s of samples) {
+    if (!isMelodicPitchReliable(s)) continue;
+    const midi = sampleSourceMidi(s);
+    if (midi == null) continue;
+    const w =
+      s.pitchConfidence ??
+      s.confidence ??
+      (s.harmonicity != null ? Math.min(1, Math.max(0.1, s.harmonicity)) : 0.5);
+    rows.push({ c: (midi - Math.round(midi)) * 100, w });
+  }
+  if (rows.length === 0) return { offsetCents: 0, dispersionCents: 0 };
+  rows.sort((a, b) => a.c - b.c);
+  const totalW = rows.reduce((s, r) => s + r.w, 0);
+  let acc = 0;
+  let median = rows[0]!.c;
+  for (const r of rows) {
+    acc += r.w;
+    if (acc >= totalW / 2) {
+      median = r.c;
+      break;
+    }
+  }
+  const mean =
+    rows.reduce((s, r) => s + r.c * r.w, 0) / Math.max(1e-9, totalW);
+  const variance =
+    rows.reduce((s, r) => s + r.w * (r.c - mean) ** 2, 0) /
+    Math.max(1e-9, totalW);
+  return { offsetCents: median, dispersionCents: Math.sqrt(variance) };
+}
+
+export type TuningRefMode = "440" | "library" | "auto";
+
+/** Resolve global tuning offset (cents vs A440 equal temperament). */
+export function resolveTuningOffsetCents(
+  mode: TuningRefMode,
+  samples: readonly SequenceSampleIn[],
+): number {
+  if (mode === "440") return 0;
+  const { offsetCents, dispersionCents } =
+    estimateLibraryTuningOffsetCents(samples);
+  if (mode === "library") return offsetCents;
+  if (Math.abs(offsetCents) > 15 && dispersionCents < 20) return offsetCents;
+  return 0;
+}
+
+/** Sounding MIDI after transpose + resample stretch. */
+export function soundingMidi(
+  sourceMidi: number,
+  pitchSemitones: number,
+  stretchPitchSemis = 0,
+): number {
+  return sourceMidi + pitchSemitones + stretchPitchSemis;
 }
 
 /** Parse note names like `A4`, `C#3`, `Bb2` → MIDI, or null. */
@@ -2181,41 +2277,31 @@ function chordToneSemis(
   return (scale[deg] ?? 0) + oct * 12;
 }
 
-/** True when sounding pitch-class (source + transpose) is in allowed rels. */
+/**
+ * True when an exact retune of `fromMidi` by `semis` (+ stretch) lands on an
+ * integer target pitch-class in `allowedRels` (membership on the **target**,
+ * never on Math.round(source)).
+ */
 function isScaleCompatibleTranspose(
   fromMidi: number,
   semis: number,
   rootPc: number,
   allowedRels: readonly number[],
+  stretchSemis = 0,
+  tuningOffsetCents = 0,
 ): boolean {
-  const pc = (((Math.round(fromMidi) + semis) % 12) + 12) % 12;
+  const sounding = soundingMidi(fromMidi, semis, stretchSemis);
+  const target = sounding - tuningOffsetCents / 100;
+  // Exact retune ⇒ target is integer; tolerate 0.5¢ float noise.
+  if (Math.abs(target - Math.round(target)) > 0.005) return false;
+  const pc = (((Math.round(target) % 12) + 12) % 12);
   const rel = (pc - rootPc + 12) % 12;
   return allowedRels.includes(rel);
 }
 
 /**
- * True when perceived pitch (transpose + continuous stretch offset) lands on
- * an allowed degree. Fractional stretch is rounded for PC membership — callers
- * should avoid large stretch offsets on melodic parts (see pickStretchMode).
- */
-function isScaleCompatibleSounding(
-  fromMidi: number,
-  semis: number,
-  stretchSemis: number,
-  rootPc: number,
-  allowedRels: readonly number[],
-): boolean {
-  const sounding = Math.round(fromMidi) + semis + stretchSemis;
-  const pc = (((Math.round(sounding) % 12) + 12) % 12);
-  const rel = (pc - rootPc + 12) % 12;
-  return allowedRels.includes(rel);
-}
-
-/**
- * Transposes in [-maxDown, maxUp] that land on an allowed degree (vs tonic).
- * `allowedRels` defaults to the full scale; pass chord-tone rels for tighter
- * harmonic lock. If the window is empty, expands to ±24 — never falls back
- * to bare `[0]` when unison is off-key (that produced false notes).
+ * Exact float transposes in [-maxDown, maxUp] that land on allowed degree
+ * targets (partition integers). Compensates stretch + library tuning.
  */
 export function scaleCompatibleTransposes(
   fromMidi: number,
@@ -2225,26 +2311,43 @@ export function scaleCompatibleTransposes(
   maxDown: number,
   stretchSemis = 0,
   allowedRels?: readonly number[],
+  tuningOffsetCents = 0,
 ): number[] {
   const rels = allowedRels && allowedRels.length > 0 ? allowedRels : scale;
   const up = Math.max(0, maxUp);
   const down = Math.max(0, maxDown);
   const collect = (hi: number, lo: number): number[] => {
     const out: number[] = [];
-    for (let semis = -lo; semis <= hi; semis++) {
+    const seen = new Set<string>();
+    const midiLo = Math.floor(fromMidi + stretchSemis - lo - 2);
+    const midiHi = Math.ceil(fromMidi + stretchSemis + hi + 2);
+    for (let target = midiLo; target <= midiHi; target++) {
+      const pc = ((target % 12) + 12) % 12;
+      const rel = (pc - rootPc + 12) % 12;
+      if (!rels.includes(rel)) continue;
+      const semis = exactPitchSemitones(
+        target,
+        fromMidi,
+        stretchSemis,
+        tuningOffsetCents,
+      );
+      if (semis < -lo - 1e-9 || semis > hi + 1e-9) continue;
       if (
-        stretchSemis === 0
-          ? isScaleCompatibleTranspose(fromMidi, semis, rootPc, rels)
-          : isScaleCompatibleSounding(
-              fromMidi,
-              semis,
-              stretchSemis,
-              rootPc,
-              rels,
-            )
+        !isScaleCompatibleTranspose(
+          fromMidi,
+          semis,
+          rootPc,
+          rels,
+          stretchSemis,
+          tuningOffsetCents,
+        )
       ) {
-        out.push(semis);
+        continue;
       }
+      const key = semis.toFixed(6);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(semis);
     }
     return out;
   };
@@ -2252,7 +2355,6 @@ export function scaleCompatibleTransposes(
   if (inWindow.length > 0) return inWindow;
   const expanded = collect(24, 24);
   if (expanded.length > 0) return expanded;
-  // Pathological (empty scale): keep unison rather than throw.
   return [0];
 }
 
@@ -2327,19 +2429,19 @@ function shouldEnforceScale(
   role: ExprRole,
   sample: SequenceSampleIn,
 ): boolean {
-  if (isMelodicRole(role)) return true;
-  if (role === "chord") return true;
+  if (isMelodicRole(role)) return isMelodicPitchReliable(sample);
+  if (role === "chord") return isMelodicPitchReliable(sample);
   if (role === "texture" || role === "loop") {
     return (
-      isMelodicClass(sample.class, sample.harmonicity) ||
-      sampleSourceMidi(sample) != null
+      isMelodicPitchReliable(sample) ||
+      (isMelodicClass(sample.class, sample.harmonicity) &&
+        sampleSourceMidi(sample) != null)
     );
   }
   // Pitched drums / fx still read as notes when analysis found a fundamental.
   if (
     (isDrumRole(role) || role === "fx") &&
-    sampleSourceMidi(sample) != null &&
-    isMelodicClass(sample.class, sample.harmonicity)
+    isMelodicPitchReliable(sample)
   ) {
     return true;
   }
@@ -2623,11 +2725,12 @@ function pickPitchSemitones(opts: {
   return semis;
 }
 
-/** Sounding pitch-class occupancy for cross-track dominant-note clash avoidance. */
+/** Sounding pitch occupancy for cross-track clash avoidance (float MIDI). */
 type PitchOccupancy = {
   startTick: number;
   endTick: number;
-  pc: number;
+  /** Absolute sounding MIDI (float, A440-referenced + stretch). */
+  sounding: number;
 };
 
 /**
@@ -2643,41 +2746,36 @@ function sampleDominantMidi(s: SequenceSampleIn): number | null {
   return null;
 }
 
-function pitchClassOf(midi: number, semis: number): number {
-  return (((Math.round(midi) + Math.round(semis)) % 12) + 12) % 12;
-}
-
-/** Pitch-class distance folded into 0…6. */
+/** Folded pitch-class distance into 0…6 (continuous). */
 function pcInterval(a: number, b: number): number {
   const d = Math.abs((((a - b) % 12) + 12) % 12);
   return Math.min(d, 12 - d);
 }
 
 /**
- * Dominants conflict when they form a minor 2nd / major 7th (interval 1).
- * Unison / octave and other intervals are allowed.
+ * Dominants conflict when they form a minor 2nd (±30¢), not rounded classes.
  */
 function fundamentalsConflict(a: number, b: number): boolean {
-  return pcInterval(a, b) === 1;
+  return Math.abs(pcInterval(a, b) - 1) <= 0.3;
 }
 
-function overlappingPitchClasses(
+function overlappingSoundings(
   occupied: readonly PitchOccupancy[],
   startTick: number,
   endTick: number,
 ): number[] {
-  const pcs: number[] = [];
+  const out: number[] = [];
   for (const o of occupied) {
-    if (o.startTick < endTick && o.endTick > startTick) pcs.push(o.pc);
+    if (o.startTick < endTick && o.endTick > startTick) out.push(o.sounding);
   }
-  return pcs;
+  return out;
 }
 
 /**
  * Retune within the scale window so the sounding dominant does not clash
  * with other clips that overlap in time (pitched or not). Prefers the
  * original target; falls back to unison with an occupant, then nearest allowed.
- * Always stays on-scale when `enforceScale` (never returns an off-key preferred).
+ * Never changes degree off-scale when `enforceScale`; may change octave.
  */
 function avoidFundamentalClash(opts: {
   sample: SequenceSampleIn;
@@ -2694,6 +2792,7 @@ function avoidFundamentalClash(opts: {
   enforceScale: boolean;
   /** Tighter than scale (chord tones). */
   allowedRels?: readonly number[];
+  tuningOffsetCents?: number;
 }): number {
   const {
     sample,
@@ -2708,6 +2807,7 @@ function avoidFundamentalClash(opts: {
     maxDown,
     enforceScale,
     allowedRels,
+    tuningOffsetCents = 0,
   } = opts;
   const fromMidi = sampleDominantMidi(sample);
   if (fromMidi == null) return preferredSemis;
@@ -2720,28 +2820,31 @@ function avoidFundamentalClash(opts: {
     maxDown,
     stretchSemis,
     allowedRels,
+    tuningOffsetCents,
   );
   const onScalePreferred = enforceScale
     ? nearestAllowedTranspose(preferredSemis, allowed)
     : preferredSemis;
 
-  const others = overlappingPitchClasses(occupied, startTick, endTick);
+  const others = overlappingSoundings(occupied, startTick, endTick);
   if (others.length === 0) return onScalePreferred;
 
   const sounding = (semis: number) =>
-    pitchClassOf(fromMidi, semis + stretchSemis);
-  const preferredPc = sounding(onScalePreferred);
-  if (!others.some((pc) => fundamentalsConflict(preferredPc, pc))) {
+    soundingMidi(fromMidi, semis, stretchSemis);
+  const preferredSound = sounding(onScalePreferred);
+  if (!others.some((o) => fundamentalsConflict(preferredSound, o))) {
     return onScalePreferred;
   }
 
   const free = allowed.filter(
-    (semis) => !others.some((pc) => fundamentalsConflict(sounding(semis), pc)),
+    (semis) => !others.some((o) => fundamentalsConflict(sounding(semis), o)),
   );
   if (free.length > 0) return nearestAllowedTranspose(onScalePreferred, free);
 
-  // No clash-free degree: land on an already-sounding dominant (unison).
-  const unison = allowed.filter((semis) => others.includes(sounding(semis)));
+  // No clash-free degree: land on an already-sounding dominant (unison ±30¢).
+  const unison = allowed.filter((semis) =>
+    others.some((o) => Math.abs(sounding(semis) - o) <= 0.3),
+  );
   if (unison.length > 0) {
     return nearestAllowedTranspose(onScalePreferred, unison);
   }
@@ -2750,8 +2853,7 @@ function avoidFundamentalClash(opts: {
 }
 
 /**
- * After stretch is final: drop rate-pitch if it breaks the scale, then snap
- * transpose so perceived pitch stays on an allowed degree.
+ * After stretch is final: exact float retune onto nearest allowed degree target.
  */
 function finalizeScalePitch(opts: {
   sample: SequenceSampleIn;
@@ -2764,8 +2866,18 @@ function finalizeScalePitch(opts: {
   maxUp: number;
   maxDown: number;
   allowedRels?: readonly number[];
+  tuningOffsetCents?: number;
 }): { pitchSemitones: number; stretchMode: StretchMode; stretchPitch: number } {
-  const { sample, role, rootPc, scale, maxUp, maxDown, allowedRels } = opts;
+  const {
+    sample,
+    role,
+    rootPc,
+    scale,
+    maxUp,
+    maxDown,
+    allowedRels,
+    tuningOffsetCents = 0,
+  } = opts;
   let { pitchSemitones, stretchMode } = opts;
   // Melodic / chord: only the recorded fundamental (never spectral centroid guess).
   const fromMidi =
@@ -2801,6 +2913,7 @@ function finalizeScalePitch(opts: {
     maxDown,
     stretchPitch,
     allowedRels,
+    tuningOffsetCents,
   );
   pitchSemitones = nearestAllowedTranspose(pitchSemitones, allowed);
   return { pitchSemitones, stretchMode, stretchPitch };
@@ -4274,6 +4387,11 @@ export function planSequence(opts: {
    * `"auto"` = no cap. `1` = no shortening; `0.5` = at most twice as short.
    */
   stretchDownRatio?: number | GenAuto;
+  /**
+   * Tuning reference: A440, library median, or auto (§5bis).
+   * Default `"auto"`.
+   */
+  tuningRef?: TuningRefMode;
 }): SequencePlanResult {
   const { bars, beatsPerBar, ppq, bpm, seed, tracks, samples } = opts;
   if (bars < 1 || tracks.length === 0 || samples.length === 0) {
@@ -4423,6 +4541,9 @@ export function planSequence(opts: {
     : opts.keyRootPc == null || opts.keyRootPc === "auto"
       ? inferKeyRootPc(pool)
       : ((Math.round(opts.keyRootPc) % 12) + 12) % 12;
+  const tuningOffsetCents = lockPitch
+    ? 0
+    : resolveTuningOffsetCents(opts.tuningRef ?? "auto", pool);
   const scale = lockPitch
     ? MAJOR_SCALE
     : pickScale(pool, rootPc, rnd, scaleMode);
@@ -5145,6 +5266,7 @@ export function planSequence(opts: {
               maxUp: pitchUpSemitones,
               maxDown: pitchDownSemitones,
               allowedRels: pitchAllowedRels,
+              tuningOffsetCents,
             });
             pitchSemitones = finalized.pitchSemitones;
             stretchMode = finalized.stretchMode;
@@ -5162,6 +5284,7 @@ export function planSequence(opts: {
               maxDown: pitchDownSemitones,
               enforceScale: shouldEnforceScale(role, sample),
               allowedRels: pitchAllowedRels,
+              tuningOffsetCents,
             });
           } else {
             stretchPitch = 0;
@@ -5275,7 +5398,11 @@ export function planSequence(opts: {
               pitchOccupied.push({
                 startTick,
                 endTick: startTick + len,
-                pc: pitchClassOf(domMidi, pitchSemitones + stretchPitch),
+                sounding: soundingMidi(
+                  domMidi,
+                  pitchSemitones,
+                  stretchPitch,
+                ),
               });
             }
           };

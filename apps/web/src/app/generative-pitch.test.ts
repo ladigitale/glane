@@ -9,12 +9,23 @@ import {
   bpmSyncStretch,
   chordRunBars,
   clipStretchFactors,
+  exactPitchSemitones,
+  hzToMidi,
+  isMelodicPitchReliable,
   resampleStretchPitchSemis,
+  resolveTuningOffsetCents,
   scaleCompatibleTransposes,
   snapChordRelativeDegree,
+  soundingMidi,
 } from "./generative.js";
 
 const MAJOR = [0, 2, 4, 5, 7, 9, 11];
+
+function targetPc(fromMidi: number, semis: number, stretch = 0, tuningCents = 0): number {
+  const sounding = soundingMidi(fromMidi, semis, stretch);
+  const target = Math.round(sounding - tuningCents / 100);
+  return ((target % 12) + 12) % 12;
+}
 
 describe("snapChordRelativeDegree", () => {
   it("snaps accents to triad / octave", () => {
@@ -52,10 +63,9 @@ describe("scaleCompatibleTransposes", () => {
     const fromMidi = 61; // C# vs C major
     const allowed = scaleCompatibleTransposes(fromMidi, 0, MAJOR, 0, 0);
     assert.ok(allowed.length > 0);
-    assert.ok(!allowed.includes(0));
+    assert.ok(!allowed.some((s) => Math.abs(s) < 1e-9));
     for (const s of allowed) {
-      const pc = (((Math.round(fromMidi) + s) % 12) + 12) % 12;
-      assert.ok(MAJOR.includes(pc));
+      assert.ok(MAJOR.includes(targetPc(fromMidi, s)));
     }
   });
 
@@ -63,10 +73,9 @@ describe("scaleCompatibleTransposes", () => {
     const fromMidi = 66; // F#
     const allowed = scaleCompatibleTransposes(fromMidi, 0, MAJOR, 1, 1);
     assert.ok(allowed.length > 0);
-    assert.ok(!allowed.includes(0));
+    assert.ok(!allowed.some((s) => Math.abs(s) < 1e-9));
     for (const s of allowed) {
-      const pc = (((Math.round(fromMidi) + s) % 12) + 12) % 12;
-      assert.ok(MAJOR.includes(pc));
+      assert.ok(MAJOR.includes(targetPc(fromMidi, s)));
     }
   });
 
@@ -74,8 +83,8 @@ describe("scaleCompatibleTransposes", () => {
     // C4 + stretch ~1 semitone → need transpose -1 to land on C
     const fromMidi = 60;
     const allowed = scaleCompatibleTransposes(fromMidi, 0, MAJOR, 2, 2, 1);
-    assert.ok(allowed.includes(-1));
-    assert.ok(!allowed.includes(0));
+    assert.ok(allowed.some((s) => Math.abs(s - -1) < 1e-9));
+    assert.ok(!allowed.some((s) => Math.abs(s) < 1e-9));
   });
 
   it("can lock to chord tones only (IV in C = F A C)", () => {
@@ -92,11 +101,82 @@ describe("scaleCompatibleTransposes", () => {
     );
     assert.ok(allowed.length > 0);
     for (const s of allowed) {
-      const pc = (((60 + s) % 12) + 12) % 12;
+      const pc = targetPc(fromMidi, s);
       assert.ok(chordRels.includes(pc), `pc ${pc} not in IV triad`);
     }
     // E (major third of C) must not appear — was a common "false note" vs IV
-    assert.ok(!allowed.some((s) => (((60 + s) % 12) + 12) % 12 === 4));
+    assert.ok(!allowed.some((s) => targetPc(fromMidi, s) === 4));
+  });
+});
+
+describe("justesse §5bis", () => {
+  it("retunes 443 Hz A4 to 440 Hz within 1 cent", () => {
+    const source = hzToMidi(443);
+    const semis = exactPitchSemitones(69, source);
+    const sounding = soundingMidi(source, semis);
+    const hz = 440 * 2 ** ((sounding - 69) / 12);
+    assert.ok(Math.abs(hz - 440) / 440 < 0.0006); // < 1 cent
+  });
+
+  it("452 Hz (~A4+47¢) never flips class when targeting A vs A#", () => {
+    const source = hzToMidi(452);
+    const toA = exactPitchSemitones(69, source);
+    const toAs = exactPitchSemitones(70, source);
+    assert.ok(Math.abs(soundingMidi(source, toA) - 69) < 1e-9);
+    assert.ok(Math.abs(soundingMidi(source, toAs) - 70) < 1e-9);
+    // Old Math.round(source) path could snap ~69.47→69 and muddy A#; exact path is stable.
+    assert.ok(Math.abs(toA - toAs + 1) < 1e-9);
+    const allowed = scaleCompatibleTransposes(source, 9, MAJOR, 12, 12);
+    assert.ok(allowed.some((s) => Math.abs(s - toA) < 1e-6));
+    // A# is not in A-major — must not appear via rounding accident
+    assert.ok(!allowed.some((s) => Math.abs(s - toAs) < 1e-6));
+  });
+
+  it("compensates resample stretch ×1.5 exactly", () => {
+    const source = 69;
+    const fit = 1.5;
+    const stretch = resampleStretchPitchSemis(fit);
+    const semis = exactPitchSemitones(69, source, stretch);
+    assert.ok(Math.abs(soundingMidi(source, semis, stretch) - 69) < 1e-9);
+  });
+
+  it("library tuning +30¢ keeps all notes at +30¢ ±1¢", () => {
+    const tuning = 30;
+    const source = hzToMidi(440 * 2 ** (30 / 1200)); // A4 at +30¢
+    const semis = exactPitchSemitones(69, source, 0, tuning);
+    const sounding = soundingMidi(source, semis);
+    assert.ok(Math.abs(sounding - (69 + 0.3)) < 0.01);
+  });
+
+  it("resolveTuningOffsetCents auto uses library when coherent", () => {
+    const samples = [0, 1, 2].map((i) => ({
+      id: `s${i}`,
+      durationMs: 1000,
+      class: "tonal" as const,
+      favorite: false,
+      pitchHz: 440 * 2 ** (30 / 1200),
+      pitchConfidence: 0.9,
+      pitchDriftCents: 5,
+      harmonicity: 0.8,
+    }));
+    const off = resolveTuningOffsetCents("auto", samples);
+    assert.ok(Math.abs(off - 30) < 2);
+    assert.equal(resolveTuningOffsetCents("440", samples), 0);
+  });
+
+  it("rejects high-drift samples as melodic", () => {
+    assert.equal(
+      isMelodicPitchReliable({
+        id: "x",
+        durationMs: 500,
+        class: "tonal",
+        favorite: false,
+        pitchHz: 440,
+        pitchConfidence: 0.9,
+        pitchDriftCents: 60,
+      }),
+      false,
+    );
   });
 });
 

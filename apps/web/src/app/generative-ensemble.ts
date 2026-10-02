@@ -4,15 +4,14 @@
  */
 
 import type { ExprRole } from "@glane/core-model";
-import type { MusicStyleId } from "./generative-styles";
+import type { MusicStyleId, VoiceRelation } from "@glane/composer";
+export type { VoiceRelation } from "@glane/composer";
 import {
   pickCallResponsePair,
   pickMelodyCell,
   type ArpEvent,
   type MelodyEvent,
 } from "./generative-refs";
-
-export type VoiceRelation = "independent" | "lock" | "respond" | "kinship";
 
 /** User preference for how melodic followers relate to the lead. */
 export type GenEnsembleRelation = "auto" | "lock" | "respond" | "kinship";

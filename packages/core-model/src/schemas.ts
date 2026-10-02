@@ -137,6 +137,10 @@ export const SampleAnalysisSchema = z.object({
   pitchHz: z.number().optional(),
   noteName: z.string().optional(),
   harmonicity: z.number().optional(),
+  /** Pitch tracker confidence 0..1. */
+  pitchConfidence: z.number().min(0).max(1).optional(),
+  /** Pitch drift on sustain (cents stddev). */
+  pitchDriftCents: z.number().nonnegative().optional(),
   loopScore: z.number().min(0).max(1).optional(),
   transientDensity: z.number().optional(),
   features: z.record(z.unknown()).optional(),

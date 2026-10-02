@@ -4,59 +4,15 @@
  */
 
 import type { HarmonicPalette } from "./generative-refs";
+import {
+  MUSIC_STYLE_IDS,
+  type GenMusicStyleChoice,
+  type MusicStyleId,
+} from "@glane/composer";
+export type { MusicStyleId, GenMusicStyleChoice } from "@glane/composer";
+export { MUSIC_STYLE_IDS } from "@glane/composer";
 
 export type GrooveKind = "straight" | "shuffle" | "half-time";
-
-export type MusicStyleId =
-  | "rock"
-  | "pop"
-  | "reggae"
-  | "dub"
-  | "hiphop"
-  | "triphop"
-  | "dnb"
-  | "breakbeat"
-  | "techno"
-  | "house"
-  | "disco"
-  | "funk"
-  | "jazz"
-  | "blues"
-  | "latin"
-  | "afrobeat"
-  | "classical"
-  | "ambient"
-  | "folk"
-  | "metal"
-  | "garage"
-  | "punk";
-
-export const MUSIC_STYLE_IDS: readonly MusicStyleId[] = [
-  "rock",
-  "pop",
-  "reggae",
-  "dub",
-  "hiphop",
-  "triphop",
-  "dnb",
-  "breakbeat",
-  "techno",
-  "house",
-  "disco",
-  "funk",
-  "jazz",
-  "blues",
-  "latin",
-  "afrobeat",
-  "classical",
-  "ambient",
-  "folk",
-  "metal",
-  "garage",
-  "punk",
-] as const;
-
-export type GenMusicStyleChoice = "auto" | MusicStyleId;
 
 /** Soft BPM window for listening / testing a style (project BPM stays free). */
 export type StyleBpmHint = {
