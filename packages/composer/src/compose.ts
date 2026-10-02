@@ -1,23 +1,27 @@
-import { DEFAULT_TRACK_FX } from "@glane/core-model";
-import { fitForm, pickEnergyShape, pickFormFamily } from "./form.js";
+import { PPQ } from "@glane/core-model";
 import {
-  defaultProgressions,
-  planHarmony,
-} from "./harmony.js";
+  applyLayerMatrix,
+  buildLayerMatrix,
+  defaultTrackRoles,
+  trackIndexByRole,
+} from "./arrangement.js";
+import { planBass } from "./bass.js";
+import { planDrums } from "./drums.js";
+import { applyEnsembleRelations, assignEnsemble } from "./ensemble.js";
+import { fitForm, pickEnergyShape, pickFormFamily } from "./form.js";
+import { compileGestures, planGestures } from "./gestures.js";
+import { defaultProgressions, planHarmony } from "./harmony.js";
+import { planMaster } from "./master.js";
+import { buildMotif, invertMotif, planMelody } from "./melody.js";
+import { planMix } from "./mix.js";
+import { buildModRoutes, applyExpressionToParts } from "./modulation.js";
+import { generateRhythmGenes } from "./rhythm.js";
 import { makeRng } from "./rng.js";
 import type { ComposeResult, ComposeSettings, Score } from "./types.js";
 
-function emptyMotif() {
-  return {
-    rhythm: { steps: 16, onsets: [] as number[], accents: [] as number[] },
-    contour: [] as number[],
-    lengthBeats: 4,
-  };
-}
-
 /**
  * Orchestrate composition layers → Score.
- * Step 3: form + harmony filled; rhythm/melody/mix still empty.
+ * Through step 7: form…modulation + gestures + mix + master.
  */
 export function compose(settings: ComposeSettings): ComposeResult {
   const rng = makeRng(settings.seed);
@@ -50,6 +54,147 @@ export function compose(settings: ComposeSettings): ComposeResult {
     path: "harmony",
   });
 
+  const rhythmGenes = generateRhythmGenes(rng, "dna/rhythm", settings.density);
+  const g0 = rhythmGenes[0] ?? {
+    steps: 16,
+    onsets: [0, 4, 8, 12],
+    accents: [1, 0.4, 0.7, 0.4],
+  };
+  const g1 = rhythmGenes[1] ?? g0;
+  const hook = buildMotif(rng, "dna/hook", g0, "hook");
+  const verseMotif = buildMotif(rng, "dna/verse", g1, "verse");
+
+  const roles = defaultTrackRoles(true);
+  const byRole = trackIndexByRole(roles);
+
+  let parts = planDrums({
+    sections: form.sections,
+    rhythmGenes,
+    density: settings.density,
+    ppq: PPQ,
+    trackIndexByRole: byRole,
+    path: "drums",
+  });
+
+  const kick = parts.find((p) => p.role === "kick");
+  if (byRole.bass != null) {
+    parts.push(
+      planBass({
+        sections: form.sections,
+        harmony,
+        kickEvents: kick?.events ?? [],
+        rhythmGenes,
+        lockKick: true,
+        trackIndex: byRole.bass,
+        ppq: PPQ,
+      }),
+    );
+  }
+
+  if (byRole.lead != null) {
+    parts.push(
+      planMelody({
+        sections: form.sections,
+        harmony,
+        hook,
+        verseMotif,
+        mode,
+        keyPc,
+        trackIndex: byRole.lead,
+        role: "lead",
+        ppq: PPQ,
+        path: "melody/lead",
+      }),
+    );
+  }
+  if (byRole.chord != null) {
+    parts.push(
+      planMelody({
+        sections: form.sections,
+        harmony,
+        hook: invertMotif(hook),
+        verseMotif,
+        mode,
+        keyPc,
+        trackIndex: byRole.chord,
+        role: "chord",
+        ppq: PPQ,
+        path: "melody/chord",
+      }),
+    );
+  }
+
+  const assign = assignEnsemble({
+    trackRoles: roles,
+    style,
+    sectionKind: form.sections.find((s) => s.kind === "chorus")?.kind ?? "verse",
+  });
+  parts = applyEnsembleRelations({
+    parts,
+    sections: form.sections,
+    assign,
+    ppq: PPQ,
+  });
+
+  const layerMatrix = buildLayerMatrix({
+    trackRoles: roles,
+    sections: form.sections,
+    drumsVsTexture: settings.drumsVsTexture,
+  });
+  parts = applyLayerMatrix(parts, form.sections, layerMatrix, PPQ);
+
+  const modRoutes = buildModRoutes({
+    life: settings.life,
+    style,
+    density: settings.density,
+  });
+  parts = applyExpressionToParts(
+    parts,
+    form.sections,
+    modRoutes,
+    rng,
+    PPQ,
+  );
+
+  parts = parts.map((p) => ({
+    ...p,
+    layerTier: Math.min(
+      2,
+      Math.floor(
+        (form.sections.find((_, i) => layerMatrix[p.trackIndex]?.[i])?.energy ??
+          0.5) * 3,
+      ),
+    ),
+  }));
+
+  const gestures = planGestures({
+    sections: form.sections,
+    parts,
+    layerMatrix,
+    ppq: PPQ,
+  });
+  const automation = compileGestures({
+    gestures,
+    parts,
+    life: settings.life,
+  });
+
+  const mixPlan = planMix({
+    parts,
+    sections: form.sections,
+    style,
+    space: settings.space,
+  });
+  const { master, warnings: masterWarnings } = planMaster({
+    tracks: mixPlan.tracks,
+    sections: form.sections,
+    layerMatrix,
+    trackRoles: roles,
+    style,
+    targetLufs: settings.targetLufs,
+    space: settings.space,
+  });
+
   const resolved: ComposeSettings = {
     ...settings,
     style,
@@ -73,34 +218,26 @@ export function compose(settings: ComposeSettings): ComposeResult {
         feel: "straight",
         humanizeMs: settings.humanize * 20,
       },
-      rhythmGenes: [],
-      hook: emptyMotif(),
-      verseMotif: emptyMotif(),
+      rhythmGenes,
+      hook,
+      verseMotif,
       progressions,
+      signatureFx: mixPlan.spaces.signature?.kind,
       tuningOffsetCents: 0,
     },
     sections: form.sections,
     harmony,
-    parts: [],
-    layerMatrix: [],
-    modRoutes: [],
-    gestures: [],
-    automation: [],
+    parts,
+    layerMatrix,
+    modRoutes,
+    gestures,
+    automation,
     mix: {
-      tracks: [],
-      spaces: { A: { ...DEFAULT_TRACK_FX }, B: { ...DEFAULT_TRACK_FX } },
-      master: {
-        preampGainDb: 0,
-        masterGainDb: 0,
-        fx: [{ ...DEFAULT_TRACK_FX }, { ...DEFAULT_TRACK_FX }],
-        targetLufs: settings.targetLufs,
-        ceilingDbtp: -1,
-      },
+      tracks: mixPlan.tracks,
+      spaces: mixPlan.spaces,
+      master,
     },
-    warnings: [
-      ...form.warnings,
-      "composer: rhythm/melody/mix layers not yet implemented",
-    ],
+    warnings: [...form.warnings, ...masterWarnings],
   };
 
   return { score, resolved };

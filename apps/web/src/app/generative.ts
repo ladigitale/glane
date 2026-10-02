@@ -1,6 +1,16 @@
 /** Deterministic generative helpers — song-form motifs + expressive roles. */
 
 import {
+  compose,
+  type AutomationLane,
+  type ComposeSettings,
+  type FormFamily,
+  type MasterPlan,
+  type ModeId,
+  type Score,
+  type SpacePlan,
+} from "@glane/composer";
+import {
   DEFAULT_TRACK_ADSR,
   ExprRoleSchema,
   normalizeTrackFx,
@@ -39,6 +49,7 @@ import {
   withClapCohesion,
   type SampleMlCues,
 } from "./generative-cues";
+import { renderScore } from "./generative-render";
 import {
   MUSIC_STYLE_PROFILES,
   buildStyleMotif,
@@ -202,6 +213,13 @@ export type SequencePlanResult = {
   clips: SequenceClipPlan[];
   tracks: SequenceTrackPlan[];
   ensemble?: SequenceEnsembleSummary;
+  /** Optional composer outputs (step 8+) — ignored by legacy apply path. */
+  automation?: AutomationLane[];
+  sends?: Array<{ trackId: string; a: number; b: number }>;
+  spaces?: SpacePlan;
+  master?: MasterPlan;
+  score?: Score;
+  warnings?: string[];
 };
 
 type SectionKind =
@@ -4305,15 +4323,241 @@ function pickTrackMix(
 
 /**
  * Plan a full multi-track sequence over `bars`, drawing from the library.
- * Controls: seed + music style/patterns + density/energy/mix/groove; advanced
- * locks (key, palette, form, humanize, variation, sample variety, bpm-sync,
- * reverse, stutter, call–response, lock-pitch). Sample voices stay pinned per
- * section kind so verse/chorus returns stay familiar; spectral seating
- * (centroid + role EQ) spreads lows / mids / highs. Uses sample analysis + ML
- * tags when present. Pass `"auto"` to let the seed pick; omit for engine
- * defaults.
+ * Facade: UI opts → ComposeSettings → compose() → renderScore().
  */
 export function planSequence(opts: {
+  bars: number;
+  beatsPerBar: number;
+  ppq: number;
+  bpm: number;
+  seed: number;
+  tracks: Array<{ id: string; index: number }>;
+  samples: SequenceSampleIn[];
+  musicStyle?: GenMusicStyleChoice;
+  keyRootPc?: number | GenAuto;
+  density?: number | GenAuto;
+  energy?: number | GenAuto;
+  drumsVsTexture?: number | GenAuto;
+  groove?: GenGrooveChoice;
+  scaleMode?: GenScaleMode;
+  palette?: GenPaletteChoice;
+  formStyle?: GenFormStyle;
+  humanize?: number | GenAuto;
+  variation?: number | GenAuto;
+  sampleVariety?: number | GenAuto;
+  bpmSync?: GenTriState;
+  reverse?: GenTriState;
+  stutter?: GenTriState;
+  callResponse?: GenTriState;
+  ensembleRelation?: GenEnsembleRelation;
+  lockPitch?: GenTriState;
+  pitchUpSemitones?: number | GenAuto;
+  pitchDownSemitones?: number | GenAuto;
+  lockTempoPow2?: GenTriState;
+  forbidPitchStretch?: GenTriState;
+  stretchUpRatio?: number | GenAuto;
+  stretchDownRatio?: number | GenAuto;
+  tuningRef?: TuningRefMode;
+}): SequencePlanResult {
+  return planSequenceComposer(opts);
+}
+
+function mapFormFamily(formStyle: GenFormStyle): FormFamily | "auto" {
+  if (formStyle === "song") return "verse-chorus";
+  if (formStyle === "ambient") return "loop-evolve";
+  return "auto";
+}
+
+function mapMode(scaleMode: GenScaleMode): ModeId | "auto" {
+  if (scaleMode === "major") return "ionian";
+  if (scaleMode === "minor") return "aeolian";
+  return "auto";
+}
+
+function grooveToSwing(groove: GrooveKind): number {
+  if (groove === "shuffle") return 0.58;
+  if (groove === "half-time") return 0.2;
+  return 0.05;
+}
+
+/** UI → compose + render (hierarchical composer). */
+export function planSequenceComposer(opts: {
+  bars: number;
+  beatsPerBar: number;
+  ppq: number;
+  bpm: number;
+  seed: number;
+  tracks: Array<{ id: string; index: number }>;
+  samples: SequenceSampleIn[];
+  musicStyle?: GenMusicStyleChoice;
+  keyRootPc?: number | GenAuto;
+  density?: number | GenAuto;
+  energy?: number | GenAuto;
+  drumsVsTexture?: number | GenAuto;
+  groove?: GenGrooveChoice;
+  scaleMode?: GenScaleMode;
+  formStyle?: GenFormStyle;
+  humanize?: number | GenAuto;
+  variation?: number | GenAuto;
+  sampleVariety?: number | GenAuto;
+  ensembleRelation?: GenEnsembleRelation;
+  lockPitch?: GenTriState;
+  pitchUpSemitones?: number | GenAuto;
+  pitchDownSemitones?: number | GenAuto;
+  tuningRef?: TuningRefMode;
+}): SequencePlanResult {
+  const { bars, ppq, bpm, seed, tracks, samples } = opts;
+  if (bars < 1 || tracks.length === 0 || samples.length === 0) {
+    return { clips: [], tracks: [] };
+  }
+
+  const rnd = mulberry32(seed);
+  const sampleVariety = resolveStyleBiasedSlider(
+    opts.sampleVariety,
+    rnd,
+    0,
+    1,
+    0.45,
+    0.45,
+  );
+  const enriched = withClapCohesion(
+    samples,
+    sampleVariety > 0.2 ? rnd : undefined,
+  );
+  const yamnetPool = enriched.flatMap((s) => s.yamnet ?? []);
+  const musicStyle = pickMusicStyle(opts.musicStyle, rnd, yamnetPool);
+  const styleProfile = MUSIC_STYLE_PROFILES[musicStyle];
+
+  const density = resolveStyleBiasedSlider(
+    opts.density,
+    rnd,
+    0.35,
+    1.5,
+    1,
+    styleProfile.densityCenter,
+  );
+  const energy = resolveStyleBiasedSlider(
+    opts.energy,
+    rnd,
+    0,
+    1,
+    0.55,
+    styleProfile.energyCenter,
+  );
+  const drumsVsTexture = resolveStyleBiasedSlider(
+    opts.drumsVsTexture,
+    rnd,
+    0,
+    1,
+    0.55,
+    styleProfile.drumsCenter,
+  );
+  const groove: GrooveKind =
+    opts.groove === "auto"
+      ? pickGroove(rnd, styleProfile.groove)
+      : (opts.groove ?? styleProfile.groove);
+  const humanize =
+    opts.humanize === undefined
+      ? (styleProfile.humanizeCenter ?? 1)
+      : resolveStyleBiasedSlider(
+          opts.humanize,
+          rnd,
+          0,
+          1,
+          styleProfile.humanizeCenter ?? 1,
+          styleProfile.humanizeCenter,
+        );
+  const variation = resolveStyleBiasedSlider(
+    opts.variation,
+    rnd,
+    0,
+    1,
+    0.32,
+    0.32,
+  );
+  const scaleMode: GenScaleMode =
+    opts.scaleMode && opts.scaleMode !== "auto"
+      ? opts.scaleMode
+      : styleProfile.scaleBias && rnd() < 0.75
+        ? styleProfile.scaleBias
+        : (opts.scaleMode ?? "auto");
+  const formStyle: GenFormStyle = opts.formStyle ?? "auto";
+  const lockPitch = opts.lockPitch === "on";
+  const resolvePitchBound = (v: number | GenAuto | undefined): number => {
+    if (v === "auto" || v == null || !Number.isFinite(v)) return 12;
+    return Math.round(clamp(v, 0, 24));
+  };
+  const pitchUpSemitones = lockPitch ? 0 : resolvePitchBound(opts.pitchUpSemitones);
+  const pitchDownSemitones = lockPitch
+    ? 0
+    : resolvePitchBound(opts.pitchDownSemitones);
+
+  const keyPc: number | "auto" =
+    opts.keyRootPc === "auto" || opts.keyRootPc == null
+      ? "auto"
+      : clamp(Math.round(opts.keyRootPc), 0, 11);
+
+  const tuningRef = opts.tuningRef ?? "auto";
+  const tuningOffsetCents = resolveTuningOffsetCents(tuningRef, enriched);
+
+  const settings: ComposeSettings = {
+    seed,
+    style: musicStyle,
+    targetBars: bars,
+    formFamily: mapFormFamily(formStyle),
+    energyShape: "auto",
+    energy,
+    density,
+    drumsVsTexture,
+    variation,
+    life: energy,
+    space: clamp(0.25 + (1 - drumsVsTexture) * 0.5, 0, 1),
+    swing: grooveToSwing(groove),
+    humanize,
+    keyPc,
+    mode: mapMode(scaleMode),
+    tuningRef,
+    targetLufs: -14,
+    lockPitch,
+  };
+
+  const { score } = compose(settings);
+  score.dna.bpm = bpm;
+  score.dna.meter = [opts.beatsPerBar, 4];
+  score.dna.tuningOffsetCents = tuningOffsetCents;
+  score.dna.groove = {
+    swing: settings.swing,
+    feel: groove === "shuffle" ? "shuffle" : groove === "half-time" ? "half-time" : "straight",
+    humanizeMs: humanize * 20,
+  };
+
+  const result = renderScore(score, {
+    tracks,
+    samples: enriched,
+    ppq,
+    bpm,
+    lockPitch,
+    pitchUpSemitones,
+    pitchDownSemitones,
+    tuningOffsetCents,
+    sampleSourceMidi,
+    exactPitchSemitones,
+    resolveExprRole,
+  });
+
+  if (result.ensemble) {
+    result.ensemble = {
+      ...result.ensemble,
+      relationMode: opts.ensembleRelation ?? "auto",
+    };
+  }
+  return result;
+}
+
+/**
+ * Legacy planner (pre-composer). Kept for A-B until cleanup.
+ */
+export function planSequenceLegacy(opts: {
   bars: number;
   beatsPerBar: number;
   ppq: number;

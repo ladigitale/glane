@@ -36,5 +36,6 @@ describe("composer scaffold", () => {
     assert.equal(score.dna.seed, 1);
     assert.ok(score.sections.length > 0);
     assert.ok(score.harmony.length > 0);
+    assert.ok(score.parts.some((p) => p.role === "kick"));
   });
 });
