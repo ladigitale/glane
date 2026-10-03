@@ -128,8 +128,10 @@ export function energyAt(
   }
   if (kind === "chorus" || kind === "drop") base = Math.max(base, 0.72);
   if (kind === "build" || kind === "prechorus") base = Math.max(base, 0.6);
-  if (kind === "intro") base = Math.min(base, 0.35);
-  if (kind === "outro" || kind === "break") base = Math.min(base, 0.4);
+  // Intro/outro quieter than chorus, but high enough that beds + light kit pass enterAt
+  if (kind === "intro") base = Math.min(Math.max(base, 0.28), 0.42);
+  if (kind === "outro") base = Math.min(Math.max(base, 0.3), 0.45);
+  if (kind === "break") base = Math.min(base, 0.4);
   if (kind === "bridge") base = Math.min(Math.max(base, 0.35), 0.55);
   return Math.min(1, Math.max(0, base));
 }

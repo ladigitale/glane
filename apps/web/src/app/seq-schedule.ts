@@ -216,6 +216,10 @@ export function trackToInsertConfig(
   bpm = 120,
   preampDb = 0,
 ): TrackInsertConfig {
+  const clamp01 = (n: unknown) =>
+    typeof n === "number" && Number.isFinite(n)
+      ? Math.min(1, Math.max(0, n))
+      : 0;
   return {
     id: tr.id,
     gain: gainDbToLin(tr.gainDb),
@@ -223,5 +227,7 @@ export function trackToInsertConfig(
     pan: Number.isFinite(tr.pan) ? tr.pan : 0,
     fx: normalizeTrackFx(tr.fx),
     bpm,
+    sendA: clamp01(tr.sendA),
+    sendB: clamp01(tr.sendB),
   };
 }

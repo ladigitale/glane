@@ -41,4 +41,23 @@ describe("normalizeProject", () => {
     assert.equal(n.masterFx?.[0]?.thresholdDb, -18);
     assert.equal(n.masterFx?.[1]?.type, "reverb");
   });
+
+  it("keeps valid formSections and drops garbage", () => {
+    const n = normalizeProject({
+      ...base,
+      masterGainDb: 0,
+      formSections: [
+        {
+          id: "i0",
+          kind: "intro",
+          startBar: 0,
+          bars: 4,
+          energy: 0.3,
+        },
+        { id: "bad", kind: "nope", startBar: 0, bars: 4, energy: 1 },
+      ],
+    } as unknown as Project);
+    assert.equal(n.formSections?.length, 1);
+    assert.equal(n.formSections?.[0]?.kind, "intro");
+  });
 });

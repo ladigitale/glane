@@ -1,15 +1,21 @@
 import { asSampleIndex, type SampleIndex, type TrackFx } from "@glane/core-model";
 import {
   createMasterFxChain,
+  createSendBusPair,
   createTrackBus,
   disposeTrackBus,
   fxTailSamples,
   scheduleGainAdsr,
   updateTrackBus,
   type MasterFxChain,
+  type SendBusPair,
   type TrackBus,
   type TrackInsertConfig,
 } from "./track-insert";
+import {
+  scheduleAutoParam,
+  type SchedAutoLane,
+} from "./automation";
 import {
   TAPE_SCRUB_CATCHUP_S,
   TAPE_SCRUB_DRIFT_SAMPLES,
@@ -21,10 +27,18 @@ import {
   type TapeScrubVoice,
 } from "./tape-scrub";
 
-export type { TrackBus, TrackInsertConfig, MasterFxChain } from "./track-insert";
+export type {
+  TrackBus,
+  TrackInsertConfig,
+  MasterFxChain,
+  SendBusPair,
+} from "./track-insert";
+export type { SchedAutoLane, SchedAutoPoint } from "./automation";
+export { autoValueAt, autoParamUnits, dbToLin } from "./automation";
 export {
   bakeTrackFx,
   createMasterFxChain,
+  createSendBusPair,
   createTrackBus,
   disposeTrackBus,
   fxTailSamples,
@@ -94,6 +108,7 @@ export class TransportEngine {
   /** Tap on the master bus for a VU (does not alter the signal). */
   readonly analyser: AnalyserNode;
   #mix: MasterFxChain;
+  #sends: SendBusPair;
   #voices: Voice[] = [];
   #clips: ScheduledClip[] = [];
   #buses = new Map<string, TrackBus>();
@@ -108,6 +123,10 @@ export class TransportEngine {
   #muteInvalid = new Set<string>();
   #startedIds = new Set<string>();
   #lastPlayheadSample = asSampleIndex(0);
+  #autoLanes: SchedAutoLane[] = [];
+  #autoArmedUntil = asSampleIndex(-1);
+  /** Restored on stop / clear automation (linear). */
+  #baseMasterLin = 1;
   /** Vinyl scrub overrides transport voices until {@link endTapeScrub}. */
   #tapeMode = false;
   #tape = new Map<
@@ -138,6 +157,7 @@ export class TransportEngine {
     this.analyser.fftSize = 512;
     this.analyser.smoothingTimeConstant = 0.35;
     this.#mix = createMasterFxChain(this.ctx, this.master);
+    this.#sends = createSendBusPair(this.ctx, this.#mix.input);
     this.master.connect(this.analyser);
     this.master.connect(this.ctx.destination);
     for (let i = 0; i < VOICE_POOL; i++) {
@@ -175,9 +195,19 @@ export class TransportEngine {
     this.#mix.apply(fx0, fx1, bpm);
   }
 
+  /** Shared space returns A/B (composer SpacePlan). */
+  setSendSpaces(fxA: TrackFx, fxB: TrackFx, bpm?: number): void {
+    this.#sends.apply(fxA, fxB, bpm);
+  }
+
+  #sendDest() {
+    return { a: this.#sends.inputA, b: this.#sends.inputB };
+  }
+
   /** Create / update per-track buses (gain, pan, light FX insert). */
   syncTrackBuses(configs: TrackInsertConfig[]): void {
     const keep = new Set(configs.map((c) => c.id));
+    const sends = this.#sendDest();
     for (const [id, bus] of this.#buses) {
       if (!keep.has(id)) {
         disposeTrackBus(bus);
@@ -187,25 +217,34 @@ export class TransportEngine {
     for (const config of configs) {
       const existing = this.#buses.get(config.id);
       if (existing) {
-        updateTrackBus(existing, this.ctx, this.#mix.input, config);
+        updateTrackBus(existing, this.ctx, this.#mix.input, config, sends);
       } else {
         this.#buses.set(
           config.id,
-          createTrackBus(this.ctx, this.#mix.input, config),
+          createTrackBus(this.ctx, this.#mix.input, config, sends),
         );
       }
     }
+    // Static bus writes clear param timeline — re-arm automation next tick.
+    this.#autoArmedUntil = asSampleIndex(-1);
+    if (this.#playing && this.#autoLanes.length > 0) this.#armAutomation(true);
+  }
+
+  /** Remember static master fader (restored on stop / when automation clears). */
+  setBaseMasterGain(lin: number): void {
+    this.#baseMasterLin = Math.max(0, lin);
   }
 
   setTrackInsert(config: TrackInsertConfig): void {
+    const sends = this.#sendDest();
     const existing = this.#buses.get(config.id);
     if (existing) {
-      updateTrackBus(existing, this.ctx, this.#mix.input, config);
+      updateTrackBus(existing, this.ctx, this.#mix.input, config, sends);
       return;
     }
     this.#buses.set(
       config.id,
-      createTrackBus(this.ctx, this.#mix.input, config),
+      createTrackBus(this.ctx, this.#mix.input, config, sends),
     );
   }
 
@@ -213,6 +252,21 @@ export class TransportEngine {
     this.#clips = clips;
     this.invalidate();
     if (this.#playing) this.#schedule();
+  }
+
+  /**
+   * Composer / project automation (track gain·HP·LP·pan·sendA/B + master gain).
+   */
+  setAutomation(lanes: SchedAutoLane[]): void {
+    this.#autoLanes = lanes;
+    this.#autoArmedUntil = asSampleIndex(-1);
+    if (this.#playing) this.#armAutomation(true);
+  }
+
+  clearAutomation(): void {
+    this.#autoLanes = [];
+    this.#autoArmedUntil = asSampleIndex(-1);
+    this.#restoreStaticGains();
   }
 
   /** Arm clips entering the lookahead window. Safe from rAF (main-thread timer backup). */
@@ -237,6 +291,7 @@ export class TransportEngine {
     this.#originCtxTime = this.ctx.currentTime;
     this.#scheduledUntilSample = fromSample;
     this.#lastPlayheadSample = fromSample;
+    this.#autoArmedUntil = asSampleIndex(-1);
     this.#startedIds.clear();
     this.#playing = true;
     if (this.#timer == null) {
@@ -263,6 +318,7 @@ export class TransportEngine {
     this.#originCtxTime = this.ctx.currentTime;
     this.#scheduledUntilSample = fromSample;
     this.#lastPlayheadSample = fromSample;
+    this.#autoArmedUntil = asSampleIndex(-1);
     this.#startedIds.clear();
     if (this.#playing) this.#schedule();
   }
@@ -276,6 +332,7 @@ export class TransportEngine {
     this.#startedIds.clear();
     this.#stopAllTapeHard();
     this.#silenceAll();
+    this.#restoreStaticGains();
   }
 
   /**
@@ -795,6 +852,65 @@ export class TransportEngine {
       if (this.#startClip(clip)) this.#startedIds.add(clip.id);
     }
     this.#scheduledUntilSample = ahead;
+    if (this.#autoLanes.length > 0 && this.#autoArmedUntil < ahead) {
+      this.#armAutomation(false);
+      this.#autoArmedUntil = ahead;
+    }
+  }
+
+  #restoreStaticGains(): void {
+    const now = this.ctx.currentTime;
+    this.master.gain.cancelScheduledValues(now);
+    this.master.gain.setValueAtTime(this.#baseMasterLin, now);
+    for (const bus of this.#buses.values()) {
+      bus.gain.gain.cancelScheduledValues(now);
+      bus.hp.frequency.cancelScheduledValues(now);
+      bus.lp.frequency.cancelScheduledValues(now);
+      bus.pan.pan.cancelScheduledValues(now);
+    }
+  }
+
+  #armAutomation(force: boolean): void {
+    if (this.#autoLanes.length === 0) return;
+    const nowSample = this.playheadSample();
+    const ahead = asSampleIndex(
+      nowSample + Math.floor(LOOKAHEAD_S * 4 * this.sampleRate),
+    );
+    if (!force && this.#autoArmedUntil >= ahead) return;
+    const audioNow = this.ctx.currentTime;
+    this.#baseMasterLin = Math.max(1e-6, this.#baseMasterLin);
+
+    for (const lane of this.#autoLanes) {
+      const audioParam = this.#autoAudioParam(lane);
+      if (!audioParam) continue;
+      scheduleAutoParam(audioParam, lane, {
+        fromSample: nowSample,
+        toSample: ahead,
+        audioNow,
+        originSample: this.#originSample,
+        originCtxTime: this.#originCtxTime,
+        sampleRate: this.sampleRate,
+        absoluteGain: lane.scope === "master" && lane.param === "gainDb",
+      });
+    }
+    this.#autoArmedUntil = ahead;
+  }
+
+  #autoAudioParam(lane: SchedAutoLane): AudioParam | null {
+    if (lane.scope === "master") {
+      if (lane.param === "gainDb") return this.master.gain;
+      return null;
+    }
+    if (!lane.trackId) return null;
+    const bus = this.#buses.get(lane.trackId);
+    if (!bus) return null;
+    if (lane.param === "gainDb") return bus.gain.gain;
+    if (lane.param === "hpHz") return bus.hp.frequency;
+    if (lane.param === "lpHz") return bus.lp.frequency;
+    if (lane.param === "pan") return bus.pan.pan;
+    if (lane.param === "sendA") return bus.sendA.gain;
+    if (lane.param === "sendB") return bus.sendB.gain;
+    return null;
   }
 
   #startClip(clip: ScheduledClip): boolean {
@@ -937,13 +1053,18 @@ export class TransportEngine {
     tracks: TrackInsertConfig[] = [],
     masterFx: [TrackFx, TrackFx] | TrackFx[] = [],
     bpm = 120,
+    spaces?: [TrackFx, TrackFx],
   ): Promise<AudioBuffer> {
     const sr = this.sampleRate;
     const fx0 = masterFx[0];
     const fx1 = masterFx[1];
+    const spaceA = spaces?.[0];
+    const spaceB = spaces?.[1];
     const tail = Math.max(
       fx0 ? fxTailSamples(fx0, sr, bpm) : 0,
       fx1 ? fxTailSamples(fx1, sr, bpm) : 0,
+      spaceA ? fxTailSamples(spaceA, sr, bpm) : 0,
+      spaceB ? fxTailSamples(spaceB, sr, bpm) : 0,
     );
     const length = Math.max(1, Math.floor(durationSamples) + tail);
     const offline = new OfflineAudioContext(2, length, sr);
@@ -954,9 +1075,22 @@ export class TransportEngine {
       fx1,
       bpm,
     );
+    const sends = createSendBusPair(
+      offline,
+      chain.input,
+      spaceA,
+      spaceB,
+      bpm,
+    );
     const busIn = new Map<string, GainNode>();
     for (const t of tracks) {
-      busIn.set(t.id, createTrackBus(offline, chain.input, t).input);
+      busIn.set(
+        t.id,
+        createTrackBus(offline, chain.input, t, {
+          a: sends.inputA,
+          b: sends.inputB,
+        }).input,
+      );
     }
 
     for (const clip of clips) {

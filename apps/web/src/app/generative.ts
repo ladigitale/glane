@@ -2,17 +2,24 @@
 
 import {
   compose,
+  STYLE_GENERATOR_PROFILES,
   type AutomationLane,
+  type ComposeLock,
   type ComposeSettings,
   type FormFamily,
+  type GrooveFromSamples,
   type MasterPlan,
   type ModeId,
+  type RhythmGene,
   type Score,
   type SpacePlan,
 } from "@glane/composer";
+import { mixcheckPlan } from "./generative-mixcheck.js";
 import {
   DEFAULT_TRACK_ADSR,
+  DEFAULT_TRACK_FX,
   ExprRoleSchema,
+  PPQ as CORE_PPQ,
   normalizeTrackFx,
   parseExprRoleTag,
   TRACK_ATTACK_MS_MAX,
@@ -49,7 +56,6 @@ import {
   withClapCohesion,
   type SampleMlCues,
 } from "./generative-cues";
-import { renderScore } from "./generative-render";
 import {
   MUSIC_STYLE_PROFILES,
   buildStyleMotif,
@@ -96,44 +102,27 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
-export type ProbPlacement = { tick: number; gainDb: number };
-
-/** Legacy beat-grid placer (kept for callers / experiments). */
-export function probabilisticPlacement(opts: {
-  bars: number;
-  beatsPerBar?: number;
-  ppq: number;
-  density: number;
-  seed: number;
-  humanizeMs: number;
-  bpm: number;
-}): ProbPlacement[] {
-  const rnd = mulberry32(opts.seed);
-  const beatsPerBar = Math.max(1, opts.beatsPerBar ?? 4);
-  const ticksPerBar = opts.ppq * beatsPerBar;
-  const out: ProbPlacement[] = [];
-  for (let bar = 0; bar < opts.bars; bar++) {
-    for (let beat = 0; beat < beatsPerBar; beat++) {
-      const strong = beat === 0;
-      const p = opts.density * (strong ? 1.2 : 0.7);
-      if (rnd() < p) {
-        const humanTicks =
-          ((rnd() * 2 - 1) * opts.humanizeMs * opts.bpm * opts.ppq) / 60_000;
-        out.push({
-          tick: Math.round(bar * ticksPerBar + beat * opts.ppq + humanTicks),
-          gainDb: (rnd() * 2 - 1) * 1.5,
-        });
-      }
-    }
-  }
-  return out;
-}
-
 /** Explicit lock vs seed-driven pick. */
 export type GenAuto = "auto";
 export type GenTriState = GenAuto | "on" | "off";
 export type GenScaleMode = GenAuto | "major" | "minor";
-export type GenFormStyle = GenAuto | "song" | "ambient";
+/** UI form choice — legacy aliases `song`/`ambient` + composer families. */
+export type GenFormStyle =
+  | GenAuto
+  | "song"
+  | "ambient"
+  | "verse-chorus"
+  | "aaba"
+  | "build-drop"
+  | "arch"
+  | "rondo"
+  | "loop-evolve";
+export type GenEnergyShape =
+  | GenAuto
+  | "rise"
+  | "arch"
+  | "waves"
+  | "plateau";
 export type GenPaletteChoice = GenAuto | HarmonicPalette;
 export type GenGrooveChoice = GenAuto | GrooveKind;
 
@@ -201,6 +190,8 @@ export type SequenceTrackPlan = {
   gainDb: number;
   pan: number;
   fx: TrackFx;
+  sendA?: number;
+  sendB?: number;
 };
 
 export type SequenceEnsembleSummary = {
@@ -747,10 +738,6 @@ function msToLengthTick(durationMs: number, bpm: number, ppq: number): number {
   );
 }
 
-function lengthTickToMs(ticks: number, bpm: number, ppq: number): number {
-  return (ticks / ppq) * (60 / bpm) * 1000;
-}
-
 /** Continuous MIDI from Hz (A4=440 → 69). Never round — justesse §5bis. */
 export function hzToMidi(hz: number): number {
   return 69 + 12 * Math.log2(hz / 440);
@@ -869,29 +856,12 @@ export function sampleSourceMidi(s: SequenceSampleIn): number | null {
   return null;
 }
 
-/** True when we can safely retune from a recorded fundamental. */
-function sampleHasFundamental(s: SequenceSampleIn): boolean {
-  return sampleSourceMidi(s) != null;
-}
-
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
 function pickInt(rnd: () => number, lo: number, hi: number): number {
   return lo + Math.floor(rnd() * (hi - lo + 1));
-}
-
-function resolveSlider(
-  value: number | GenAuto | undefined,
-  rnd: () => number,
-  lo: number,
-  hi: number,
-  fallback: number,
-): number {
-  if (value === "auto") return lo + rnd() * (hi - lo);
-  if (value == null || !Number.isFinite(value)) return fallback;
-  return clamp(value, lo, hi);
 }
 
 function pickGroove(rnd: () => number, styleGroove?: GrooveKind): GrooveKind {
@@ -1060,67 +1030,6 @@ export function resolveExprRole(s: SequenceSampleIn): ExprRole {
   const fromYamnet = roleHintFromYamnet(s.yamnet, s.subclass);
   if (fromYamnet) return fromYamnet;
   return inferExprRole(s);
-}
-
-/** Infer tonic pitch-class from analysed samples; default C. */
-export function inferKeyRootPc(samples: SequenceSampleIn[]): number {
-  const counts = new Array<number>(12).fill(0);
-  for (const s of samples) {
-    const midi = sampleSourceMidi(s);
-    if (midi == null) continue;
-    const w =
-      (s.favorite ? 2 : 1) *
-      (s.class === "tonal" || s.class === "voice" ? 2 : 1) *
-      (1 + (s.harmonicity ?? 0));
-    counts[((Math.round(midi) % 12) + 12) % 12]! += w;
-  }
-  let best = 0;
-  let bestW = -1;
-  for (let i = 0; i < 12; i++) {
-    const w = counts[i] ?? 0;
-    if (w > bestW) {
-      bestW = w;
-      best = i;
-    }
-  }
-  return best;
-}
-
-function pickScale(
-  samples: SequenceSampleIn[],
-  rootPc: number,
-  rnd: () => number,
-  mode: GenScaleMode = "auto",
-): readonly number[] {
-  if (mode === "major") return MAJOR_SCALE;
-  if (mode === "minor") return MINOR_SCALE;
-  let majorish = 0;
-  let minorish = 0;
-  for (const s of samples) {
-    const midi = sampleSourceMidi(s);
-    if (midi == null) continue;
-    const pc = ((Math.round(midi) % 12) + 12) % 12;
-    const rel = (pc - rootPc + 12) % 12;
-    if (rel === 4) majorish += 1;
-    if (rel === 3) minorish += 1;
-  }
-  if (majorish === minorish) return rnd() < 0.55 ? MAJOR_SCALE : MINOR_SCALE;
-  return majorish > minorish ? MAJOR_SCALE : MINOR_SCALE;
-}
-
-function paletteFromMix(
-  drumsVsTexture: number,
-  rnd: () => number,
-  forced?: GenPaletteChoice,
-  stylePalette?: HarmonicPalette,
-): HarmonicPalette {
-  if (forced && forced !== "auto") return forced;
-  if (stylePalette && rnd() < 0.78) return stylePalette;
-  if (drumsVsTexture < 0.35) return rnd() < 0.7 ? "ambient" : "modal";
-  if (drumsVsTexture > 0.7) return rnd() < 0.55 ? "pop" : "mixed";
-  if (rnd() < 0.25) return "jazz";
-  if (rnd() < 0.45) return "modal";
-  return "mixed";
 }
 
 /**
@@ -1691,387 +1600,6 @@ export function planSongForm(
   });
 }
 
-/** Apply shuffle / half-time feel to a tick within a bar. */
-function applyGroove(
-  tickInBar: number,
-  groove: GrooveKind,
-  beatsPerBar: number,
-  ppq: number,
-): number {
-  const tpb = beatsPerBar * ppq;
-  let t = ((tickInBar % tpb) + tpb) % tpb;
-  if (groove === "straight") return t;
-
-  if (groove === "half-time") {
-    // Compress activity toward beats 1 and 3 (or 1 only in 3/4)
-    const beat = t / ppq;
-    if (beatsPerBar >= 4) {
-      if (beat >= 1 && beat < 2) t = Math.round((beat - 1) * 0.35 * ppq);
-      else if (beat >= 3 && beat < 4)
-        t = Math.round(2 * ppq + (beat - 3) * 0.35 * ppq);
-    }
-    return ((t % tpb) + tpb) % tpb;
-  }
-
-  // shuffle: delay off-beats toward swing (≈66% of the way to next beat)
-  const beatFloor = Math.floor(t / ppq);
-  const within = t - beatFloor * ppq;
-  const eighth = ppq / 2;
-  if (within > eighth * 0.85 && within < eighth * 1.15) {
-    // on the off-eighth → push later
-    t = beatFloor * ppq + Math.round(eighth * (2 / 3) + eighth);
-  } else if (within > 0 && within < eighth) {
-    // keep on-beat
-  } else if (within >= eighth) {
-    const sub = within - eighth;
-    t = beatFloor * ppq + eighth + Math.round(sub * 0.55 + eighth * 0.15);
-  }
-  return ((t % tpb) + tpb) % tpb;
-}
-
-function buildMotif(
-  role: ExprRole,
-  beatsPerBar: number,
-  ppq: number,
-  rnd: () => number,
-  groove: GrooveKind,
-  musicStyle: MusicStyleId,
-): MotifHit[] {
-  return buildStyleMotif(musicStyle, role, beatsPerBar, ppq, rnd, groove);
-}
-
-/** Call–response: shift hits by half-bar relative to partner motif. */
-function callResponseShift(
-  hits: MotifHit[],
-  ppq: number,
-  beatsPerBar: number,
-  respond: boolean,
-): MotifHit[] {
-  if (!respond) return hits;
-  const shift = Math.floor((beatsPerBar * ppq) / 2);
-  const tpb = beatsPerBar * ppq;
-  return hits.map((h) => ({
-    ...h,
-    tickInBar: (h.tickInBar + shift) % tpb,
-    gainDb: h.gainDb - 0.5,
-  }));
-}
-
-function melodyCellToHits(
-  cell: readonly MelodyEvent[],
-  ppq: number,
-  beatsPerBar: number,
-  groove: GrooveKind,
-): MotifHit[] {
-  const tpb = beatsPerBar * ppq;
-  const ticksPer16 = ppq / 4;
-  let t = 0;
-  const hits: MotifHit[] = [];
-  for (const ev of cell) {
-    if (t >= tpb) break;
-    hits.push({
-      tickInBar: applyGroove(Math.round(t), groove, beatsPerBar, ppq),
-      gainDb: ev.accent ? 0.5 : -1,
-      accent: !!ev.accent,
-      melodyDegree: ev.degree,
-    });
-    t += ev.sixteenths * ticksPer16;
-  }
-  return hits.length > 0
-    ? hits
-    : [{ tickInBar: 0, gainDb: 0, accent: true, melodyDegree: 0 }];
-}
-
-/** Arp cell → hits; skips rests (`degree: null`). Degrees are chord-relative. */
-function arpCellToHits(
-  cell: readonly ArpEvent[],
-  ppq: number,
-  beatsPerBar: number,
-  groove: GrooveKind,
-): MotifHit[] {
-  const tpb = beatsPerBar * ppq;
-  const ticksPer16 = ppq / 4;
-  let t = 0;
-  const hits: MotifHit[] = [];
-  for (const ev of cell) {
-    if (t >= tpb) break;
-    if (ev.degree != null) {
-      hits.push({
-        tickInBar: applyGroove(Math.round(t), groove, beatsPerBar, ppq),
-        gainDb: ev.accent ? 0.5 : -0.5,
-        accent: !!ev.accent,
-        melodyDegree: ev.degree,
-      });
-    }
-    t += ev.sixteenths * ticksPer16;
-  }
-  return hits.length > 0
-    ? hits
-    : [{ tickInBar: 0, gainDb: 0, accent: true, melodyDegree: 0 }];
-}
-
-function evolveMotifHits(
-  motif: MotifHit[],
-  opts: {
-    role: ExprRole;
-    section: SongSection;
-    barInSection: number;
-    beatsPerBar: number;
-    ppq: number;
-    density: number;
-    energy: number;
-    rnd: () => number;
-    /** When true, empty kit motifs stay empty (classical / ambient). */
-    allowEmptyKit?: boolean;
-  },
-): MotifHit[] {
-  const {
-    role,
-    section,
-    barInSection,
-    beatsPerBar,
-    ppq,
-    density,
-    energy,
-    rnd,
-    allowEmptyKit,
-  } = opts;
-  const tpb = beatsPerBar * ppq;
-  const last = barInSection === section.bars - 1;
-  let hits = motif.map((h) => ({ ...h }));
-  const dens = section.densityMul * density;
-
-  if (allowEmptyKit && motif.length === 0 && isDrumRole(role)) {
-    return [];
-  }
-
-  hits = hits.filter((h) => {
-    // Accents stay reliable only in denser sections — quiet sections can drop them
-    if (h.accent) {
-      if (dens >= 0.7) return true;
-      if (dens >= 0.45) return rnd() < dens + 0.35;
-      return rnd() < dens + 0.15;
-    }
-    return rnd() < dens;
-  });
-
-  if (section.kind === "intro") {
-    if (role === "hat")
-      hits = hits.filter((h) => h.tickInBar % ppq === 0 || rnd() < 0.18);
-    if (role === "snare") hits = hits.filter((h) => h.accent && rnd() < 0.4);
-    if (role === "kick")
-      hits = hits.filter((h) => h.accent || rnd() < 0.25 + energy * 0.15);
-    if (role === "lead" || role === "chord") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.22);
-    }
-    if (role === "perc" || role === "fx") {
-      hits = hits.filter(() => rnd() < 0.35);
-    }
-  }
-
-  if (section.kind === "verse") {
-    if (role === "hat" && dens < 0.85) {
-      hits = hits.filter((h) => h.accent || h.tickInBar % ppq === 0 || rnd() < 0.45);
-    }
-    if (role === "lead") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.4 + energy * 0.2);
-    }
-    // Keep kit/bass accents reliable so verse never feels empty
-    if ((role === "kick" || role === "bass" || role === "snare") && dens >= 0.35) {
-      const accents = hits.filter((h) => h.accent);
-      if (accents.length > 0) hits = accents.length >= 2 ? accents : hits;
-      else if (hits.length === 0) {
-        hits.push({ tickInBar: 0, gainDb: section.gainBiasDb, accent: true });
-      }
-    }
-  }
-
-  if (section.kind === "prechorus") {
-    hits = hits.map((h) => ({
-      ...h,
-      gainDb: h.gainDb + 0.55 * (barInSection + 1) * energy,
-    }));
-    // Rising hats / perc toward chorus
-    if ((role === "hat" || role === "perc") && rnd() < 0.35 + energy * 0.3) {
-      const step = Math.floor(ppq / 2);
-      for (let t = 0; t < tpb; t += Math.max(1, step)) {
-        if (!hits.some((h) => Math.abs(h.tickInBar - t) < 2)) {
-          hits.push({ tickInBar: t, gainDb: -3.5, accent: false });
-        }
-      }
-    }
-  }
-
-  if (section.kind === "chorus") {
-    if (role === "hat" && rnd() < 0.5 + energy * 0.35) {
-      const step = Math.floor(ppq / 4);
-      for (let t = 0; t < tpb; t += step) {
-        if (!hits.some((h) => Math.abs(h.tickInBar - t) < 2)) {
-          hits.push({ tickInBar: t, gainDb: -3.5, accent: false });
-        }
-      }
-    }
-    if (role === "kick" && section.evolve > 0.3 && rnd() < 0.4 + energy * 0.25) {
-      hits.push({
-        tickInBar: Math.floor(3.5 * ppq) % tpb,
-        gainDb: -1,
-        accent: false,
-      });
-    }
-    if (role === "perc" && rnd() < 0.3 + energy * 0.2) {
-      hits.push({
-        tickInBar: Math.floor(1.75 * ppq) % tpb,
-        gainDb: -2,
-        accent: false,
-      });
-    }
-  }
-
-  if (section.kind === "bridge") {
-    // Hard strip kit — leave accents rarely
-    if (role === "kick" || role === "snare" || role === "hat") {
-      hits = hits.filter((h) => h.accent && rnd() < 0.25 + energy * 0.15);
-    }
-    if (role === "bass") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.3);
-    }
-    if (role === "lead" || role === "chord") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.45);
-      if (rnd() < 0.35) {
-        hits.push({
-          tickInBar: Math.floor(1.5 * ppq) % tpb,
-          gainDb: -1.5,
-          accent: false,
-        });
-      }
-    }
-    if (role === "texture" || role === "loop") {
-      hits = hits.filter((h) => h.accent || rnd() < 0.55);
-    }
-  }
-
-  if (section.kind === "outro") {
-    if (last) {
-      // Final bar: accents only — clear last phrase, not a random fade cut
-      hits = hits.filter((h) => h.accent);
-      if (
-        hits.length === 0 &&
-        (role === "lead" ||
-          role === "bass" ||
-          role === "chord" ||
-          role === "texture" ||
-          role === "loop")
-      ) {
-        hits.push({
-          tickInBar: 0,
-          gainDb: section.gainBiasDb,
-          accent: true,
-          melodyDegree: role === "lead" ? 0 : undefined,
-        });
-      }
-    } else {
-      const keep = 1 - (barInSection / Math.max(1, section.bars)) * 0.85;
-      hits = hits.filter((h) => h.accent || rnd() < keep * 0.7);
-      if (isDrumRole(role)) {
-        hits = hits.filter((h) => h.accent && rnd() < keep);
-      }
-    }
-  }
-
-  if (last && section.fillLastBar && energy > 0.35) {
-    const handoff =
-      section.kind === "chorus" ||
-      section.kind === "prechorus" ||
-      section.kind === "verse" ||
-      section.kind === "intro";
-    if (handoff && isDrumRole(role)) {
-      const fillStep =
-        role === "hat" ? Math.floor(ppq / 4) : Math.floor(ppq / 2);
-      const from = Math.floor(tpb * 0.5);
-      for (let t = from; t < tpb; t += Math.max(1, fillStep)) {
-        if (rnd() < 0.45 + section.evolve * 0.3 + energy * 0.15) {
-          hits.push({ tickInBar: t, gainDb: -1.5 + rnd(), accent: false });
-        }
-      }
-    }
-    // Melodic / bass pickup into the next section (beats 3–4)
-    if (
-      handoff &&
-      (role === "lead" || role === "bass") &&
-      (section.kind === "verse" ||
-        section.kind === "prechorus" ||
-        section.kind === "intro")
-    ) {
-      const t3 = Math.floor(3 * ppq) % tpb;
-      const t25 = Math.floor(2.5 * ppq) % tpb;
-      if (!hits.some((h) => Math.abs(h.tickInBar - t3) < 2)) {
-        hits.push({
-          tickInBar: t3,
-          gainDb: -0.5,
-          accent: true,
-          melodyDegree: role === "lead" ? 4 : 0,
-        });
-      }
-      if (role === "lead" && rnd() < 0.55 + energy * 0.2) {
-        if (!hits.some((h) => Math.abs(h.tickInBar - t25) < 2)) {
-          hits.push({
-            tickInBar: t25,
-            gainDb: -2,
-            accent: false,
-            melodyDegree: 2,
-          });
-        }
-      }
-    }
-  }
-
-  if (section.evolve > 0.2 && rnd() < section.evolve * density) {
-    if (rnd() < 0.55 && hits.length > 1) {
-      const i = pickInt(rnd, 0, hits.length - 1);
-      if (!hits[i]!.accent) hits.splice(i, 1);
-    } else if (
-      isDrumRole(role) &&
-      (section.kind === "chorus" || section.kind === "prechorus")
-    ) {
-      hits.push({
-        tickInBar: Math.floor(rnd() * tpb),
-        gainDb: -3,
-        accent: false,
-      });
-    }
-  }
-
-  // Foundation roles: force a hit in active / intro beds — silence is intentional elsewhere
-  if (
-    hits.length === 0 &&
-    (role === "kick" || role === "bass" || role === "loop" || role === "texture")
-  ) {
-    const forceFoundation =
-      ((section.kind === "verse" ||
-        section.kind === "chorus" ||
-        section.kind === "prechorus") &&
-        dens >= 0.35) ||
-      (section.kind === "intro" &&
-        (role === "texture" || role === "loop" || role === "bass") &&
-        dens >= 0.2);
-    if (forceFoundation) {
-      hits.push({ tickInBar: 0, gainDb: section.gainBiasDb, accent: true });
-    }
-  }
-
-  hits.sort((a, b) => a.tickInBar - b.tickInBar);
-  const deduped: MotifHit[] = [];
-  for (const h of hits) {
-    const prev = deduped[deduped.length - 1];
-    if (prev && Math.abs(prev.tickInBar - h.tickInBar) < Math.floor(ppq / 16)) {
-      if (h.accent || h.gainDb > prev.gainDb) deduped[deduped.length - 1] = h;
-      continue;
-    }
-    deduped.push(h);
-  }
-  return deduped;
-}
-
 function scoreSampleForRole(
   s: SequenceSampleIn,
   role: ExprRole,
@@ -2285,16 +1813,6 @@ export function chordRunBars(
   return n;
 }
 
-function chordToneSemis(
-  scale: readonly number[],
-  rootDegree: number,
-  tone: ChordTone,
-): number {
-  const deg = (rootDegree + tone) % scale.length;
-  const oct = Math.floor((rootDegree + tone) / scale.length);
-  return (scale[deg] ?? 0) + oct * 12;
-}
-
 /**
  * True when an exact retune of `fromMidi` by `semis` (+ stretch) lands on an
  * integer target pitch-class in `allowedRels` (membership on the **target**,
@@ -2376,57 +1894,6 @@ export function scaleCompatibleTransposes(
   return [0];
 }
 
-/**
- * Pitch-classes (semitones above tonic) allowed for this hit.
- * Bass/chord stay on the chord; lead accents too; weak lead = chord + approach.
- */
-function harmonicAllowedRels(
-  role: ExprRole,
-  scale: readonly number[],
-  chordDegree: number,
-  chordTones: readonly ChordTone[],
-  accent: boolean,
-): readonly number[] {
-  const tones =
-    chordTones.length > 0 ? chordTones : ([0, 2, 4] as const);
-  const toneRels = (list: readonly ChordTone[]): number[] => {
-    const out: number[] = [];
-    for (const tone of list) {
-      const semis = chordToneSemis(scale, chordDegree, tone);
-      const rel = ((semis % 12) + 12) % 12;
-      if (!out.includes(rel)) out.push(rel);
-    }
-    return out.length > 0 ? out : [...scale];
-  };
-
-  if (role === "bass") {
-    // Accents: root. Weak: root / 3rd / 5th (walking, not scale wander).
-    return accent ? toneRels([0]) : toneRels([0, 2, 4]);
-  }
-  if (role === "chord") {
-    return toneRels(tones);
-  }
-  if (role === "arp") {
-    return toneRels(tones);
-  }
-  if (role === "lead") {
-    if (accent) return toneRels(tones);
-    // Weak beats: chord tones + diatonic neighbours (passing / approach).
-    const chord = toneRels(tones);
-    const out = [...chord];
-    for (const tone of tones) {
-      const idx = (chordDegree + tone) % scale.length;
-      for (const d of [-1, 1] as const) {
-        const n = (((idx + d) % scale.length) + scale.length) % scale.length;
-        const rel = scale[n]!;
-        if (!out.includes(rel)) out.push(rel);
-      }
-    }
-    return out;
-  }
-  return scale;
-}
-
 /** Snap chord-relative cell degree to triad/7th/octave (anti false-notes). */
 export function snapChordRelativeDegree(degree: number, accent: boolean): number {
   const tones = accent ? [0, 2, 4, 7] : [0, 2, 4, 5, 7];
@@ -2475,467 +1942,12 @@ function forbidsResamplePitch(
 }
 
 /** Nearest allowed transpose to `preferred` (ties → prefer smaller |semis|). */
-function nearestAllowedTranspose(
-  preferred: number,
-  allowed: readonly number[],
-): number {
-  if (allowed.length === 0) return 0;
-  let best = allowed[0]!;
-  let bestDist = Infinity;
-  let bestAbs = Infinity;
-  for (const semis of allowed) {
-    const dist = Math.abs(semis - preferred);
-    const abs = Math.abs(semis);
-    if (dist < bestDist || (dist === bestDist && abs < bestAbs)) {
-      bestDist = dist;
-      bestAbs = abs;
-      best = semis;
-    }
-  }
-  return best;
-}
-
-function pickPitchSemitones(opts: {
-  sample: SequenceSampleIn;
-  role: ExprRole;
-  rootPc: number;
-  scale: readonly number[];
-  degreeHint: number;
-  chordTones?: readonly ChordTone[];
-  toneIndex?: number;
-  melodyDegree?: number;
-  accent?: boolean;
-  section: SongSection;
-  energy: number;
-  rnd: () => number;
-  /** Max transpose upward (semitones). */
-  maxUp: number;
-  /** Max transpose downward (semitones, positive). */
-  maxDown: number;
-}): number {
-  const {
-    sample,
-    role,
-    rootPc,
-    scale,
-    degreeHint,
-    chordTones,
-    toneIndex,
-    melodyDegree,
-    accent,
-    section,
-    energy,
-    rnd,
-    maxUp,
-    maxDown,
-  } = opts;
-  const up = Math.max(0, maxUp);
-  const down = Math.max(0, maxDown);
-  const clampPitch = (semis: number) => clamp(semis, -down, up);
-  const source = sampleSourceMidi(sample);
-  // Melodic roles must retune from the recorded fundamental — never assume MIDI 60.
-  if (
-    source == null &&
-    (role === "arp" ||
-      role === "lead" ||
-      role === "bass" ||
-      role === "chord")
-  ) {
-    return 0;
-  }
-  const enforce = shouldEnforceScale(role, sample);
-  const tones = chordTones ?? ([0, 2, 4] as const);
-  const allowedRels = enforce
-    ? harmonicAllowedRels(
-        role,
-        scale,
-        degreeHint,
-        tones,
-        accent ?? true,
-      )
-    : scale;
-
-  if (up <= 0 && down <= 0) {
-    // No retune budget: if we must stay on-scale, still snap via expanded search.
-    if (!enforce || source == null) return 0;
-    const allowed = scaleCompatibleTransposes(
-      source,
-      rootPc,
-      scale,
-      0,
-      0,
-      0,
-      allowedRels,
-    );
-    return nearestAllowedTranspose(0, allowed);
-  }
-
-  if (isDrumRole(role) || role === "fx") {
-    if (rnd() > 0.2 + energy * 0.15) {
-      if (!enforce || source == null) return 0;
-      return nearestAllowedTranspose(
-        0,
-        scaleCompatibleTransposes(
-          source,
-          rootPc,
-          scale,
-          up,
-          down,
-          0,
-          allowedRels,
-        ),
-      );
-    }
-    const lim =
-      section.kind === "bridge" || section.kind === "chorus" ? 7 : 4;
-    const hi = Math.min(up, lim);
-    const lo = Math.min(down, lim);
-    if (hi <= 0 && lo <= 0) return 0;
-    const raw = clampPitch(pickInt(rnd, -lo, hi));
-    if (!enforce || source == null) return raw;
-    return nearestAllowedTranspose(
-      raw,
-      scaleCompatibleTransposes(
-        source,
-        rootPc,
-        scale,
-        up,
-        down,
-        0,
-        allowedRels,
-      ),
-    );
-  }
-
-  if (role === "texture" || role === "loop") {
-    if (!isMelodicClass(sample.class, sample.harmonicity)) {
-      if (rnd() >= 0.25 + energy * 0.2) {
-        if (!enforce || source == null) return 0;
-        return nearestAllowedTranspose(
-          0,
-          scaleCompatibleTransposes(
-            source,
-            rootPc,
-            scale,
-            up,
-            down,
-            0,
-            allowedRels,
-          ),
-        );
-      }
-      const hi = Math.min(7, up);
-      const lo = Math.min(7, down);
-      const raw =
-        hi > 0 || lo > 0 ? clampPitch(pickInt(rnd, -lo, hi)) : 0;
-      if (!enforce || source == null) return raw;
-      return nearestAllowedTranspose(
-        raw,
-        scaleCompatibleTransposes(
-          source,
-          rootPc,
-          scale,
-          up,
-          down,
-          0,
-          allowedRels,
-        ),
-      );
-    }
-  }
-
-  let degree = scale[degreeHint % scale.length] ?? 0;
-  let md = melodyDegree;
-  if (
-    md != null &&
-    (role === "lead" || role === "arp" || role === "bass" || role === "chord")
-  ) {
-    md = snapChordRelativeDegree(md, accent !== false);
-  }
-  if (
-    (role === "lead" ||
-      role === "arp" ||
-      role === "bass" ||
-      role === "chord") &&
-    md != null
-  ) {
-    // Cell / lock degrees are chord-relative: transpose onto current chord root.
-    const idx = md + degreeHint;
-    const oct = Math.floor(idx / scale.length);
-    degree =
-      (scale[((idx % scale.length) + scale.length) % scale.length] ?? 0) +
-      oct * 12;
-  } else if (role === "chord" && tones.length > 0) {
-    const tone = tones[(toneIndex ?? 0) % tones.length]!;
-    degree = chordToneSemis(scale, degreeHint, tone);
-  } else if (role === "bass") {
-    const tone: ChordTone =
-      accent === false ? (rnd() < 0.45 ? 4 : rnd() < 0.35 ? 2 : 0) : 0;
-    degree = chordToneSemis(scale, degreeHint, tone);
-  }
-
-  let octave = 0;
-  if (role === "bass") {
-    // Occasional octave jump on weak / chorus for motion (not always low drone).
-    octave =
-      accent === false && section.kind === "chorus" && rnd() < 0.4
-        ? 0
-        : pickInt(rnd, -1, 0);
-    if (!accent && rnd() < 0.2) octave = 0;
-  } else if (role === "lead" || role === "arp") {
-    octave = pickInt(rnd, 0, 1);
-    if (
-      role === "lead" &&
-      section.kind === "chorus" &&
-      rnd() < 0.35 * energy
-    ) {
-      octave += 1;
-    }
-  } else if (role === "chord") octave = toneIndex && toneIndex > 1 ? 1 : 0;
-
-  // Prefer an octave that keeps the transpose inside the allowed window,
-  // always snapping to a harmony-compatible interval (never a hard min/max).
-  const baseOctave =
-    source != null
-      ? Math.floor(Math.round(source) / 12) - 1
-      : role === "bass"
-        ? 2
-        : 4;
-  const fromMidi = source != null ? source : 60;
-  const allowed = scaleCompatibleTransposes(
-    fromMidi,
-    rootPc,
-    scale,
-    up,
-    down,
-    0,
-    allowedRels,
-  );
-  const octCandidates = [octave, 0, -1, 1, -2, 2].filter(
-    (o, i, a) => a.indexOf(o) === i,
-  );
-  let bestSemis = nearestAllowedTranspose(0, allowed);
-  let bestDist = Infinity;
-  for (const oct of octCandidates) {
-    const targetMidi = (baseOctave + oct + 1) * 12 + rootPc + degree;
-    const raw = Math.round(targetMidi - fromMidi);
-    const semis = nearestAllowedTranspose(raw, allowed);
-    const dist = Math.abs(raw - semis) + Math.abs(oct - octave) * 0.01;
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestSemis = semis;
-    }
-  }
-  let semis = bestSemis;
-
-  // Melodic ornament only for lead on weak beats — never wander bass/chord off harmony.
-  if (
-    role === "lead" &&
-    accent === false &&
-    semis === 0 &&
-    section.evolve > 0.3 &&
-    rnd() < section.evolve * energy
-  ) {
-    const step = scale[pickInt(rnd, 1, scale.length - 1)] ?? 2;
-    const evolved = rnd() < 0.5 ? step : -step;
-    semis = nearestAllowedTranspose(evolved, allowed);
-  }
-  return semis;
-}
-
-/** Sounding pitch occupancy for cross-track clash avoidance (float MIDI). */
-type PitchOccupancy = {
-  startTick: number;
-  endTick: number;
-  /** Absolute sounding MIDI (float, A440-referenced + stretch). */
-  sounding: number;
-};
-
-/**
- * Dominant note for clash checks: analysed fundamental when present,
- * else spectral centroid (works for pitched and unpitched samples).
- */
-function sampleDominantMidi(s: SequenceSampleIn): number | null {
-  const pitched = sampleSourceMidi(s);
-  if (pitched != null) return pitched;
-  if (s.centroidHz != null && s.centroidHz > 20 && s.centroidHz < 8000) {
-    return hzToMidi(s.centroidHz);
-  }
-  return null;
-}
 
 /** Folded pitch-class distance into 0…6 (continuous). */
-function pcInterval(a: number, b: number): number {
-  const d = Math.abs((((a - b) % 12) + 12) % 12);
-  return Math.min(d, 12 - d);
-}
 
 /**
  * Dominants conflict when they form a minor 2nd (±30¢), not rounded classes.
  */
-function fundamentalsConflict(a: number, b: number): boolean {
-  return Math.abs(pcInterval(a, b) - 1) <= 0.3;
-}
-
-function overlappingSoundings(
-  occupied: readonly PitchOccupancy[],
-  startTick: number,
-  endTick: number,
-): number[] {
-  const out: number[] = [];
-  for (const o of occupied) {
-    if (o.startTick < endTick && o.endTick > startTick) out.push(o.sounding);
-  }
-  return out;
-}
-
-/**
- * Retune within the scale window so the sounding dominant does not clash
- * with other clips that overlap in time (pitched or not). Prefers the
- * original target; falls back to unison with an occupant, then nearest allowed.
- * Never changes degree off-scale when `enforceScale`; may change octave.
- */
-function avoidFundamentalClash(opts: {
-  sample: SequenceSampleIn;
-  preferredSemis: number;
-  /** Extra pitch from stretch mode `resample` (semitones). */
-  stretchSemis: number;
-  startTick: number;
-  endTick: number;
-  occupied: readonly PitchOccupancy[];
-  rootPc: number;
-  scale: readonly number[];
-  maxUp: number;
-  maxDown: number;
-  enforceScale: boolean;
-  /** Tighter than scale (chord tones). */
-  allowedRels?: readonly number[];
-  tuningOffsetCents?: number;
-}): number {
-  const {
-    sample,
-    preferredSemis,
-    stretchSemis,
-    startTick,
-    endTick,
-    occupied,
-    rootPc,
-    scale,
-    maxUp,
-    maxDown,
-    enforceScale,
-    allowedRels,
-    tuningOffsetCents = 0,
-  } = opts;
-  const fromMidi = sampleDominantMidi(sample);
-  if (fromMidi == null) return preferredSemis;
-
-  const allowed = scaleCompatibleTransposes(
-    fromMidi,
-    rootPc,
-    scale,
-    maxUp,
-    maxDown,
-    stretchSemis,
-    allowedRels,
-    tuningOffsetCents,
-  );
-  const onScalePreferred = enforceScale
-    ? nearestAllowedTranspose(preferredSemis, allowed)
-    : preferredSemis;
-
-  const others = overlappingSoundings(occupied, startTick, endTick);
-  if (others.length === 0) return onScalePreferred;
-
-  const sounding = (semis: number) =>
-    soundingMidi(fromMidi, semis, stretchSemis);
-  const preferredSound = sounding(onScalePreferred);
-  if (!others.some((o) => fundamentalsConflict(preferredSound, o))) {
-    return onScalePreferred;
-  }
-
-  const free = allowed.filter(
-    (semis) => !others.some((o) => fundamentalsConflict(sounding(semis), o)),
-  );
-  if (free.length > 0) return nearestAllowedTranspose(onScalePreferred, free);
-
-  // No clash-free degree: land on an already-sounding dominant (unison ±30¢).
-  const unison = allowed.filter((semis) =>
-    others.some((o) => Math.abs(sounding(semis) - o) <= 0.3),
-  );
-  if (unison.length > 0) {
-    return nearestAllowedTranspose(onScalePreferred, unison);
-  }
-
-  return onScalePreferred;
-}
-
-/**
- * After stretch is final: exact float retune onto nearest allowed degree target.
- */
-function finalizeScalePitch(opts: {
-  sample: SequenceSampleIn;
-  role: ExprRole;
-  pitchSemitones: number;
-  stretchMode: StretchMode;
-  fitFactor: number;
-  rootPc: number;
-  scale: readonly number[];
-  maxUp: number;
-  maxDown: number;
-  allowedRels?: readonly number[];
-  tuningOffsetCents?: number;
-}): { pitchSemitones: number; stretchMode: StretchMode; stretchPitch: number } {
-  const {
-    sample,
-    role,
-    rootPc,
-    scale,
-    maxUp,
-    maxDown,
-    allowedRels,
-    tuningOffsetCents = 0,
-  } = opts;
-  let { pitchSemitones, stretchMode } = opts;
-  // Melodic / chord: only the recorded fundamental (never spectral centroid guess).
-  const fromMidi =
-    isMelodicRole(role) || role === "chord"
-      ? sampleSourceMidi(sample)
-      : (sampleSourceMidi(sample) ?? sampleDominantMidi(sample));
-  const enforce = shouldEnforceScale(role, sample);
-
-  if (!enforce || fromMidi == null) {
-    const stretchPitch =
-      stretchMode === "resample"
-        ? resampleStretchPitchSemis(opts.fitFactor)
-        : 0;
-    return { pitchSemitones, stretchMode, stretchPitch };
-  }
-
-  let stretchPitch =
-    stretchMode === "resample"
-      ? resampleStretchPitchSemis(opts.fitFactor)
-      : 0;
-
-  // Continuous rate-pitch > ~35¢ reads as out-of-tune even if PC rounds OK.
-  if (stretchMode === "resample" && Math.abs(stretchPitch) >= 0.35) {
-    stretchMode = "preserve-pitch";
-    stretchPitch = 0;
-  }
-
-  const allowed = scaleCompatibleTransposes(
-    fromMidi,
-    rootPc,
-    scale,
-    maxUp,
-    maxDown,
-    stretchPitch,
-    allowedRels,
-    tuningOffsetCents,
-  );
-  pitchSemitones = nearestAllowedTranspose(pitchSemitones, allowed);
-  return { pitchSemitones, stretchMode, stretchPitch };
-}
 
 /**
  * Two length ratios used by stretch / pitch math (must not be swapped):
@@ -2970,53 +1982,6 @@ export function clipStretchFactors(
 export function resampleStretchPitchSemis(fitFactor: number): number {
   if (!(fitFactor > 0) || !Number.isFinite(fitFactor)) return 0;
   return -12 * Math.log2(fitFactor);
-}
-
-/** Keep total perceived pitch (transpose + resample) inside maxUp / maxDown. */
-function constrainStretchToPitchBounds(
-  stretchMode: StretchMode,
-  pitchSemitones: number,
-  /** clip length / natural sample length (ticks), not bpm-adjusted. */
-  fitFactor: number,
-  maxUp: number,
-  maxDown: number,
-  opts: {
-    forbidPitchStretch: boolean;
-    loopish: boolean;
-  },
-): StretchMode {
-  if (stretchMode !== "resample") return stretchMode;
-  const fromStretch = resampleStretchPitchSemis(fitFactor);
-  if (Math.abs(fromStretch) < 0.35) return stretchMode;
-  const total = pitchSemitones + fromStretch;
-  const up = Math.max(0, maxUp);
-  const down = Math.max(0, maxDown);
-  if (total <= up + 0.05 && total >= -down - 0.05) return stretchMode;
-  // Resample would break the pitch window — fall back without rate-pitching.
-  if (!opts.forbidPitchStretch) return "preserve-pitch";
-  if (opts.loopish || fitFactor > 1.08) return "copy";
-  return "off";
-}
-
-/**
- * Cap time-stretch vs sample duration (`fitFactor` = clip / natural).
- * Beyond max enlarge → copy (tile) or off; beyond max shorten → native
- * (truncated). `maxEnlarge` = Infinity / `maxShorten` = 0 means no cap.
- */
-function constrainStretchToDurationRatio(
-  stretchMode: StretchMode,
-  fitFactor: number,
-  maxEnlarge: number,
-  maxShorten: number,
-  loopish: boolean,
-): StretchMode {
-  if (stretchMode === "off" || stretchMode === "copy") return stretchMode;
-  if (!(fitFactor > 0) || !Number.isFinite(fitFactor)) return stretchMode;
-  if (Number.isFinite(maxEnlarge) && fitFactor > maxEnlarge * 1.05) {
-    return loopish || fitFactor > 1.08 ? "copy" : "off";
-  }
-  if (maxShorten > 0 && fitFactor < maxShorten / 1.05) return "off";
-  return stretchMode;
 }
 
 function tempoAlignedForLoop(
@@ -3148,18 +2113,6 @@ function pickLoopContent(opts: {
 
 function stretchWithoutPitchShift(mode: StretchMode): StretchMode {
   return mode === "resample" ? "preserve-pitch" : mode;
-}
-
-/**
- * Drop `preserve-pitch` (UI label "pitch") when forbidden.
- * With pitch lock → `copy` (keep height); else → `resample` (tempo via rate).
- */
-function withoutPreservePitchStretch(
-  mode: StretchMode,
-  lockPitch: boolean,
-): StretchMode {
-  if (mode !== "preserve-pitch") return mode;
-  return lockPitch ? "copy" : "resample";
 }
 
 /** Allowed tempo-rate multiples when pow2 lock is on. */
@@ -3508,24 +2461,10 @@ function beatMs(bpm: number): number {
   return 60_000 / Math.max(1, bpm);
 }
 
-function pickBeatFrac(rnd: () => number, beatFracs: readonly number[]): number {
-  return beatFracs[Math.floor(rnd() * beatFracs.length)] ?? 1;
-}
-
 /**
  * Reverb decay tuned so impulse length ≈ N beats.
  * Engine: durationSec = 0.6 + decay * 2.4 (track-insert).
  */
-function bpmSyncedReverbDecay(
-  bpm: number,
-  rnd: () => number,
-  beatFracs: readonly number[],
-): number {
-  const beatSec = beatMs(bpm) / 1000;
-  const frac = beatFracs[Math.floor(rnd() * beatFracs.length)] ?? 2;
-  const targetSec = beatSec * frac;
-  return clamp((targetSec - 0.6) / 2.4, 0.05, 1);
-}
 
 /** Style-driven FX envelope — damping, wetness, modulation lean. */
 type StyleFxBias = {
@@ -3651,14 +2590,6 @@ function styleFxBias(style: MusicStyleId): StyleFxBias {
         longReverb: false,
       };
   }
-}
-
-function styleDamping(bias: StyleFxBias, rnd: () => number): number {
-  return clamp(
-    bias.dampCenter + (rnd() - 0.5) * 2 * bias.dampSpread,
-    0.05,
-    0.95,
-  );
 }
 
 /** Log-uniform Hz pick (musical for cutoffs). */
@@ -3943,387 +2874,9 @@ function withRoleFilters(
   });
 }
 
-function fxEq(
-  low: number,
-  mid: number,
-  high: number,
-): TrackFx {
-  return normalizeTrackFx({ type: "eq", low, mid, high });
-}
-
-function fxReverb(
-  bpm: number,
-  rnd: () => number,
-  bias: StyleFxBias,
-  mixLo: number,
-  mixHi: number,
-  beatFracs: readonly number[],
-): TrackFx {
-  const fracs = bias.longReverb
-    ? beatFracs.map((f) => f * 1.35)
-    : beatFracs;
-  return normalizeTrackFx({
-    type: "reverb",
-    mix: mixLo + rnd() * (mixHi - mixLo),
-    decay: bpmSyncedReverbDecay(bpm, rnd, fracs),
-    damping: styleDamping(bias, rnd),
-  });
-}
-
-function fxEcho(
-  bpm: number,
-  rnd: () => number,
-  bias: StyleFxBias,
-  mixLo: number,
-  mixHi: number,
-  delayChoices: readonly number[],
-  feedbackLo: number,
-  feedbackHi: number,
-): TrackFx {
-  const delays = bias.longEcho
-    ? [...delayChoices, 1.5, 2, 3].filter((d, i, a) => a.indexOf(d) === i)
-    : delayChoices;
-  const fbBoost = bias.longEcho ? 0.12 : 0;
-  return normalizeTrackFx({
-    type: "echo",
-    mix: mixLo + rnd() * (mixHi - mixLo),
-    delayBeats: pickBeatFrac(rnd, delays),
-    feedback: clamp(
-      feedbackLo + rnd() * (feedbackHi - feedbackLo) + fbBoost,
-      0,
-      0.9,
-    ),
-    damping: styleDamping(bias, rnd),
-  });
-}
-
-function fxChorus(rnd: () => number, bias: StyleFxBias, wet: boolean): TrackFx {
-  const slow = bias.longReverb || bias.dampCenter >= 0.5;
-  return normalizeTrackFx({
-    type: "chorus",
-    mix: (wet ? 0.28 : 0.2) + rnd() * 0.3,
-    rateHz: slow ? 0.25 + rnd() * 1.1 : 0.5 + rnd() * 2.2,
-    depth: 0.3 + rnd() * 0.45,
-  });
-}
-
-function fxTremolo(rnd: () => number, energetic: boolean): TrackFx {
-  return normalizeTrackFx({
-    type: "tremolo",
-    rateHz: energetic ? 4 + rnd() * 6 : 1.5 + rnd() * 4,
-    depth: 0.25 + rnd() * 0.45,
-  });
-}
-
-function fxVibrato(rnd: () => number, lyrical: boolean): TrackFx {
-  return normalizeTrackFx({
-    type: "vibrato",
-    rateHz: lyrical ? 4.5 + rnd() * 3.5 : 3 + rnd() * 5,
-    depth: lyrical ? 0.35 + rnd() * 0.4 : 0.2 + rnd() * 0.35,
-  });
-}
-
-function pickSpaceFx(
-  bpm: number,
-  rnd: () => number,
-  bias: StyleFxBias,
-  mixLo: number,
-  mixHi: number,
-  reverbBeats: readonly number[],
-  echoDelays: readonly number[],
-  echoFb: readonly [number, number],
-): TrackFx {
-  if (rnd() < bias.echoBias) {
-    return fxEcho(
-      bpm,
-      rnd,
-      bias,
-      mixLo,
-      mixHi,
-      echoDelays,
-      echoFb[0],
-      echoFb[1],
-    );
-  }
-  return fxReverb(bpm, rnd, bias, mixLo, mixHi, reverbBeats);
-}
-
-function pickRoleFx(
-  role: ExprRole,
-  bpm: number,
-  energy: number,
-  style: MusicStyleId,
-  rnd: () => number,
-): TrackFx {
-  const bias = styleFxBias(style);
-  const wetP = clamp(bias.wetness * (0.75 + energy * 0.35), 0.08, 0.95);
-  const modP = clamp(bias.modBias * (0.7 + energy * 0.4), 0.05, 0.85);
-  const lyrical =
-    style === "jazz" ||
-    style === "blues" ||
-    style === "folk" ||
-    style === "classical" ||
-    style === "ambient";
-
-  switch (role) {
-    case "kick": {
-      const b = roleEqBands(role, rnd);
-      return fxEq(b.low, b.mid, b.high);
-    }
-    case "hat": {
-      const b = roleEqBands(role, rnd);
-      return fxEq(b.low, b.mid, b.high);
-    }
-    case "bass":
-      // Rare chorus on disco/funk bass; else EQ
-      if (modP > 0.45 && rnd() < 0.22) {
-        return fxChorus(rnd, bias, false);
-      }
-      {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-    case "snare":
-      if (rnd() < wetP * 0.85) {
-        return pickSpaceFx(
-          bpm,
-          rnd,
-          bias,
-          0.14,
-          0.32,
-          [0.75, 1, 1.5],
-          [0.5, 0.75, 1],
-          [0.15, 0.35],
-        );
-      }
-      {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-    case "chord": {
-      const r = rnd();
-      if (r < modP * 0.55) return fxChorus(rnd, bias, true);
-      if (r < wetP * 0.85) {
-        return fxReverb(bpm, rnd, bias, 0.22, 0.45, [1.5, 2, 3]);
-      }
-      {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-    }
-    case "lead":
-    case "arp": {
-      const r = rnd();
-      if (r < wetP * bias.echoBias * 0.85) {
-        return fxEcho(
-          bpm,
-          rnd,
-          bias,
-          0.18,
-          0.4,
-          [0.5, 0.75, 1, 1.5],
-          0.2,
-          0.45,
-        );
-      }
-      if (r < wetP * bias.echoBias * 0.85 + modP * 0.4) {
-        return lyrical || rnd() < 0.55
-          ? fxVibrato(rnd, lyrical)
-          : fxTremolo(rnd, energy > 0.6);
-      }
-      if (r < wetP * bias.echoBias * 0.85 + modP * 0.85) {
-        return fxChorus(rnd, bias, true);
-      }
-      if (r < wetP * 0.9 + modP * 0.25) {
-        return fxReverb(bpm, rnd, bias, 0.16, 0.38, [1, 1.5, 2]);
-      }
-      {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-    }
-    case "texture": {
-      const r = rnd();
-      // Prefer mild EQ seat more often so beds don't all occupy the same band.
-      if (r < 0.32) {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-      if (r < 0.32 + modP * 0.45) return fxChorus(rnd, bias, true);
-      if (r < 0.32 + modP * 0.45 + wetP * 0.22) {
-        return fxEcho(
-          bpm,
-          rnd,
-          bias,
-          0.22,
-          0.45,
-          [1, 1.5, 2, 3],
-          0.25,
-          0.5,
-        );
-      }
-      return fxReverb(bpm, rnd, bias, 0.35, 0.65, [3, 4, 6]);
-    }
-    case "loop": {
-      const r = rnd();
-      if (r < 0.38) {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-      if (r < 0.38 + modP * 0.4) return fxTremolo(rnd, energy > 0.55);
-      if (r < 0.38 + modP * 0.4 + wetP * 0.35) {
-        return pickSpaceFx(
-          bpm,
-          rnd,
-          bias,
-          0.15,
-          0.35,
-          [1, 1.5, 2.5],
-          [0.5, 1, 1.5],
-          [0.15, 0.35],
-        );
-      }
-      if (r < 0.38 + modP * 0.4 + wetP * 0.35 + modP * 0.2) {
-        return fxChorus(rnd, bias, false);
-      }
-      {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-    }
-    case "perc":
-      if (rnd() < wetP * 0.45) {
-        return fxEcho(
-          bpm,
-          rnd,
-          bias,
-          0.12,
-          0.3,
-          [0.25, 0.5, 0.75],
-          0.15,
-          0.35,
-        );
-      }
-      if (rnd() < modP * 0.2) return fxTremolo(rnd, true);
-      {
-        const b = roleEqBands(role, rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-    case "fx":
-    default: {
-      const r = rnd();
-      if (r < 0.28) {
-        const b = roleEqBands("fx", rnd);
-        return fxEq(b.low, b.mid, b.high);
-      }
-      if (r < 0.28 + wetP * bias.echoBias) {
-        return fxEcho(
-          bpm,
-          rnd,
-          bias,
-          0.25,
-          0.55,
-          [1, 1.5, 2, 3],
-          0.28,
-          0.55,
-        );
-      }
-      if (r < 0.28 + wetP * bias.echoBias + modP * 0.5) {
-        const m = rnd();
-        if (m < 0.45) return fxChorus(rnd, bias, true);
-        if (m < 0.75) return fxTremolo(rnd, energy > 0.5);
-        return fxVibrato(rnd, lyrical);
-      }
-      return fxReverb(bpm, rnd, bias, 0.3, 0.6, [2, 3, 5]);
-    }
-  }
-}
-
-function pickTrackMix(
-  role: ExprRole,
-  trackIndex: number,
-  trackCount: number,
-  energy: number,
-  bpm: number,
-  style: MusicStyleId,
-  rnd: () => number,
-): Omit<SequenceTrackPlan, "trackId"> {
-  const spread =
-    trackCount <= 1 ? 0 : ((trackIndex / (trackCount - 1)) * 2 - 1) * 0.55;
-  const panJitter = (rnd() - 0.5) * 0.15;
-  const pan = clamp(spread + panJitter, -1, 1);
-  const eGain = (energy - 0.5) * 2;
-  const fx = pickRoleFx(role, bpm, energy, style, rnd);
-
-  switch (role) {
-    case "kick":
-      return {
-        gainDb: 0.5 + rnd() * 1.5 + eGain,
-        pan: clamp(pan * 0.15, -0.2, 0.2),
-        fx,
-      };
-    case "snare":
-      return {
-        gainDb: -1 + rnd() * 1.5 + eGain * 0.5,
-        pan: clamp(pan * 0.4, -0.35, 0.35),
-        fx,
-      };
-    case "hat":
-      return {
-        gainDb: -4 + rnd() * 2,
-        pan: clamp(pan, -0.7, 0.7),
-        fx,
-      };
-    case "bass":
-      return {
-        gainDb: rnd() * 1.5 + eGain * 0.5,
-        pan: clamp(pan * 0.2, -0.25, 0.25),
-        fx,
-      };
-    case "chord":
-      return {
-        gainDb: -2 + rnd() * 1.5,
-        pan: clamp(pan, -0.55, 0.55),
-        fx,
-      };
-    case "lead":
-    case "arp":
-      return {
-        gainDb: -1 + rnd() * 2 + eGain * 0.4,
-        pan: clamp(pan, -0.6, 0.6),
-        fx,
-      };
-    case "texture":
-      return {
-        gainDb: -5 + rnd() * 2.5 - (1 - energy),
-        pan: clamp(pan, -0.8, 0.8),
-        fx,
-      };
-    case "loop":
-      return {
-        gainDb: -2.5 + rnd() * 2,
-        pan: clamp(pan * 0.7, -0.5, 0.5),
-        fx,
-      };
-    case "perc":
-      return {
-        gainDb: -2 + rnd() * 2 + eGain * 0.3,
-        pan: clamp(pan, -0.75, 0.75),
-        fx,
-      };
-    case "fx":
-    default:
-      return {
-        gainDb: -3 + rnd() * 2.5,
-        pan: clamp(pan, -0.85, 0.85),
-        fx,
-      };
-  }
-}
-
 /**
  * Plan a full multi-track sequence over `bars`, drawing from the library.
- * Facade: UI opts → ComposeSettings → compose() → renderScore().
+ * Facade: UI opts → ComposeSettings → compose() → realizeComposerScore().
  */
 export function planSequence(opts: {
   bars: number;
@@ -4342,8 +2895,11 @@ export function planSequence(opts: {
   scaleMode?: GenScaleMode;
   palette?: GenPaletteChoice;
   formStyle?: GenFormStyle;
+  energyShape?: GenEnergyShape;
   humanize?: number | GenAuto;
   variation?: number | GenAuto;
+  life?: number | GenAuto;
+  space?: number | GenAuto;
   sampleVariety?: number | GenAuto;
   bpmSync?: GenTriState;
   reverse?: GenTriState;
@@ -4358,14 +2914,20 @@ export function planSequence(opts: {
   stretchUpRatio?: number | GenAuto;
   stretchDownRatio?: number | GenAuto;
   tuningRef?: TuningRefMode;
+  /** Precomputed onset→grid genes (async extract outside). */
+  sampleGenes?: RhythmGene[];
+  grooveFromSamples?: GrooveFromSamples;
+  locks?: ComposeLock[];
+  regenSalt?: string;
 }): SequencePlanResult {
   return planSequenceComposer(opts);
 }
 
 function mapFormFamily(formStyle: GenFormStyle): FormFamily | "auto" {
+  if (formStyle === "auto") return "auto";
   if (formStyle === "song") return "verse-chorus";
   if (formStyle === "ambient") return "loop-evolve";
-  return "auto";
+  return formStyle;
 }
 
 function mapMode(scaleMode: GenScaleMode): ModeId | "auto" {
@@ -4378,6 +2940,347 @@ function grooveToSwing(groove: GrooveKind): number {
   if (groove === "shuffle") return 0.58;
   if (groove === "half-time") return 0.2;
   return 0.05;
+}
+
+/** Map composer section kinds onto classic-song home-sample buckets. */
+function mapComposerSectionKind(kind: string): SectionKind {
+  if (kind === "build") return "prechorus";
+  if (kind === "drop") return "chorus";
+  if (kind === "break") return "bridge";
+  if (
+    kind === "intro" ||
+    kind === "verse" ||
+    kind === "prechorus" ||
+    kind === "chorus" ||
+    kind === "bridge" ||
+    kind === "outro"
+  ) {
+    return kind;
+  }
+  return "verse";
+}
+
+/**
+ * Realize a composer Score with the legacy sample / stretch / fade stack
+ * (home sample per section kind, spectral seat, exact float pitch).
+ */
+function realizeComposerScore(
+  score: Score,
+  opts: {
+    tracks: Array<{ id: string; index: number }>;
+    samples: SequenceSampleIn[];
+    ppq: number;
+    bpm: number;
+    beatsPerBar: number;
+    lockPitch: boolean;
+    pitchUpSemitones: number;
+    pitchDownSemitones: number;
+    tuningOffsetCents: number;
+    sampleVariety: number;
+    energy: number;
+    variation: number;
+    musicStyle: MusicStyleId;
+  },
+): SequencePlanResult {
+  const {
+    tracks,
+    samples,
+    ppq,
+    bpm,
+    beatsPerBar,
+    lockPitch,
+    pitchUpSemitones: maxUp,
+    pitchDownSemitones: maxDown,
+    tuningOffsetCents,
+    sampleVariety,
+    energy,
+    variation,
+    musicStyle,
+  } = opts;
+  const rnd = mulberry32(score.dna.seed ^ 0x5eed5a17);
+  const srcPpq = CORE_PPQ;
+  const tickScale = ppq / srcPpq;
+  const toProjectTick = (t: number) => Math.max(0, Math.round(t * tickScale));
+  const tpbSrc = srcPpq * 4;
+
+  const tracksByIndex = [...tracks].sort((a, b) => a.index - b.index);
+  const trackIdFor = (trackIndex: number): string => {
+    const byIndex = tracks.find((t) => t.index === trackIndex);
+    if (byIndex) return byIndex.id;
+    return tracksByIndex[trackIndex % tracksByIndex.length]?.id ?? tracks[0]!.id;
+  };
+
+  const spectralOccupied: SpectralOccupancy[] = [];
+  const homeByRoleKind = new Map<string, Map<SectionKind, SequenceSampleIn>>();
+  const warnings = [...score.warnings];
+
+  const mixByIndex = new Map(score.mix.tracks.map((t) => [t.trackIndex, t]));
+  const trackPlans: SequenceTrackPlan[] = [];
+  const seenTrack = new Set<string>();
+
+  for (const part of score.parts) {
+    const id = trackIdFor(part.trackIndex);
+    if (seenTrack.has(id)) continue;
+    seenTrack.add(id);
+    const mix = mixByIndex.get(part.trackIndex);
+    const pool = rankSamplesForRole(samples, part.role, rnd, sampleVariety);
+    const homeKind = mapComposerSectionKind(
+      score.sections[0]?.kind ?? "verse",
+    );
+    const homeMap =
+      homeByRoleKind.get(part.role) ?? new Map<SectionKind, SequenceSampleIn>();
+    homeByRoleKind.set(part.role, homeMap);
+    let home: SequenceSampleIn | undefined;
+    if (pool.length > 0) {
+      home = pickHomeSampleForKind(
+        homeKind,
+        part.role,
+        pool,
+        homeMap,
+        spectralOccupied,
+        rnd,
+        sampleVariety,
+      );
+      registerSpectralOccupancy(spectralOccupied, part.role, home);
+    }
+    let fx = (mix?.insert as TrackFx) ?? { ...DEFAULT_TRACK_FX };
+    fx = withSpectralTrackEq(fx, part.role, home, rnd);
+    fx = withRoleFilters(fx, part.role, musicStyle, energy, home, rnd);
+    trackPlans.push({
+      trackId: id,
+      gainDb: mix?.levelDb ?? 0,
+      pan: mix?.pan ?? 0,
+      fx: normalizeTrackFx(fx),
+      sendA: mix?.sendA ?? 0,
+      sendB: mix?.sendB ?? 0,
+    });
+  }
+  for (const tr of tracks) {
+    if (seenTrack.has(tr.id)) continue;
+    trackPlans.push({
+      trackId: tr.id,
+      gainDb: 0,
+      pan: 0,
+      fx: normalizeTrackFx({ ...DEFAULT_TRACK_FX }),
+    });
+  }
+
+  const sectionAt = (tick: number) => {
+    const bar = Math.floor(tick / tpbSrc);
+    for (const s of score.sections) {
+      if (bar >= s.startBar && bar < s.startBar + s.bars) return s;
+    }
+    return score.sections[score.sections.length - 1];
+  };
+
+  const clips: SequenceClipPlan[] = [];
+  for (const part of score.parts) {
+    const pool = rankSamplesForRole(samples, part.role, rnd, sampleVariety);
+    if (pool.length === 0) continue;
+    const homeMap =
+      homeByRoleKind.get(part.role) ?? new Map<SectionKind, SequenceSampleIn>();
+    homeByRoleKind.set(part.role, homeMap);
+    const trackId = trackIdFor(part.trackIndex);
+    const mix = mixByIndex.get(part.trackIndex);
+    const events = [...part.events].sort((a, b) => a.tick - b.tick);
+
+    for (let ei = 0; ei < events.length; ei++) {
+      const ev = events[ei]!;
+      const sec = sectionAt(ev.tick);
+      const kind = mapComposerSectionKind(sec?.kind ?? "verse");
+      const homeWasNew = !homeMap.has(kind);
+      const sample = pickHomeSampleForKind(
+        kind,
+        part.role,
+        pool,
+        homeMap,
+        spectralOccupied,
+        rnd,
+        sampleVariety,
+      );
+      if (homeWasNew) {
+        registerSpectralOccupancy(spectralOccupied, part.role, sample);
+      }
+
+      let pitchSemitones = 0;
+      let stretchPitch = 0;
+      if (!lockPitch && ev.midi != null) {
+        const source = sampleSourceMidi(sample);
+        if (source != null) {
+          pitchSemitones = exactPitchSemitones(
+            ev.midi,
+            source,
+            0,
+            tuningOffsetCents,
+          );
+          if (pitchSemitones > maxUp || pitchSemitones < -maxDown) {
+            let folded = pitchSemitones;
+            while (folded > maxUp) folded -= 12;
+            while (folded < -maxDown) folded += 12;
+            if (folded > maxUp || folded < -maxDown) {
+              warnings.push(
+                `render: drop note ${part.role}@${ev.tick} (pitch window)`,
+              );
+              continue;
+            }
+            pitchSemitones = folded;
+          }
+        }
+      }
+
+      const nextTick = events[ei + 1]?.tick ?? null;
+      const startTick = toProjectTick(ev.tick);
+      const barTick = toProjectTick(
+        Math.floor(ev.tick / tpbSrc) * tpbSrc,
+      );
+      const durScaled = Math.max(
+        Math.floor(ppq / 8),
+        toProjectTick(ev.durTick),
+      );
+      // Length from partition duration, refined by role helpers.
+      const lengthTick = pickLengthTick({
+        sample,
+        role: part.role,
+        startTick,
+        nextTick: nextTick != null ? toProjectTick(nextTick) : null,
+        barTick,
+        ticksPerBar: ppq * beatsPerBar,
+        bpm,
+        ppq,
+        section: {
+          kind,
+          startBar: sec?.startBar ?? 0,
+          bars: sec?.bars ?? 4,
+          densityMul: 1,
+          gainBiasDb: 0,
+          evolve: 0,
+          fillLastBar: ev.tag === "fill",
+          altSample: false,
+        },
+        bpmLengthFactor: 1,
+        stutter: false,
+        energy: sec?.energy ?? energy,
+        rnd,
+      });
+      // Prefer partition duration when it is tighter than the role heuristic.
+      const useLen = Math.min(durScaled, lengthTick);
+      const natural = Math.max(
+        Math.floor(ppq / 4),
+        Math.round(msToLengthTick(sample.durationMs, bpm, ppq)),
+      );
+      const lengthFactor = useLen / Math.max(1, natural);
+      const stretchMode = pickStretchMode({
+        sample,
+        role: part.role,
+        lengthFactor,
+        pitchSemitones,
+        bpmSync: null,
+        energy: sec?.energy ?? energy,
+        stutter: false,
+        lockPitch,
+        allowResamplePitch: !lockPitch && Math.abs(pitchSemitones) < 0.01,
+        rnd,
+      });
+      if (stretchMode === "resample") {
+        stretchPitch = resampleStretchPitchSemis(lengthFactor);
+        if (!lockPitch && ev.midi != null) {
+          const source = sampleSourceMidi(sample);
+          if (source != null) {
+            pitchSemitones = exactPitchSemitones(
+              ev.midi,
+              source,
+              stretchPitch,
+              tuningOffsetCents,
+            );
+          }
+        }
+      }
+
+      const lengthMs = (useLen / ppq) * (60_000 / Math.max(1, bpm));
+      const fades = pickFades({
+        sample,
+        role: part.role,
+        lengthMs,
+        stretchMode,
+        accent: ev.accent,
+        energy: sec?.energy ?? energy,
+        stutter: false,
+        rnd,
+      });
+      const loop = pickLoopContent({
+        sample,
+        role: part.role,
+        lengthMs,
+        bpm,
+        beatsPerBar,
+        loopEnabled:
+          part.role === "loop" ||
+          part.role === "texture" ||
+          (sample.loopScore ?? 0) > 0.55,
+        stretchMode,
+        energy: sec?.energy ?? energy,
+        variation,
+        rnd,
+      });
+
+      const gainDb = Math.min(
+        6,
+        Math.max(
+          -24,
+          (ev.accent ? 0.5 : 0) +
+            20 * Math.log10(Math.max(0.05, ev.vel)),
+        ),
+      );
+
+      clips.push({
+        trackId,
+        sampleId: sample.id,
+        startTick,
+        lengthTick: Math.max(Math.floor(ppq / 8), useLen),
+        contentOffsetMs: loop.contentOffsetMs,
+        gainDb,
+        loopEnabled: loop.loopEnabled,
+        loopLengthMs: loop.loopLengthMs,
+        fadeInMs: fades.fadeInMs,
+        fadeOutMs: fades.fadeOutMs,
+        fadeCurve: fades.fadeCurve,
+        pitchSemitones,
+        stretchMode,
+        reverse: ev.tag === "riser",
+      });
+    }
+  }
+
+  const primary = score.parts.find((p) => p.role === "lead");
+  const ensembleSummary: SequenceEnsembleSummary | undefined = primary
+    ? {
+        relationMode: "auto",
+        relations: score.parts.map((p) => p.relation ?? "independent"),
+        primaryLeadTrack: primary.trackIndex,
+      }
+    : undefined;
+
+  return {
+    clips,
+    tracks: trackPlans,
+    ensemble: ensembleSummary,
+    automation: score.automation.map((lane) => ({
+      ...lane,
+      points: lane.points.map((p) => ({
+        ...p,
+        tick: toProjectTick(p.tick),
+      })),
+    })),
+    sends: score.mix.tracks.map((t) => ({
+      trackId: trackIdFor(t.trackIndex),
+      a: t.sendA,
+      b: t.sendB,
+    })),
+    spaces: score.mix.spaces as SpacePlan,
+    master: score.mix.master as MasterPlan,
+    score,
+    warnings,
+  };
 }
 
 /** UI → compose + render (hierarchical composer). */
@@ -4397,14 +3300,21 @@ export function planSequenceComposer(opts: {
   groove?: GenGrooveChoice;
   scaleMode?: GenScaleMode;
   formStyle?: GenFormStyle;
+  energyShape?: GenEnergyShape;
   humanize?: number | GenAuto;
   variation?: number | GenAuto;
+  life?: number | GenAuto;
+  space?: number | GenAuto;
   sampleVariety?: number | GenAuto;
   ensembleRelation?: GenEnsembleRelation;
   lockPitch?: GenTriState;
   pitchUpSemitones?: number | GenAuto;
   pitchDownSemitones?: number | GenAuto;
   tuningRef?: TuningRefMode;
+  sampleGenes?: RhythmGene[];
+  grooveFromSamples?: GrooveFromSamples;
+  locks?: ComposeLock[];
+  regenSalt?: string;
 }): SequencePlanResult {
   const { bars, ppq, bpm, seed, tracks, samples } = opts;
   if (bars < 1 || tracks.length === 0 || samples.length === 0) {
@@ -4427,6 +3337,7 @@ export function planSequenceComposer(opts: {
   const yamnetPool = enriched.flatMap((s) => s.yamnet ?? []);
   const musicStyle = pickMusicStyle(opts.musicStyle, rnd, yamnetPool);
   const styleProfile = MUSIC_STYLE_PROFILES[musicStyle];
+  const genProfile = STYLE_GENERATOR_PROFILES[musicStyle];
 
   const density = resolveStyleBiasedSlider(
     opts.density,
@@ -4434,7 +3345,7 @@ export function planSequenceComposer(opts: {
     0.35,
     1.5,
     1,
-    styleProfile.densityCenter,
+    genProfile.densityCenter,
   );
   const energy = resolveStyleBiasedSlider(
     opts.energy,
@@ -4442,7 +3353,7 @@ export function planSequenceComposer(opts: {
     0,
     1,
     0.55,
-    styleProfile.energyCenter,
+    genProfile.energyCenter,
   );
   const drumsVsTexture = resolveStyleBiasedSlider(
     opts.drumsVsTexture,
@@ -4450,22 +3361,22 @@ export function planSequenceComposer(opts: {
     0,
     1,
     0.55,
-    styleProfile.drumsCenter,
+    genProfile.drumsCenter,
   );
   const groove: GrooveKind =
     opts.groove === "auto"
-      ? pickGroove(rnd, styleProfile.groove)
+      ? pickGroove(rnd, genProfile.grooveFeel)
       : (opts.groove ?? styleProfile.groove);
   const humanize =
     opts.humanize === undefined
-      ? (styleProfile.humanizeCenter ?? 1)
+      ? genProfile.humanizeCenter
       : resolveStyleBiasedSlider(
           opts.humanize,
           rnd,
           0,
           1,
-          styleProfile.humanizeCenter ?? 1,
-          styleProfile.humanizeCenter,
+          genProfile.humanizeCenter,
+          genProfile.humanizeCenter,
         );
   const variation = resolveStyleBiasedSlider(
     opts.variation,
@@ -4475,6 +3386,27 @@ export function planSequenceComposer(opts: {
     0.32,
     0.32,
   );
+  const spaceCenter = clamp(
+    genProfile.spaceCenter * 0.65 + (1 - drumsVsTexture) * 0.35,
+    0,
+    1,
+  );
+  const life = resolveStyleBiasedSlider(
+    opts.life,
+    rnd,
+    0,
+    1,
+    genProfile.lifeCenter,
+    genProfile.lifeCenter,
+  );
+  const space = resolveStyleBiasedSlider(
+    opts.space,
+    rnd,
+    0,
+    1,
+    spaceCenter,
+    spaceCenter,
+  );
   const scaleMode: GenScaleMode =
     opts.scaleMode && opts.scaleMode !== "auto"
       ? opts.scaleMode
@@ -4482,6 +3414,7 @@ export function planSequenceComposer(opts: {
         ? styleProfile.scaleBias
         : (opts.scaleMode ?? "auto");
   const formStyle: GenFormStyle = opts.formStyle ?? "auto";
+  const energyShape: GenEnergyShape = opts.energyShape ?? "auto";
   const lockPitch = opts.lockPitch === "on";
   const resolvePitchBound = (v: number | GenAuto | undefined): number => {
     if (v === "auto" || v == null || !Number.isFinite(v)) return 12;
@@ -4500,25 +3433,50 @@ export function planSequenceComposer(opts: {
   const tuningRef = opts.tuningRef ?? "auto";
   const tuningOffsetCents = resolveTuningOffsetCents(tuningRef, enriched);
 
+  let trackRoles = assignTrackRoles(
+    tracks.length,
+    enriched,
+    rnd,
+    drumsVsTexture,
+  );
+  // Always keep ≥1 bed layer when ≥4 tracks so intro/outro are not empty shells.
+  const hasBed = trackRoles.some(
+    (r) =>
+      r === "texture" || r === "loop" || r === "fx" || r === "chord",
+  );
+  if (!hasBed && trackRoles.length >= 4) {
+    trackRoles = [...trackRoles];
+    const swapAt = Math.max(1, trackRoles.length - 1);
+    trackRoles[swapAt] = "texture";
+  }
+
   const settings: ComposeSettings = {
     seed,
     style: musicStyle,
     targetBars: bars,
     formFamily: mapFormFamily(formStyle),
-    energyShape: "auto",
+    energyShape,
     energy,
     density,
     drumsVsTexture,
     variation,
-    life: energy,
-    space: clamp(0.25 + (1 - drumsVsTexture) * 0.5, 0, 1),
-    swing: grooveToSwing(groove),
+    life,
+    space,
+    swing:
+      opts.groove === "auto" || opts.groove == null
+        ? genProfile.swing
+        : grooveToSwing(groove),
     humanize,
     keyPc,
     mode: mapMode(scaleMode),
     tuningRef,
     targetLufs: -14,
     lockPitch,
+    trackRoles,
+    sampleGenes: opts.sampleGenes,
+    grooveFromSamples: opts.grooveFromSamples ?? "auto",
+    locks: opts.locks,
+    regenSalt: opts.regenSalt,
   };
 
   const { score } = compose(settings);
@@ -4531,18 +3489,20 @@ export function planSequenceComposer(opts: {
     humanizeMs: humanize * 20,
   };
 
-  const result = renderScore(score, {
+  const result = realizeComposerScore(score, {
     tracks,
     samples: enriched,
     ppq,
     bpm,
+    beatsPerBar: opts.beatsPerBar,
     lockPitch,
     pitchUpSemitones,
     pitchDownSemitones,
     tuningOffsetCents,
-    sampleSourceMidi,
-    exactPitchSemitones,
-    resolveExprRole,
+    sampleVariety,
+    energy,
+    variation,
+    musicStyle,
   });
 
   if (result.ensemble) {
@@ -4551,1138 +3511,10 @@ export function planSequenceComposer(opts: {
       relationMode: opts.ensembleRelation ?? "auto",
     };
   }
+  const mixWarnings = mixcheckPlan(result);
+  if (mixWarnings.length > 0) {
+    result.warnings = [...(result.warnings ?? []), ...mixWarnings];
+  }
   return result;
 }
 
-/**
- * Legacy planner (pre-composer). Kept for A-B until cleanup.
- */
-export function planSequenceLegacy(opts: {
-  bars: number;
-  beatsPerBar: number;
-  ppq: number;
-  bpm: number;
-  seed: number;
-  tracks: Array<{ id: string; index: number }>;
-  samples: SequenceSampleIn[];
-  /** Genre / pattern bank, or `"auto"` (infer from YAMNet / seed). */
-  musicStyle?: GenMusicStyleChoice;
-  /** Pitch-class 0–11, or `"auto"` / omit → infer from library. */
-  keyRootPc?: number | GenAuto;
-  /** Hit keep multiplier (0.35–1.5), or `"auto"`. Default 1. */
-  density?: number | GenAuto;
-  /** Dynamics / fills / expressivity (0–1), or `"auto"`. Default 0.55. */
-  energy?: number | GenAuto;
-  /** 0 = textures/field, 1 = drums/kit, or `"auto"`. Default 0.55. */
-  drumsVsTexture?: number | GenAuto;
-  groove?: GenGrooveChoice;
-  scaleMode?: GenScaleMode;
-  palette?: GenPaletteChoice;
-  formStyle?: GenFormStyle;
-  /** Timing jitter strength (0–1), or `"auto"`. */
-  humanize?: number | GenAuto;
-  /** Motif evolve / fill ornaments (0–1), or `"auto"`. Home samples stay pinned. */
-  variation?: number | GenAuto;
-  /**
-   * How far the seed explores the library (0–1), or `"auto"`.
-   * 0 = greedy best-fit (same voices across seeds); 1 = wide mix.
-   */
-  sampleVariety?: number | GenAuto;
-  bpmSync?: GenTriState;
-  reverse?: GenTriState;
-  stutter?: GenTriState;
-  callResponse?: GenTriState;
-  /**
-   * Melodic follower arrangement vs lead: lock / respond / kinship, or auto.
-   */
-  ensembleRelation?: GenEnsembleRelation;
-  /**
-   * Keep native sample pitch: no semitone transpose, no resample stretch,
-   * no melody/chord tone targeting. `"auto"` / `"off"` = unlocked.
-   */
-  lockPitch?: GenTriState;
-  /**
-   * Max upward transpose in semitones (0–24), or `"auto"` → 12.
-   * Ignored when lockPitch is on.
-   */
-  pitchUpSemitones?: number | GenAuto;
-  /**
-   * Max downward transpose in semitones (0–24), or `"auto"` → 12.
-   * Ignored when lockPitch is on.
-   */
-  pitchDownSemitones?: number | GenAuto;
-  /**
-   * Constrain tempo adapts to ×¼, ×½, ×1, ×2, ×4, ×8 only (snap BPM sync /
-   * rate changes). `"auto"` / `"off"` = free ratio.
-   */
-  lockTempoPow2?: GenTriState;
-  /**
-   * Forbid stretch mode `preserve-pitch` (UI: "pitch"). Falls back to `copy`
-   * when pitch is locked, else `resample`. `"on"` / `"off"` (default off).
-   */
-  forbidPitchStretch?: GenTriState;
-  /**
-   * Max time-stretch enlargement (clip duration / sample duration).
-   * `"auto"` = no cap.
-   */
-  stretchUpRatio?: number | GenAuto;
-  /**
-   * Min time-stretch factor (clip duration / sample duration).
-   * `"auto"` = no cap. `1` = no shortening; `0.5` = at most twice as short.
-   */
-  stretchDownRatio?: number | GenAuto;
-  /**
-   * Tuning reference: A440, library median, or auto (§5bis).
-   * Default `"auto"`.
-   */
-  tuningRef?: TuningRefMode;
-}): SequencePlanResult {
-  const { bars, beatsPerBar, ppq, bpm, seed, tracks, samples } = opts;
-  if (bars < 1 || tracks.length === 0 || samples.length === 0) {
-    return { clips: [], tracks: [] };
-  }
-
-  const rnd = mulberry32(seed);
-  const sampleVariety = resolveStyleBiasedSlider(
-    opts.sampleVariety,
-    rnd,
-    0,
-    1,
-    0.45,
-    0.45,
-  );
-  const enriched = withClapCohesion(
-    samples,
-    sampleVariety > 0.2 ? rnd : undefined,
-  );
-  const yamnetPool = enriched.flatMap((s) => s.yamnet ?? []);
-  const musicStyle = pickMusicStyle(opts.musicStyle, rnd, yamnetPool);
-  const styleProfile = MUSIC_STYLE_PROFILES[musicStyle];
-
-  const density = resolveStyleBiasedSlider(
-    opts.density,
-    rnd,
-    0.35,
-    1.5,
-    1,
-    styleProfile.densityCenter,
-  );
-  const energy = resolveStyleBiasedSlider(
-    opts.energy,
-    rnd,
-    0,
-    1,
-    0.55,
-    styleProfile.energyCenter,
-  );
-  const drumsVsTexture = resolveStyleBiasedSlider(
-    opts.drumsVsTexture,
-    rnd,
-    0,
-    1,
-    0.55,
-    styleProfile.drumsCenter,
-  );
-  const groove: GrooveKind =
-    opts.groove === "auto"
-      ? pickGroove(rnd, styleProfile.groove)
-      : (opts.groove ?? styleProfile.groove);
-  const humanize =
-    opts.humanize === undefined
-      ? (styleProfile.humanizeCenter ?? 1)
-      : resolveStyleBiasedSlider(
-          opts.humanize,
-          rnd,
-          0,
-          1,
-          styleProfile.humanizeCenter ?? 1,
-          styleProfile.humanizeCenter,
-        );
-  // Bias toward familiarity: auto stays near ~0.32 (ornaments, not sample churn).
-  const variation = resolveStyleBiasedSlider(
-    opts.variation,
-    rnd,
-    0,
-    1,
-    0.32,
-    0.32,
-  );
-  const scaleMode: GenScaleMode =
-    opts.scaleMode && opts.scaleMode !== "auto"
-      ? opts.scaleMode
-      : styleProfile.scaleBias && rnd() < 0.75
-        ? styleProfile.scaleBias
-        : (opts.scaleMode ?? "auto");
-  const formStyle: GenFormStyle = opts.formStyle ?? "auto";
-  const bpmSyncMode: GenTriState = opts.bpmSync ?? "auto";
-  const reverseMode: GenTriState = opts.reverse ?? "auto";
-  const stutterMode: GenTriState = opts.stutter ?? "auto";
-  const callResponseMode: GenTriState = opts.callResponse ?? "auto";
-  const ensembleRelation: GenEnsembleRelation =
-    opts.ensembleRelation === "lock" ||
-    opts.ensembleRelation === "respond" ||
-    opts.ensembleRelation === "kinship"
-      ? opts.ensembleRelation
-      : "auto";
-  const lockPitch = opts.lockPitch === "on";
-  const lockTempoPow2 = opts.lockTempoPow2 === "on";
-  const forbidPitchStretch = opts.forbidPitchStretch === "on";
-  const resolvePitchBound = (v: number | GenAuto | undefined): number => {
-    if (v === "auto" || v == null || !Number.isFinite(v)) return 12;
-    return Math.round(clamp(v, 0, 24));
-  };
-  const stretchUpRatio =
-    opts.stretchUpRatio === "auto" ||
-    opts.stretchUpRatio == null ||
-    !Number.isFinite(opts.stretchUpRatio)
-      ? Infinity
-      : clamp(opts.stretchUpRatio, 1, 16);
-  const stretchDownRatio =
-    opts.stretchDownRatio === "auto" ||
-    opts.stretchDownRatio == null ||
-    !Number.isFinite(opts.stretchDownRatio)
-      ? 0
-      : clamp(opts.stretchDownRatio, 1 / 16, 1);
-  const pitchUpSemitones = lockPitch ? 0 : resolvePitchBound(opts.pitchUpSemitones);
-  const pitchDownSemitones = lockPitch
-    ? 0
-    : resolvePitchBound(opts.pitchDownSemitones);
-  const allowEmptyKit =
-    musicStyle === "classical" || musicStyle === "ambient";
-
-  const ticksPerBar = beatsPerBar * ppq;
-  const seqEnd = bars * ticksPerBar;
-  const pool = [...enriched].sort((a, b) => {
-    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
-    const ai = a.interestScore ?? -1;
-    const bi = b.interestScore ?? -1;
-    if (ai !== bi) return bi - ai;
-    const ar = a.rating ?? 0;
-    const br = b.rating ?? 0;
-    if (ar !== br) return br - ar;
-    const ac = a.clapCohesion ?? -1;
-    const bc = b.clapCohesion ?? -1;
-    if (ac !== bc) return bc - ac;
-    // Prefer analysed / tagged samples when ranking the pool
-    const aMeta =
-      (a.analysisBpm != null ? 1 : 0) +
-      (a.pitchHz != null || a.noteName ? 1 : 0) +
-      ((a.yamnet?.length ?? 0) > 0 ? 1 : 0) +
-      (a.clapVector?.length ? 1 : 0) +
-      (a.stem ? 1 : 0);
-    const bMeta =
-      (b.analysisBpm != null ? 1 : 0) +
-      (b.pitchHz != null || b.noteName ? 1 : 0) +
-      ((b.yamnet?.length ?? 0) > 0 ? 1 : 0) +
-      (b.clapVector?.length ? 1 : 0) +
-      (b.stem ? 1 : 0);
-    if (aMeta !== bMeta) return bMeta - aMeta;
-    return a.id.localeCompare(b.id);
-  });
-
-  const rootPc = lockPitch
-    ? 0
-    : opts.keyRootPc == null || opts.keyRootPc === "auto"
-      ? inferKeyRootPc(pool)
-      : ((Math.round(opts.keyRootPc) % 12) + 12) % 12;
-  const tuningOffsetCents = lockPitch
-    ? 0
-    : resolveTuningOffsetCents(opts.tuningRef ?? "auto", pool);
-  const scale = lockPitch
-    ? MAJOR_SCALE
-    : pickScale(pool, rootPc, rnd, scaleMode);
-  const sections = planSongForm(bars, rnd, {
-    drumsVsTexture,
-    energy,
-    formStyle,
-    formLean: styleProfile.formLean,
-  });
-  const chordTimeline = lockPitch
-    ? []
-    : buildSectionHarmonyTimeline(
-        bars,
-        sections.map((s) => ({
-          kind: s.kind,
-          startBar: s.startBar,
-          bars: s.bars,
-        })),
-        paletteFromMix(
-          drumsVsTexture,
-          rnd,
-          opts.palette,
-          styleProfile.palette,
-        ),
-        scale === MINOR_SCALE,
-        rnd,
-      );
-
-  const sortedTracks = [...tracks].sort((a, b) => a.index - b.index);
-  const roles = assignTrackRoles(
-    sortedTracks.length,
-    pool,
-    rnd,
-    drumsVsTexture,
-  );
-  const trackPlans: SequenceTrackPlan[] = sortedTracks.map((track, ti) => {
-    const role = roles[ti] ?? "perc";
-    const mix = pickTrackMix(
-      role,
-      ti,
-      sortedTracks.length,
-      energy,
-      bpm,
-      musicStyle,
-      rnd,
-    );
-    return { trackId: track.id, ...mix };
-  });
-
-  // Melodic ensemble: lock / respond / kinship (skill glane-arranger).
-  const ensemblePlan = ensemble.plan({
-    roles,
-    rnd,
-    callResponseMode,
-    energy,
-    sparse: drumsVsTexture < 0.4,
-    musicStyle,
-    relationMode: ensembleRelation,
-  });
-  const ensembleStyle = ensemblePlan.styleProfile;
-  const hasMelodicRespond = ensemblePlan.relationByTrack.some(
-    (r) => r === "respond",
-  );
-
-  // Kit call–response pairs: lead↔perc, hat↔snare (melodic dialogue is EnsemblePlan).
-  const respondTracks = new Set<number>();
-  const kitCallResponse: GenTriState =
-    ensembleRelation === "respond"
-      ? "on"
-      : ensembleRelation === "lock" || ensembleRelation === "kinship"
-        ? callResponseMode === "on"
-          ? "on"
-          : "off"
-        : callResponseMode;
-  if (kitCallResponse !== "off") {
-    const leadIdx = roles.indexOf("lead");
-    const percIdx = roles.indexOf("perc");
-    const hatIdx = roles.indexOf("hat");
-    const snareIdx = roles.indexOf("snare");
-    if (leadIdx >= 0 && percIdx >= 0) respondTracks.add(percIdx);
-    if (hatIdx >= 0 && snareIdx >= 0) {
-      if (
-        kitCallResponse === "on" ||
-        (kitCallResponse === "auto" && rnd() < 0.45)
-      ) {
-        respondTracks.add(hatIdx);
-      }
-    }
-  }
-
-  const plans: SequenceClipPlan[] = [];
-  const rankedByRole = new Map<ExprRole, SequenceSampleIn[]>();
-  for (const role of ROLE_TRACK_ORDER) {
-    rankedByRole.set(role, rankSamplesForRole(pool, role, rnd, sampleVariety));
-  }
-
-  const reverseBaseChance =
-    reverseMode === "off"
-      ? 0
-      : reverseMode === "on"
-        ? 0.32 + energy * 0.25 + variation * 0.15
-        : (0.14 + energy * 0.1) * (0.5 + variation);
-
-  const stutterBaseChance =
-    stutterMode === "off"
-      ? 0
-      : stutterMode === "on"
-        ? 0.22 + energy * 0.2 + variation * 0.15
-        : energy > 0.55
-          ? (0.12 + energy * 0.1) * (0.55 + variation * 0.9)
-          : 0;
-
-  /** Cross-track spectral seats already claimed (centroid occupancy). */
-  const spectralOccupied: SpectralOccupancy[] = [];
-  /** Cross-track dominant notes already sounding (pitch or centroid). */
-  const pitchOccupied: PitchOccupancy[] = [];
-
-  for (let ti = 0; ti < sortedTracks.length; ti++) {
-    const track = sortedTracks[ti]!;
-    const role = roles[ti] ?? "perc";
-    const ranked = rankedByRole.get(role) ?? pool;
-    const poolFrac = 0.6 + sampleVariety * 0.4;
-    const samplePool = ranked.slice(
-      0,
-      Math.min(
-        Math.max(3, Math.ceil(ranked.length * poolFrac)),
-        ranked.length,
-      ),
-    );
-    if (samplePool.length === 0) continue;
-
-    const motif = buildMotif(role, beatsPerBar, ppq, rnd, groove, musicStyle);
-    const motifAlt = buildMotif(role, beatsPerBar, ppq, rnd, groove, musicStyle);
-    // Skip empty kit tracks for classical / ambient pattern banks
-    if (allowEmptyKit && isDrumRole(role) && motif.length === 0) {
-      const plan = trackPlans[ti];
-      if (plan) {
-        plan.fx = withRoleFilters(
-          plan.fx,
-          role,
-          musicStyle,
-          energy,
-          undefined,
-          rnd,
-        );
-      }
-      continue;
-    }
-    const voiceRel = ensemblePlan.relationByTrack[ti] ?? "independent";
-    const isPrimaryMelodic = ti === ensemblePlan.primaryLeadTrack;
-    const sparseMel = drumsVsTexture < 0.4;
-    const coupleArp = ensemble.shouldCoupleArp(voiceRel, ensembleStyle);
-    const coupledArp =
-      ensemblePlan.leadCell != null
-        ? ensemble.melodyCellToArpCell(ensemblePlan.leadCell)
-        : null;
-    const coupledArpAlt =
-      ensemblePlan.leadCellAlt != null
-        ? ensemble.melodyCellToArpCell(ensemblePlan.leadCellAlt)
-        : coupledArp;
-    const leadCell =
-      !lockPitch && role === "lead"
-        ? isPrimaryMelodic && ensemblePlan.leadCell
-          ? ensemblePlan.leadCell
-          : voiceRel === "respond" && ensemblePlan.responseCell
-            ? ensemblePlan.responseCell
-            : (ensemblePlan.leadCell ??
-              pickMelodyCell(rnd, sparseMel ? "sparse" : "dense"))
-        : null;
-    const leadCellAlt =
-      !lockPitch && role === "lead"
-        ? isPrimaryMelodic && ensemblePlan.leadCellAlt
-          ? ensemblePlan.leadCellAlt
-          : (ensemblePlan.leadCellAlt ?? pickMelodyCell(rnd, "sparse"))
-        : null;
-    const arpCell =
-      !lockPitch && role === "arp"
-        ? coupleArp && coupledArp
-          ? coupledArp
-          : pickArpCell(rnd, sparseMel || energy < 0.4 ? "sparse" : "dense")
-        : null;
-    const arpCellAlt =
-      !lockPitch && role === "arp"
-        ? coupleArp && coupledArpAlt
-          ? coupledArpAlt
-          : pickArpCell(rnd, "sparse")
-        : null;
-
-    const humanizeMs =
-      (isDrumRole(role)
-        ? 6 + energy * 6
-        : role === "lead" || role === "arp"
-          ? 18 + energy * 10
-          : 14) * humanize;
-
-    // Stable home sample per section kind (verse↔verse, chorus↔chorus).
-    const homeByKind = new Map<SectionKind, SequenceSampleIn>();
-    const kindOccurrence = new Map<SectionKind, number>();
-    /** Same sample window when a section kind returns (familiar ear-hook). */
-    const loopContentByKey = new Map<
-      string,
-      { contentOffsetMs: number; loopEnabled: boolean; loopLengthMs?: number }
-    >();
-    let trackFxRefined = false;
-
-    for (const section of sections) {
-      const baseMotif =
-        section.kind === "bridge" || section.kind === "outro" ? motifAlt : motif;
-      const occurrence = kindOccurrence.get(section.kind) ?? 0;
-      kindOccurrence.set(section.kind, occurrence + 1);
-      // Returning sections stay closer to the home motif (classic song recall).
-      const evolveScale =
-        occurrence === 0
-          ? 0.22 + variation * 0.5
-          : 0.1 + variation * 0.32;
-
-      const sparseSection =
-        section.kind === "intro" ||
-        section.kind === "outro" ||
-        section.kind === "bridge";
-
-      const barStride =
-        role === "texture"
-          ? Math.max(
-              1,
-              Math.min(
-                section.bars,
-                (sparseSection ? 3 : 2) + pickInt(rnd, 0, sparseSection ? 2 : 1),
-              ),
-            )
-          : role === "loop"
-            ? Math.max(
-                1,
-                Math.min(section.bars, sparseSection ? 3 : 2),
-              )
-            : role === "chord"
-              ? section.kind === "chorus"
-                ? 2
-                : sparseSection
-                  ? 2
-                  : 1
-              : role === "bass" && sparseSection
-                ? Math.max(1, Math.min(2, section.bars))
-                : 1;
-
-      const homeWasNew = !homeByKind.has(section.kind);
-      const homeSample = pickHomeSampleForKind(
-        section.kind,
-        role,
-        samplePool,
-        homeByKind,
-        spectralOccupied,
-        rnd,
-        sampleVariety,
-      );
-      if (homeWasNew) {
-        registerSpectralOccupancy(spectralOccupied, role, homeSample);
-      }
-      if (!trackFxRefined) {
-        const plan = trackPlans[ti];
-        if (plan) {
-          plan.fx = withRoleFilters(
-            withSpectralTrackEq(plan.fx, role, homeSample, rnd),
-            role,
-            musicStyle,
-            energy,
-            homeSample,
-            rnd,
-          );
-        }
-        trackFxRefined = true;
-      }
-
-      for (let b = 0; b < section.bars; ) {
-        const absBar = section.startBar + b;
-        const barTick = absBar * ticksPerBar;
-        const chord = lockPitch
-          ? { degree: 0, tones: [0, 2, 4] as const }
-          : (chordTimeline[absBar] ?? {
-              degree: 0,
-              tones: [0, 2, 4] as const,
-            });
-        const degreeHint = chord.degree;
-        // Don't hold / skip across a chord change (pads ringing into the next harmony).
-        const step = Math.max(
-          1,
-          Math.min(
-            barStride,
-            lockPitch
-              ? barStride
-              : chordRunBars(chordTimeline, absBar, section.bars - b),
-          ),
-        );
-
-        // Stick to the section home sample; ornaments on last bar / bridge / prechorus.
-        let sample = homeSample;
-        const lastBar = b + step >= section.bars;
-        const allowOrnament =
-          variation > 0.35 &&
-          samplePool.length > 1 &&
-          (lastBar ||
-            section.altSample ||
-            section.kind === "bridge" ||
-            section.kind === "prechorus");
-        if (allowOrnament && rnd() < (variation - 0.35) * 0.55) {
-          // Prefer an ornament that still respects the role band when possible.
-          let bestOrn = samplePool.find((s) => s.id !== homeSample.id) ?? homeSample;
-          let bestSc = Infinity;
-          for (const cand of samplePool) {
-            if (cand.id === homeSample.id) continue;
-            const sc =
-              spectralFitPenalty(cand, role) +
-              spectralClashPenalty(cand, role, spectralOccupied) * 0.5;
-            if (sc < bestSc) {
-              bestSc = sc;
-              bestOrn = cand;
-            }
-          }
-          sample = bestOrn;
-        }
-
-        if (
-          !sectionAllowsRole(role, section, b, energy, rnd)
-        ) {
-          b += step;
-          continue;
-        }
-
-        const sectionVoiceRel = ensemble.resolveSectionRelation(
-          voiceRel,
-          section.kind,
-          role,
-          rnd,
-          ensembleStyle,
-        );
-        const respondMode = ensemble.respondPlacementMode(
-          section.kind,
-          ensembleStyle,
-        );
-        const callBar =
-          respondMode === "alternateBars" && ensemble.isCallBar(absBar);
-
-        // Alternate-bar dialogue: followers rest on call bars.
-        if (
-          sectionVoiceRel === "respond" &&
-          !isPrimaryMelodic &&
-          isMelodicRole(role) &&
-          callBar
-        ) {
-          b += step;
-          continue;
-        }
-
-        let hits: MotifHit[];
-        if (role === "arp" && (arpCell || arpCellAlt)) {
-          // Library tonal oneshots sequenced on chord tones from the harmony timeline.
-          const cell =
-            section.kind === "chorus" || section.kind === "prechorus"
-              ? arpCell!
-              : (arpCellAlt ?? arpCell!);
-          hits = arpCellToHits(cell, ppq, beatsPerBar, groove);
-          if (section.kind === "intro" || section.kind === "outro") {
-            hits = hits.filter((h) => h.accent || rnd() < 0.35);
-          } else if (section.kind === "verse") {
-            hits = hits.filter((h) => h.accent || rnd() < 0.7 + energy * 0.2);
-          }
-        } else if (role === "lead" && (leadCell || leadCellAlt)) {
-          if (
-            sectionVoiceRel === "respond" &&
-            ensemblePlan.responseCell &&
-            respondMode === "halfBar"
-          ) {
-            hits = ensemble.applyRespond(
-              ensemblePlan.responseCell,
-              beatsPerBar,
-              ppq,
-            );
-          } else {
-            const cell =
-              section.kind === "chorus" || section.kind === "prechorus"
-                ? leadCell!
-                : (leadCellAlt ?? leadCell!);
-            hits = melodyCellToHits(cell, ppq, beatsPerBar, groove);
-            if (section.kind === "intro" || section.kind === "outro") {
-              hits = hits.filter((h) => h.accent || rnd() < 0.28);
-            } else if (section.kind === "bridge") {
-              hits = hits.filter((h) => h.accent || rnd() < 0.5);
-            } else if (section.kind === "verse") {
-              hits = hits.filter((h) => h.accent || rnd() < 0.55 + energy * 0.2);
-            }
-            // Soft mutual gate vs arp ostinato on the same arrangement.
-            if (roles.includes("arp") && rnd() < 0.45) {
-              hits = hits.filter((h) => h.accent || rnd() < 0.35);
-            }
-          }
-        } else if (role === "bass" && !lockPitch) {
-          hits = ensemble.bassHitsForBar({
-            sharedOnsets:
-              ensemblePlan.sharedOnsets.length > 0
-                ? ensemblePlan.sharedOnsets
-                : [0, 8],
-            beatsPerBar,
-            ppq,
-            sectionKind: section.kind,
-            family: ensembleStyle.family,
-            rnd,
-          });
-        } else if (
-          role === "chord" &&
-          !lockPitch &&
-          voiceRel !== "independent" &&
-          ensemblePlan.sharedOnsets.length > 0
-        ) {
-          hits = ensemble.supportHitsFromSkeleton({
-            sharedOnsets: ensemblePlan.sharedOnsets,
-            role: "chord",
-            beatsPerBar,
-            ppq,
-            sectionKind: section.kind,
-            family: ensembleStyle.family,
-            rnd,
-          });
-          if (section.kind === "verse") {
-            hits = hits.filter((h) => h.accent || rnd() < 0.55);
-          }
-        } else {
-          hits = evolveMotifHits(baseMotif, {
-            role,
-            section: {
-              ...section,
-              evolve: section.evolve * evolveScale,
-            },
-            barInSection: b,
-            beatsPerBar,
-            ppq,
-            density,
-            energy,
-            rnd,
-            allowEmptyKit,
-          });
-        }
-
-        // Ensemble relations for melodic followers / primary call thinning.
-        if (
-          !lockPitch &&
-          isMelodicRole(role) &&
-          ensemblePlan.sharedOnsets.length > 0
-        ) {
-          if (
-            sectionVoiceRel === "respond" &&
-            !isPrimaryMelodic &&
-            role !== "lead" &&
-            role !== "bass" &&
-            role !== "chord"
-          ) {
-            const cell =
-              ensemblePlan.responseCell ?? ensemblePlan.leadCell;
-            if (cell) {
-              hits =
-                respondMode === "alternateBars"
-                  ? ensemble.applyRespondFullBar(cell, beatsPerBar, ppq)
-                  : ensemble.applyRespond(cell, beatsPerBar, ppq);
-            }
-          } else if (
-            sectionVoiceRel === "lock" &&
-            role !== "bass" &&
-            role !== "chord"
-          ) {
-            hits = ensemble.applyLock(
-              hits,
-              ensemblePlan.sharedOnsets,
-              beatsPerBar,
-              ppq,
-              ensemble.lockDegreeOffset(role, rnd, ensembleStyle.family),
-            );
-          } else if (sectionVoiceRel === "kinship") {
-            hits = ensemble.applyKinship(
-              hits,
-              ensemblePlan.sharedOnsets,
-              beatsPerBar,
-              ppq,
-              rnd,
-            );
-          } else if (isPrimaryMelodic && hasMelodicRespond) {
-            if (respondMode === "alternateBars" && !callBar) {
-              hits = ensemble.thinAnswerBar(hits, rnd);
-            } else if (respondMode === "halfBar") {
-              hits = ensemble.thinCallHalf(hits, beatsPerBar, ppq, rnd);
-            }
-          }
-        }
-
-        // Kit-only half-bar shift (melodic dialogue uses EnsemblePlan).
-        if (isDrumRole(role) && respondTracks.has(ti)) {
-          hits = callResponseShift(hits, ppq, beatsPerBar, true);
-        }
-
-        const absHits = hits
-          .map((h) => {
-            const humanTicks =
-              ((rnd() * 2 - 1) * humanizeMs * bpm * ppq) / 60_000;
-            return {
-              ...h,
-              tick: Math.round(barTick + h.tickInBar + humanTicks),
-            };
-          })
-          .filter((h) => h.tick >= 0 && h.tick < seqEnd)
-          .sort((a, b) => a.tick - b.tick);
-
-        for (let hi = 0; hi < absHits.length; hi++) {
-          const hit = absHits[hi]!;
-          const next = absHits[hi + 1]?.tick ?? null;
-
-          // Harmony retune needs the recorded fundamental (pitchHz / noteName).
-          if (
-            !lockPitch &&
-            (role === "arp" ||
-              role === "lead" ||
-              role === "bass" ||
-              role === "chord") &&
-            !sampleHasFundamental(sample)
-          ) {
-            continue;
-          }
-
-          const stutter =
-            stutterBaseChance > 0 &&
-            (role === "lead" || role === "perc" || role === "hat") &&
-            (stutterMode === "on" || section.kind === "chorus") &&
-            hit.accent &&
-            rnd() < stutterBaseChance;
-
-          const allowResamplePitch =
-            pitchUpSemitones > 0 || pitchDownSemitones > 0;
-
-          const bpmSync = bpmSyncStretch(
-            sample,
-            bpm,
-            role,
-            rnd,
-            bpmSyncMode,
-            lockTempoPow2,
-          );
-          const bpmLengthFactor = bpmSync?.lengthFactor ?? 1;
-
-          let lengthTick = pickLengthTick({
-            sample,
-            role,
-            startTick: hit.tick,
-            nextTick: next,
-            barTick,
-            ticksPerBar: ticksPerBar * step,
-            bpm,
-            ppq,
-            section,
-            bpmLengthFactor,
-            stutter,
-            energy,
-            rnd,
-          });
-          if (hit.tick + lengthTick > seqEnd) lengthTick = seqEnd - hit.tick;
-          if (lengthTick < Math.floor(ppq / 4)) continue;
-
-          const naturalTick = msToLengthTick(sample.durationMs, bpm, ppq);
-          // When pow2 lock is on, snap free duration changes to ×¼…×8 of the
-          // natural (BPM-synced) length — no arbitrary tempo warps.
-          // Arp gates are harmony-cell driven — never snap to sample duration.
-          if (lockTempoPow2 && !stutter && role !== "arp") {
-            const base = Math.max(1, naturalTick * bpmLengthFactor);
-            const rawFactor = lengthTick / base;
-            const snapped = snapTempoRatioPow2(rawFactor);
-            if (Math.abs(snapped - rawFactor) > 0.06) {
-              lengthTick = Math.max(
-                Math.floor(ppq / 4),
-                Math.round(base * snapped),
-              );
-              if (hit.tick + lengthTick > seqEnd) {
-                lengthTick = seqEnd - hit.tick;
-              }
-              if (lengthTick < Math.floor(ppq / 4)) continue;
-            }
-          }
-          const { fitFactor, artisticFactor: factor } = clipStretchFactors(
-            lengthTick,
-            naturalTick,
-            bpmLengthFactor,
-          );
-
-          // Library arp / lead: pitch each hit onto the current chord tone.
-          let pitchSemitones = lockPitch
-            ? 0
-            : pickPitchSemitones({
-                sample,
-                role,
-                rootPc,
-                scale,
-                degreeHint,
-                chordTones: chord.tones,
-                toneIndex: role === "chord" ? hi : undefined,
-                melodyDegree:
-                  role === "lead" || role === "arp"
-                    ? (hit.melodyDegree ?? 0)
-                    : role === "bass" || role === "chord"
-                      ? hit.melodyDegree
-                      : undefined,
-                accent: hit.accent,
-                section,
-                energy,
-                rnd,
-                maxUp: pitchUpSemitones,
-                maxDown: pitchDownSemitones,
-              });
-
-          const pitchAllowedRels =
-            !lockPitch && shouldEnforceScale(role, sample)
-              ? harmonicAllowedRels(
-                  role,
-                  scale,
-                  degreeHint,
-                  chord.tones,
-                  hit.accent,
-                )
-              : undefined;
-
-          let stretchMode = pickStretchMode({
-            sample,
-            role,
-            lengthFactor: factor,
-            pitchSemitones,
-            bpmSync,
-            energy,
-            stutter,
-            lockPitch,
-            allowResamplePitch,
-            rnd,
-          });
-          // BPM sync needs preserve-pitch; do not replace it with resample.
-          if (forbidPitchStretch && !bpmSync) {
-            stretchMode = withoutPreservePitchStretch(stretchMode, lockPitch);
-          }
-          // Resample pitch uses fitFactor (clip/natural), never artisticFactor.
-          stretchMode = constrainStretchToPitchBounds(
-            stretchMode,
-            pitchSemitones,
-            fitFactor,
-            pitchUpSemitones,
-            pitchDownSemitones,
-            {
-              forbidPitchStretch,
-              loopish: (sample.loopScore ?? 0) > 0.45,
-            },
-          );
-
-          // Pow2 tempo lock: avoid non-grid resample/stretch; tile or leave native.
-          // Keep BPM sync preserve-pitch (length already snapped when pow2 is on).
-          if (
-            lockTempoPow2 &&
-            !stutter &&
-            !bpmSync &&
-            stretchMode !== "off" &&
-            stretchMode !== "copy" &&
-            !nearTempoPow2(factor) &&
-            !nearTempoPow2(1 / Math.max(1e-6, factor))
-          ) {
-            stretchMode =
-              (sample.loopScore ?? 0) > 0.45 || factor > 1.1
-                ? "copy"
-                : "off";
-          }
-
-          // Tempo-matched loops: prefer a musical sub-window + loop over
-          // stretching the whole take to fill the clip — but not when BPM sync
-          // still needs preserve-pitch to match project tempo.
-          if (
-            !stutter &&
-            !bpmSync &&
-            stretchMode !== "copy" &&
-            tempoAlignedForLoop(sample, bpm) &&
-            ((sample.loopScore ?? 0) > 0.4 ||
-              (sample.loopStartMs != null && sample.loopEndMs != null)) &&
-            (role === "loop" ||
-              role === "texture" ||
-              role === "chord" ||
-              role === "perc") &&
-            Math.abs(factor - 1) > 0.08
-          ) {
-            stretchMode = "off";
-          }
-
-          if (!stutter) {
-            // Cap artistic stretch (vs tempo-matched length), not raw fitFactor —
-            // otherwise BPM sync itself trips stretchUp/Down and loses tempo lock.
-            const capped = constrainStretchToDurationRatio(
-              stretchMode,
-              factor,
-              stretchUpRatio,
-              stretchDownRatio,
-              (sample.loopScore ?? 0) > 0.45,
-            );
-            const keepBpmPreserve =
-              bpmSync &&
-              stretchMode === "preserve-pitch" &&
-              capped !== "preserve-pitch";
-            if (!keepBpmPreserve) stretchMode = capped;
-          }
-
-          let stretchPitch =
-            stretchMode === "resample"
-              ? resampleStretchPitchSemis(fitFactor)
-              : 0;
-          if (!lockPitch) {
-            const finalized = finalizeScalePitch({
-              sample,
-              role,
-              pitchSemitones,
-              stretchMode,
-              fitFactor,
-              rootPc,
-              scale,
-              maxUp: pitchUpSemitones,
-              maxDown: pitchDownSemitones,
-              allowedRels: pitchAllowedRels,
-              tuningOffsetCents,
-            });
-            pitchSemitones = finalized.pitchSemitones;
-            stretchMode = finalized.stretchMode;
-            stretchPitch = finalized.stretchPitch;
-            pitchSemitones = avoidFundamentalClash({
-              sample,
-              preferredSemis: pitchSemitones,
-              stretchSemis: stretchPitch,
-              startTick: hit.tick,
-              endTick: hit.tick + lengthTick,
-              occupied: pitchOccupied,
-              rootPc,
-              scale,
-              maxUp: pitchUpSemitones,
-              maxDown: pitchDownSemitones,
-              enforceScale: shouldEnforceScale(role, sample),
-              allowedRels: pitchAllowedRels,
-              tuningOffsetCents,
-            });
-          } else {
-            stretchPitch = 0;
-          }
-
-          const lengthMs = lengthTickToMs(lengthTick, bpm, ppq);
-          const { fadeInMs, fadeOutMs, fadeCurve } = pickFades({
-            sample,
-            role,
-            lengthMs,
-            stretchMode,
-            accent: hit.accent,
-            energy,
-            stutter,
-            rnd,
-          });
-
-          const loopSeed =
-            stutter ||
-            stretchMode === "copy" ||
-            ((sample.loopScore ?? 0) > 0.5 &&
-              (factor > 1.05 || role === "texture" || role === "loop"));
-
-          const contentKey = `${section.kind}:${sample.id}:${stretchMode}`;
-          let loopPick = loopContentByKey.get(contentKey);
-          if (!loopPick) {
-            loopPick = pickLoopContent({
-              sample,
-              role,
-              lengthMs,
-              bpm,
-              beatsPerBar,
-              loopEnabled: loopSeed,
-              stretchMode,
-              energy,
-              variation,
-              rnd,
-            });
-            loopContentByKey.set(contentKey, loopPick);
-          }
-          // Stable offset/slice when the section returns; loop flag follows clip length.
-          const contentOffsetMs = loopPick.contentOffsetMs;
-          const loopLengthMs = loopPick.loopLengthMs;
-          const loopEnabled =
-            loopLengthMs != null
-              ? lengthMs > loopLengthMs * 1.05
-              : loopPick.loopEnabled;
-
-          const reverse =
-            reverseBaseChance > 0 &&
-            (role === "texture" || role === "fx" || role === "lead") &&
-            (reverseMode === "on" ||
-              section.kind === "bridge" ||
-              section.kind === "outro") &&
-            rnd() < reverseBaseChance;
-
-          let gainDb = hit.gainDb + section.gainBiasDb + (energy - 0.5) * 1.5;
-          // Level from analysis: lift quiet beds, ease hot peaks
-          if (sample.lufs != null && Number.isFinite(sample.lufs)) {
-            gainDb += clamp((-18 - sample.lufs) * 0.12, -2.5, 3);
-          }
-          if (sample.peakDbtp != null && Number.isFinite(sample.peakDbtp) && sample.peakDbtp > -1) {
-            gainDb -= Math.min(2, (sample.peakDbtp + 1) * 1.2);
-          }
-          if (section.kind === "chorus") {
-            gainDb += (1.2 + Math.min(1.5, b * 0.1)) * (0.55 + energy * 0.45);
-          }
-          if (section.kind === "prechorus") {
-            gainDb += (b / Math.max(1, section.bars)) * 1.5 * energy;
-          }
-          if (section.kind === "intro") {
-            gainDb -= (1 - b / Math.max(1, section.bars)) * 1.5;
-          }
-          if (section.kind === "bridge") {
-            gainDb -= isDrumRole(role) ? 2.5 : 0.8;
-          }
-          if (section.kind === "outro") {
-            gainDb -= (b / Math.max(1, section.bars)) * 5;
-          }
-          if (stutter) gainDb += 0.5;
-
-          const repeats =
-            stutter && rnd() < 0.7
-              ? pickInt(rnd, 1, 2 + Math.floor(energy * 2 * variation))
-              : 0;
-
-          const pushClip = (
-            startTick: number,
-            len: number,
-            g: number,
-            rev: boolean,
-          ) => {
-            plans.push({
-              trackId: track.id,
-              sampleId: sample.id,
-              startTick,
-              lengthTick: len,
-              contentOffsetMs,
-              gainDb: g,
-              loopEnabled,
-              loopLengthMs,
-              fadeInMs,
-              fadeOutMs,
-              fadeCurve,
-              pitchSemitones,
-              stretchMode,
-              reverse: rev,
-            });
-            const domMidi = sampleDominantMidi(sample);
-            if (domMidi != null) {
-              pitchOccupied.push({
-                startTick,
-                endTick: startTick + len,
-                sounding: soundingMidi(
-                  domMidi,
-                  pitchSemitones,
-                  stretchPitch,
-                ),
-              });
-            }
-          };
-
-          pushClip(hit.tick, lengthTick, gainDb, reverse);
-          let repTick = hit.tick + lengthTick;
-          for (let r = 0; r < repeats; r++) {
-            if (repTick + lengthTick > seqEnd) break;
-            if (next != null && repTick + lengthTick > next - 2) break;
-            pushClip(
-              repTick,
-              lengthTick,
-              gainDb - r * 0.8,
-              reverse && rnd() < 0.3,
-            );
-            repTick += lengthTick;
-          }
-        }
-        b += step;
-      }
-    }
-  }
-
-  const clips = plans.sort(
-    (a, b) =>
-      a.startTick - b.startTick ||
-      a.trackId.localeCompare(b.trackId) ||
-      a.sampleId.localeCompare(b.sampleId),
-  );
-  return {
-    clips,
-    tracks: trackPlans,
-    ensemble: {
-      relationMode: ensembleRelation,
-      relations: ensemblePlan.relationByTrack,
-      primaryLeadTrack: ensemblePlan.primaryLeadTrack,
-    },
-  };
-}

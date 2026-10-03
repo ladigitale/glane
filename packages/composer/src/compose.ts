@@ -1,4 +1,4 @@
-import { PPQ } from "@glane/core-model";
+import { PPQ, type ExprRole } from "@glane/core-model";
 import {
   applyLayerMatrix,
   buildLayerMatrix,
@@ -6,34 +6,46 @@ import {
   trackIndexByRole,
 } from "./arrangement.js";
 import { planBass } from "./bass.js";
+import { planArp, planBed } from "./beds.js";
+import { assembleSongDna, buildSongDna } from "./dna.js";
 import { planDrums } from "./drums.js";
 import { applyEnsembleRelations, assignEnsemble } from "./ensemble.js";
-import { fitForm, pickEnergyShape, pickFormFamily } from "./form.js";
+import { fitForm } from "./form.js";
 import { compileGestures, planGestures } from "./gestures.js";
-import { defaultProgressions, planHarmony } from "./harmony.js";
+import { planHarmony } from "./harmony.js";
 import { planMaster } from "./master.js";
-import { buildMotif, invertMotif, planMelody } from "./melody.js";
+import { invertMotif, planMelody } from "./melody.js";
 import { planMix } from "./mix.js";
 import { buildModRoutes, applyExpressionToParts } from "./modulation.js";
-import { generateRhythmGenes } from "./rhythm.js";
-import { makeRng } from "./rng.js";
+import { makeComposeRng } from "./rng.js";
+import { resolveStyleAutos } from "./styles/profiles.js";
 import type { ComposeResult, ComposeSettings, Score } from "./types.js";
+
+const BED_ROLES: Array<Extract<ExprRole, "texture" | "loop" | "fx">> = [
+  "texture",
+  "loop",
+  "fx",
+];
 
 /**
  * Orchestrate composition layers → Score.
  * Through step 7: form…modulation + gestures + mix + master.
  */
 export function compose(settings: ComposeSettings): ComposeResult {
-  const rng = makeRng(settings.seed);
+  const rng = makeComposeRng(settings.seed, {
+    locks: settings.locks,
+    regenSalt: settings.regenSalt,
+  });
   const style = settings.style === "auto" ? "ambient" : settings.style;
-  const formFamily = pickFormFamily(rng, "form/family", settings.formFamily);
-  const energyShape = pickEnergyShape(
-    rng,
-    "form/energyShape",
-    settings.energyShape,
-  );
+  const autos = resolveStyleAutos({
+    style,
+    formFamily: settings.formFamily,
+    energyShape: settings.energyShape,
+    mode: settings.mode,
+    roll: (path) => rng(path),
+  });
+  const { formFamily, energyShape, mode, profile } = autos;
   const keyPc = settings.keyPc === "auto" ? 0 : settings.keyPc;
-  const mode = settings.mode === "auto" ? "aeolian" : settings.mode;
 
   const form = fitForm({
     targetBars: settings.targetBars,
@@ -44,7 +56,14 @@ export function compose(settings: ComposeSettings): ComposeResult {
     path: "form",
   });
 
-  const progressions = defaultProgressions(rng, "dna/prog", mode);
+  const dna = buildSongDna({
+    rng,
+    mode,
+    density: settings.density,
+    sampleGenes: settings.sampleGenes,
+    grooveFromSamples: settings.grooveFromSamples,
+  });
+  const { rhythmGenes, hook, verseMotif, progressions } = dna;
   const harmony = planHarmony({
     sections: form.sections,
     progressions,
@@ -54,17 +73,10 @@ export function compose(settings: ComposeSettings): ComposeResult {
     path: "harmony",
   });
 
-  const rhythmGenes = generateRhythmGenes(rng, "dna/rhythm", settings.density);
-  const g0 = rhythmGenes[0] ?? {
-    steps: 16,
-    onsets: [0, 4, 8, 12],
-    accents: [1, 0.4, 0.7, 0.4],
-  };
-  const g1 = rhythmGenes[1] ?? g0;
-  const hook = buildMotif(rng, "dna/hook", g0, "hook");
-  const verseMotif = buildMotif(rng, "dna/verse", g1, "verse");
-
-  const roles = defaultTrackRoles(true);
+  const roles =
+    settings.trackRoles && settings.trackRoles.length > 0
+      ? settings.trackRoles
+      : defaultTrackRoles(true);
   const byRole = trackIndexByRole(roles);
 
   let parts = planDrums({
@@ -84,9 +96,15 @@ export function compose(settings: ComposeSettings): ComposeResult {
         harmony,
         kickEvents: kick?.events ?? [],
         rhythmGenes,
-        lockKick: true,
         trackIndex: byRole.bass,
         ppq: PPQ,
+        rng,
+        style,
+        density: settings.density,
+        variation: settings.variation,
+        hook,
+        mode,
+        keyPc,
       }),
     );
   }
@@ -120,6 +138,30 @@ export function compose(settings: ComposeSettings): ComposeResult {
         role: "chord",
         ppq: PPQ,
         path: "melody/chord",
+      }),
+    );
+  }
+
+  for (const bedRole of BED_ROLES) {
+    const ti = byRole[bedRole];
+    if (ti == null) continue;
+    parts.push(
+      planBed({
+        role: bedRole,
+        sections: form.sections,
+        harmony,
+        trackIndex: ti,
+        ppq: PPQ,
+      }),
+    );
+  }
+  if (byRole.arp != null) {
+    parts.push(
+      planArp({
+        sections: form.sections,
+        harmony,
+        trackIndex: byRole.arp,
+        ppq: PPQ,
       }),
     );
   }
@@ -206,25 +248,15 @@ export function compose(settings: ComposeSettings): ComposeResult {
   };
 
   const score: Score = {
-    dna: {
-      seed: settings.seed,
+    dna: assembleSongDna({
+      settings,
       style,
       keyPc,
       mode,
-      bpm: 120,
-      meter: [4, 4],
-      groove: {
-        swing: settings.swing,
-        feel: "straight",
-        humanizeMs: settings.humanize * 20,
-      },
-      rhythmGenes,
-      hook,
-      verseMotif,
-      progressions,
+      profile,
+      dna,
       signatureFx: mixPlan.spaces.signature?.kind,
-      tuningOffsetCents: 0,
-    },
+    }),
     sections: form.sections,
     harmony,
     parts,
@@ -237,7 +269,11 @@ export function compose(settings: ComposeSettings): ComposeResult {
       spaces: mixPlan.spaces,
       master,
     },
-    warnings: [...form.warnings, ...masterWarnings],
+    warnings: [
+      ...form.warnings,
+      ...masterWarnings,
+      ...(dna.warning ? [dna.warning] : []),
+    ],
   };
 
   return { score, resolved };

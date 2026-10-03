@@ -1,3 +1,8 @@
+import {
+  LOCK_LAYER_IDS,
+  isLockLayerId,
+  type LockLayerId,
+} from "@glane/composer";
 import { STORAGE_PREFIX, type SampleClass } from "@glane/core-model";
 import { MUSIC_STYLE_IDS } from "./generative-styles.js";
 import { MAX_PX_PER_TICK, MIN_PX_PER_TICK } from "./timeline/timeline.js";
@@ -24,7 +29,18 @@ const PALETTES = new Set([
   "ambient",
   "mixed",
 ]);
-const FORMS = new Set(["auto", "song", "ambient"]);
+const FORMS = new Set([
+  "auto",
+  "song",
+  "ambient",
+  "verse-chorus",
+  "aaba",
+  "build-drop",
+  "arch",
+  "rondo",
+  "loop-evolve",
+]);
+const ENERGY_SHAPES = new Set(["auto", "rise", "arch", "waves", "plateau"]);
 const TRI = new Set(["auto", "on", "off"]);
 const ENSEMBLE_RELATIONS = new Set(["auto", "lock", "respond", "kinship"]);
 const STYLE_SET = new Set<string>(["auto", ...MUSIC_STYLE_IDS]);
@@ -37,12 +53,19 @@ export type SeqGenUiState = {
   drumsVsTexture: number | "auto";
   musicStyle: string;
   groove: string;
+  /** Prefer onset genes from library loops: auto | on | off. */
+  grooveFromSamples: string;
   keyRootPc: number | "auto";
   scaleMode: string;
   palette: string;
   formStyle: string;
+  energyShape: string;
   humanize: number | "auto";
   variation: number | "auto";
+  /** Expression / automation depth (composer « Vie »). */
+  life: number | "auto";
+  /** Send / depth / bus wetness (composer « Espace »). */
+  space: number | "auto";
   sampleVariety: number | "auto";
   bpmSync: string;
   lockTempoPow2: string;
@@ -61,6 +84,10 @@ export type SeqGenUiState = {
   /** Exact tag matches (OR); empty = all. */
   tagFilter: string[];
   advanced: boolean;
+  /** Current arrangement regen salt (unlocked layers). */
+  regenSalt: string;
+  /** Per-layer frozen salt when locked (omit = unlocked). */
+  lockSalts: Partial<Record<LockLayerId, string>>;
 };
 
 /** Ephemeral sequencer chrome — one snapshot per arrangement (project). */
@@ -86,12 +113,16 @@ export const DEFAULT_SEQ_GEN_UI: SeqGenUiState = {
   drumsVsTexture: 0.55,
   musicStyle: "auto",
   groove: "auto",
+  grooveFromSamples: "auto",
   keyRootPc: "auto",
   scaleMode: "auto",
   palette: "auto",
   formStyle: "auto",
+  energyShape: "auto",
   humanize: "auto",
   variation: "auto",
+  life: "auto",
+  space: "auto",
   sampleVariety: "auto",
   bpmSync: "auto",
   lockTempoPow2: "off",
@@ -108,6 +139,8 @@ export const DEFAULT_SEQ_GEN_UI: SeqGenUiState = {
   sampleFilter: "all",
   tagFilter: [],
   advanced: false,
+  regenSalt: "",
+  lockSalts: {},
 };
 
 const KEY_PREFIX = `${STORAGE_PREFIX}.seqUi.`;
@@ -157,6 +190,22 @@ function parseTagFilter(v: unknown): string[] {
   return out;
 }
 
+function parseLockSalts(v: unknown): Partial<Record<LockLayerId, string>> {
+  if (!v || typeof v !== "object") return {};
+  const out: Partial<Record<LockLayerId, string>> = {};
+  for (const id of LOCK_LAYER_IDS) {
+    const salt = (v as Record<string, unknown>)[id];
+    if (typeof salt === "string") out[id] = salt;
+  }
+  // Legacy: array of layer ids frozen at ""
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      if (typeof item === "string" && isLockLayerId(item)) out[item] = "";
+    }
+  }
+  return out;
+}
+
 function parseGen(raw: unknown): SeqGenUiState | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const o = raw as Partial<SeqGenUiState>;
@@ -183,12 +232,24 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
     ),
     musicStyle: oneOf(o.musicStyle, STYLE_SET, DEFAULT_SEQ_GEN_UI.musicStyle),
     groove: oneOf(o.groove, GROOVES, DEFAULT_SEQ_GEN_UI.groove),
+    grooveFromSamples: oneOf(
+      o.grooveFromSamples,
+      TRI,
+      DEFAULT_SEQ_GEN_UI.grooveFromSamples,
+    ),
     keyRootPc: key,
     scaleMode: oneOf(o.scaleMode, SCALES, DEFAULT_SEQ_GEN_UI.scaleMode),
     palette: oneOf(o.palette, PALETTES, DEFAULT_SEQ_GEN_UI.palette),
     formStyle: oneOf(o.formStyle, FORMS, DEFAULT_SEQ_GEN_UI.formStyle),
+    energyShape: oneOf(
+      o.energyShape,
+      ENERGY_SHAPES,
+      DEFAULT_SEQ_GEN_UI.energyShape,
+    ),
     humanize: autoOrNumber(o.humanize, 0, 1, DEFAULT_SEQ_GEN_UI.humanize),
     variation: autoOrNumber(o.variation, 0, 1, DEFAULT_SEQ_GEN_UI.variation),
+    life: autoOrNumber(o.life, 0, 1, DEFAULT_SEQ_GEN_UI.life),
+    space: autoOrNumber(o.space, 0, 1, DEFAULT_SEQ_GEN_UI.space),
     sampleVariety: autoOrNumber(
       o.sampleVariety,
       0,
@@ -246,6 +307,8 @@ function parseGen(raw: unknown): SeqGenUiState | undefined {
     sampleFilter,
     tagFilter: parseTagFilter(o.tagFilter),
     advanced: !!o.advanced,
+    regenSalt: typeof o.regenSalt === "string" ? o.regenSalt : "",
+    lockSalts: parseLockSalts(o.lockSalts),
   };
 }
 

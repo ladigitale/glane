@@ -30,6 +30,9 @@ export type TrackInsertConfig = {
   fx: TrackFx;
   /** Project tempo — resolves echo delayBeats → seconds. */
   bpm?: number;
+  /** Post-fader send levels 0…1 → shared space buses A/B. */
+  sendA?: number;
+  sendB?: number;
 };
 
 type InsertHandles = {
@@ -48,7 +51,68 @@ export type TrackBus = {
   gain: GainNode;
   pan: StereoPannerNode;
   insert: InsertHandles;
+  /** Post-pan send to space bus A. */
+  sendA: GainNode;
+  /** Post-pan send to space bus B. */
+  sendB: GainNode;
 };
+
+export type SendBusPair = {
+  inputA: GainNode;
+  inputB: GainNode;
+  apply: (fxA: TrackFx, fxB: TrackFx, bpm?: number) => void;
+  dispose: () => void;
+};
+
+/** Two parallel wet returns (reverb / echo) summing into `destination`. */
+export function createSendBusPair(
+  ctx: BaseAudioContext,
+  destination: AudioNode,
+  fxA: TrackFx = DEFAULT_TRACK_FX,
+  fxB: TrackFx = DEFAULT_TRACK_FX,
+  bpm = 120,
+): SendBusPair {
+  const inputA = ctx.createGain();
+  const inputB = ctx.createGain();
+  const outA = ctx.createGain();
+  const outB = ctx.createGain();
+  outA.connect(destination);
+  outB.connect(destination);
+  let insertA = buildInsert(ctx, inputA, outA, normalizeMasterFx(fxA), bpm);
+  let insertB = buildInsert(ctx, inputB, outB, normalizeMasterFx(fxB), bpm);
+  return {
+    inputA,
+    inputB,
+    apply: (a, b, tempo = 120) => {
+      const na = normalizeMasterFx(a);
+      const nb = normalizeMasterFx(b);
+      if (insertA.type !== na.type) {
+        insertA.dispose();
+        insertA = buildInsert(ctx, inputA, outA, na, tempo);
+      } else {
+        insertA.apply(na, tempo);
+      }
+      if (insertB.type !== nb.type) {
+        insertB.dispose();
+        insertB = buildInsert(ctx, inputB, outB, nb, tempo);
+      } else {
+        insertB.apply(nb, tempo);
+      }
+    },
+    dispose: () => {
+      insertA.dispose();
+      insertB.dispose();
+      try {
+        inputA.disconnect();
+        inputB.disconnect();
+        outA.disconnect();
+        outB.disconnect();
+      } catch {
+        /* */
+      }
+    },
+  };
+}
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -585,10 +649,18 @@ function configPreamp(config: TrackInsertConfig): number {
   return clamp(p as number, 0, 2);
 }
 
+function configSend(n: number | undefined): number {
+  if (!Number.isFinite(n)) return 0;
+  return clamp(n as number, 0, 1);
+}
+
+export type TrackSendDest = { a: AudioNode; b: AudioNode };
+
 export function createTrackBus(
   ctx: BaseAudioContext,
   destination: AudioNode,
   config: TrackInsertConfig,
+  sends?: TrackSendDest,
 ): TrackBus {
   const fx = normalizeTrackFx(config.fx ?? DEFAULT_TRACK_FX);
   const bpm = configBpm(config);
@@ -605,12 +677,22 @@ export function createTrackBus(
   gain.gain.value = clamp(config.gain, 0, 2);
   const pan = ctx.createStereoPanner();
   pan.pan.value = clamp(config.pan, -1, 1);
+  const sendA = ctx.createGain();
+  sendA.gain.value = configSend(config.sendA);
+  const sendB = ctx.createGain();
+  sendB.gain.value = configSend(config.sendB);
   input.connect(hp);
   hp.connect(lp);
   const insert = buildInsert(ctx, lp, gain, fx, bpm);
   gain.connect(pan);
   pan.connect(destination);
-  return { input, hp, lp, gain, pan, insert };
+  pan.connect(sendA);
+  pan.connect(sendB);
+  if (sends) {
+    sendA.connect(sends.a);
+    sendB.connect(sends.b);
+  }
+  return { input, hp, lp, gain, pan, insert, sendA, sendB };
 }
 
 export function updateTrackBus(
@@ -618,12 +700,15 @@ export function updateTrackBus(
   ctx: BaseAudioContext,
   destination: AudioNode,
   config: TrackInsertConfig,
+  sends?: TrackSendDest,
 ): void {
   const fx = normalizeTrackFx(config.fx ?? DEFAULT_TRACK_FX);
   const bpm = configBpm(config);
   bus.input.gain.value = configPreamp(config);
   bus.gain.gain.value = clamp(config.gain, 0, 2);
   bus.pan.pan.value = clamp(config.pan, -1, 1);
+  bus.sendA.gain.value = configSend(config.sendA);
+  bus.sendB.gain.value = configSend(config.sendB);
   applyToneFilters(bus.hp, bus.lp, fx);
 
   if (bus.insert.type !== fx.type) {
@@ -635,9 +720,21 @@ export function updateTrackBus(
       /* */
     }
     bus.pan.connect(destination);
-    return;
+    bus.pan.connect(bus.sendA);
+    bus.pan.connect(bus.sendB);
+  } else {
+    bus.insert.apply(fx, bpm);
   }
-  bus.insert.apply(fx, bpm);
+  if (sends) {
+    try {
+      bus.sendA.disconnect();
+      bus.sendB.disconnect();
+    } catch {
+      /* */
+    }
+    bus.sendA.connect(sends.a);
+    bus.sendB.connect(sends.b);
+  }
 }
 
 export function disposeTrackBus(bus: TrackBus): void {
@@ -648,6 +745,8 @@ export function disposeTrackBus(bus: TrackBus): void {
     bus.lp.disconnect();
     bus.gain.disconnect();
     bus.pan.disconnect();
+    bus.sendA.disconnect();
+    bus.sendB.disconnect();
   } catch {
     /* */
   }

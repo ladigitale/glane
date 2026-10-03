@@ -90,12 +90,16 @@ async function bounceProject(opts: {
   try {
     onProgress?.({ stage: "mix" });
     await yieldToUi();
+    const spaces = project.spaces
+      ? ([project.spaces.A, project.spaces.B] as [typeof project.spaces.A, typeof project.spaces.B])
+      : undefined;
     const buffer = await engine.renderOffline(
       clips,
       Number(asSampleIndex(Math.max(1, durationSamples))),
       tracks,
       project.masterFx ?? [],
       project.bpm,
+      spaces,
     );
     await applyMasterGainAsync(buffer, project.masterGainDb);
     onProgress?.({ stage: "wav" });

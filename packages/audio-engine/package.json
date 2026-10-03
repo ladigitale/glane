@@ -7,7 +7,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/tape-scrub.test.ts"
+    "test": "tsx --test src/tape-scrub.test.ts src/automation.test.ts src/send-bus.test.ts"
   },
   "dependencies": { "@glane/core-model": "0.1.0" },
   "devDependencies": { "typescript": "^5.6.3" }

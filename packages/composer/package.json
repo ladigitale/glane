@@ -7,7 +7,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/rng.test.ts src/types.test.ts src/form.test.ts src/harmony.test.ts src/drums.test.ts src/melody.test.ts src/modulation.test.ts src/mix.test.ts"
+    "test": "tsx --test src/rng.test.ts src/types.test.ts src/form.test.ts src/harmony.test.ts src/drums.test.ts src/melody.test.ts src/modulation.test.ts src/mix.test.ts src/arrangement.test.ts src/sample-gene.test.ts src/mixcheck.test.ts src/styles/profiles.test.ts src/locks.test.ts src/dna.test.ts src/bass.test.ts"
   },
   "dependencies": {
     "@glane/core-model": "0.1.0"

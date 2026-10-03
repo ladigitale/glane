@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview --host --port 5173",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/app/generative-pitch.test.ts src/app/generative-ensemble.test.ts src/app/generative-form-contrast.test.ts src/app/generative-styles-hints.test.ts src/app/generative-style-length.test.ts"
+    "test": "tsx --test src/app/generative-pitch.test.ts src/app/generative-ensemble.test.ts src/app/generative-form-contrast.test.ts src/app/generative-styles-hints.test.ts src/app/generative-style-length.test.ts src/app/generative-mixcheck.test.ts"
   },
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

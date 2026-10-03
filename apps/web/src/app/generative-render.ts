@@ -1,6 +1,7 @@
 /**
- * Score → SequencePlanResult (composer render layer).
- * Assigns samples / pitch / mix; does not compose onsets or degrees.
+ * Score → SequencePlanResult (thin / legacy stub).
+ * Live path: `realizeComposerScore` inside `generative.ts` (home samples,
+ * spectral seat, stretch/fades). Keep this module for isolated unit probes.
  */
 import type {
   AutomationLane,

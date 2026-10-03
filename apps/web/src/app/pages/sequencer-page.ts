@@ -1,18 +1,24 @@
 import {
   CLASS_COLORS,
   DEFAULT_MASTER_FX,
+  DEFAULT_TRACK_FX,
   PPQ,
   asSampleIndex,
   asTick,
   createEntityId,
   msToSamples,
   normalizeMasterFx,
+  AutomationLaneSchema,
+  FormSectionSchema,
   normalizeProject,
   normalizeTrack,
   nowIso,
   samplesToTicks,
   ticksToSamples,
+  type AutomationLane,
   type Clip,
+  type FormSection,
+  type FormSectionKind,
   type Project,
   type Sample,
   type SampleClass,
@@ -20,7 +26,12 @@ import {
   type Track,
   type TrackFx,
 } from "@glane/core-model";
-import { TransportEngine, type TapeScrubVoice, type TrackInsertConfig } from "@glane/audio-engine";
+import {
+  TransportEngine,
+  type SchedAutoLane,
+  type TapeScrubVoice,
+  type TrackInsertConfig,
+} from "@glane/audio-engine";
 import {
   frameCount,
   interleavedToAudioBuffer,
@@ -51,6 +62,11 @@ import { set } from "@supersoniks/concorde/utils";
 import { db } from "../db.js";
 import { t, tf, type MessageKey } from "../i18n/messages.js";
 import {
+  LOCK_LAYER_IDS,
+  locksFromLayers,
+  type LockLayerId,
+} from "@glane/composer";
+import {
   keyPcLabel,
   planSequence,
   parseStemFromTags,
@@ -59,6 +75,7 @@ import {
   styleSuggestedTempoBars,
   styleTempoBarsFit,
   type GenAuto,
+  type GenEnergyShape,
   type GenFormStyle,
   type GenGrooveChoice,
   type GenMusicStyleChoice,
@@ -68,6 +85,7 @@ import {
   type GenEnsembleRelation,
   type VoiceRelation,
 } from "../generative.js";
+import { collectSampleGenes } from "../generative-sample-genes.js";
 import { SonicToast } from "@supersoniks/concorde/toast";
 import { clapFeatureFromAnalysis } from "../ml/clap-runtime.js";
 import { loadSampleAudio } from "../load-sample-audio.js";
@@ -538,6 +556,64 @@ export class GlSequencerPage extends LitElement {
       border-bottom: 1px solid color-mix(in srgb, var(--gl-fg) 14%, transparent);
       user-select: none;
     }
+    .form-banner {
+      display: flex;
+      flex-shrink: 0;
+      width: 100%;
+      min-width: 100%;
+      box-sizing: border-box;
+      position: sticky;
+      top: ${RULER_H}px;
+      height: 22px;
+      z-index: 5;
+      background: color-mix(in srgb, var(--gl-ink) 92%, var(--gl-accent));
+      border-bottom: 1px solid color-mix(in srgb, var(--gl-fg) 12%, transparent);
+      user-select: none;
+      pointer-events: none;
+    }
+    .form-banner-lane {
+      position: relative;
+      flex: 1;
+      min-width: 800px;
+      height: 100%;
+    }
+    .form-banner-gutter {
+      width: ${TRACK_GUTTER_PX}px;
+      flex-shrink: 0;
+      position: sticky;
+      right: 0;
+      z-index: 3;
+      background: color-mix(in srgb, var(--gl-ink) 92%, var(--gl-accent));
+      box-shadow: -4px 0 10px color-mix(in srgb, #000 28%, transparent);
+    }
+    .form-sec {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      display: flex;
+      align-items: center;
+      padding: 0 4px;
+      border-radius: 2px;
+      border-left: 2px solid color-mix(in srgb, var(--gl-accent) 70%, transparent);
+      background: color-mix(in srgb, var(--gl-accent) 18%, transparent);
+      overflow: hidden;
+    }
+    .form-sec .lbl {
+      font-family: var(--gl-font-mono);
+      font-size: 0.55rem;
+      line-height: 1;
+      color: var(--gl-fg);
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+    }
+    .form-sec .en {
+      margin-left: 4px;
+      font-family: var(--gl-font-mono);
+      font-size: 0.5rem;
+      color: var(--gl-fg-muted);
+      flex-shrink: 0;
+    }
     .ruler-progress {
       position: absolute;
       top: 0;
@@ -705,12 +781,19 @@ export class GlSequencerPage extends LitElement {
   @state() private draftGenDrumsTextures: number | GenAuto = 0.55;
   @state() private draftGenMusicStyle: GenMusicStyleChoice = "auto";
   @state() private draftGenGroove: GenGrooveChoice = "auto";
+  @state() private draftGenGrooveFromSamples: GenTriState = "auto";
+  @state() private draftGenRegenSalt = "";
+  @state() private draftGenLockSalts: Partial<Record<LockLayerId, string>> =
+    {};
   @state() private draftGenKey: number | GenAuto = "auto";
   @state() private draftGenScale: GenScaleMode = "auto";
   @state() private draftGenPalette: GenPaletteChoice = "auto";
   @state() private draftGenForm: GenFormStyle = "auto";
+  @state() private draftGenEnergyShape: GenEnergyShape = "auto";
   @state() private draftGenHumanize: number | GenAuto = "auto";
   @state() private draftGenVariation: number | GenAuto = "auto";
+  @state() private draftGenLife: number | GenAuto = "auto";
+  @state() private draftGenSpace: number | GenAuto = "auto";
   @state() private draftGenSampleVariety: number | GenAuto = "auto";
   @state() private draftGenBpmSync: GenTriState = "auto";
   @state() private draftGenLockTempoPow2: GenTriState = "off";
@@ -1025,12 +1108,18 @@ export class GlSequencerPage extends LitElement {
         drumsVsTexture: this.draftGenDrumsTextures,
         musicStyle: this.draftGenMusicStyle,
         groove: this.draftGenGroove,
+        grooveFromSamples: this.draftGenGrooveFromSamples,
+        regenSalt: this.draftGenRegenSalt,
+        lockSalts: { ...this.draftGenLockSalts },
         keyRootPc: this.draftGenKey,
         scaleMode: this.draftGenScale,
         palette: this.draftGenPalette,
         formStyle: this.draftGenForm,
+        energyShape: this.draftGenEnergyShape,
         humanize: this.draftGenHumanize,
         variation: this.draftGenVariation,
+        life: this.draftGenLife,
+        space: this.draftGenSpace,
         sampleVariety: this.draftGenSampleVariety,
         bpmSync: this.draftGenBpmSync,
         lockTempoPow2: this.draftGenLockTempoPow2,
@@ -1107,12 +1196,18 @@ export class GlSequencerPage extends LitElement {
     this.draftGenDrumsTextures = g.drumsVsTexture;
     this.draftGenMusicStyle = g.musicStyle as GenMusicStyleChoice;
     this.draftGenGroove = g.groove as GenGrooveChoice;
+    this.draftGenGrooveFromSamples = g.grooveFromSamples as GenTriState;
+    this.draftGenRegenSalt = g.regenSalt ?? "";
+    this.draftGenLockSalts = { ...(g.lockSalts ?? {}) };
     this.draftGenKey = g.keyRootPc;
     this.draftGenScale = g.scaleMode as GenScaleMode;
     this.draftGenPalette = g.palette as GenPaletteChoice;
     this.draftGenForm = g.formStyle as GenFormStyle;
+    this.draftGenEnergyShape = g.energyShape as GenEnergyShape;
     this.draftGenHumanize = g.humanize;
     this.draftGenVariation = g.variation;
+    this.draftGenLife = g.life;
+    this.draftGenSpace = g.space;
     this.draftGenSampleVariety = g.sampleVariety;
     this.draftGenBpmSync = g.bpmSync as GenTriState;
     this.draftGenLockTempoPow2 =
@@ -1453,6 +1548,7 @@ export class GlSequencerPage extends LitElement {
               bars,
               seqDurMs,
             )}
+            ${this.#renderFormBanner(laneW)}
             <div
               class="playhead"
               style="left:${this.playheadTick * this.pxPerTick}px"
@@ -1766,6 +1862,48 @@ export class GlSequencerPage extends LitElement {
             { class: "block w-full" },
           )}
         </div>
+      </div>
+    `;
+  }
+
+  #formSectionLabel(kind: FormSectionKind): string {
+    const key = `seq.formSec.${kind}` as MessageKey;
+    return t(key);
+  }
+
+  #renderFormBanner(laneW: number) {
+    const sections = this.project?.formSections;
+    if (!sections?.length || !this.project) return nothing;
+    const beatsPerBar = this.project.timeSignature[0];
+    const barTicks = beatsPerBar * PPQ;
+    return html`
+      <div
+        class="form-banner"
+        role="list"
+        aria-label=${t("seq.formBanner")}
+      >
+        <div class="form-banner-lane" style="min-width:${laneW}px">
+          ${sections.map((sec) => {
+            const left = sec.startBar * barTicks * this.pxPerTick;
+            const width = Math.max(
+              12,
+              sec.bars * barTicks * this.pxPerTick - 2,
+            );
+            const ePct = Math.round(sec.energy * 100);
+            return html`
+              <div
+                class="form-sec"
+                role="listitem"
+                style="left:${left}px;width:${width}px;opacity:${0.55 + sec.energy * 0.45}"
+                title=${`${this.#formSectionLabel(sec.kind)} · E ${ePct}% · ${sec.bars} ${t("seq.barsUnit")}`}
+              >
+                <span class="lbl">${this.#formSectionLabel(sec.kind)}</span>
+                <span class="en">${ePct}</span>
+              </div>
+            `;
+          })}
+        </div>
+        <div class="form-banner-gutter" aria-hidden="true"></div>
       </div>
     `;
   }
@@ -2226,9 +2364,13 @@ export class GlSequencerPage extends LitElement {
       .toArray();
     this.selectedId = null;
     this.#engine = new TransportEngine();
-    this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
+    const masterLin = dbToGain(this.project.masterGainDb);
+    this.#engine.setBaseMasterGain(masterLin);
+    this.#engine.master.gain.value = masterLin;
     this.#syncMasterFx();
+    this.#syncSendSpaces();
     this.#syncTrackBuses();
+    this.#syncAutomation();
   }
 
   #preampDb(): number {
@@ -2250,6 +2392,20 @@ export class GlSequencerPage extends LitElement {
     this.#engine.setMasterFx(a, b, this.project.bpm);
   }
 
+  #syncSendSpaces(): void {
+    if (!this.#engine || !this.project) return;
+    const sp = this.project.spaces;
+    if (!sp) {
+      this.#engine.setSendSpaces(
+        { ...DEFAULT_TRACK_FX },
+        { ...DEFAULT_TRACK_FX },
+        this.project.bpm,
+      );
+      return;
+    }
+    this.#engine.setSendSpaces(sp.A, sp.B, this.project.bpm);
+  }
+
   #insertConfig(tr: Track): TrackInsertConfig {
     return trackToInsertConfig(
       tr,
@@ -2260,6 +2416,63 @@ export class GlSequencerPage extends LitElement {
 
   #syncTrackBuses(): void {
     this.#engine?.syncTrackBuses(this.tracks.map((tr) => this.#insertConfig(tr)));
+  }
+
+  /** Push project.automation → engine (ticks → samples, trackIndex → id). */
+  #syncAutomation(): void {
+    if (!this.#engine || !this.project) return;
+    const lanes = this.project.automation ?? [];
+    if (lanes.length === 0) {
+      this.#engine.clearAutomation();
+      return;
+    }
+    const bpm = this.project.bpm;
+    const sr = this.#engine.sampleRate;
+    const tickToSample = (tick: number) =>
+      Math.round(((tick / PPQ) * 60) / Math.max(1, bpm) * sr);
+    const byIndex = new Map(this.tracks.map((t) => [t.index, t]));
+    const out: SchedAutoLane[] = [];
+    for (const lane of lanes) {
+      const tgt = lane.target;
+      if (tgt.scope === "bus") continue;
+      if (tgt.scope === "master") {
+        if (tgt.param !== "gainDb") continue;
+        out.push({
+          scope: "master",
+          param: "gainDb",
+          points: lane.points.map((p) => ({
+            sample: tickToSample(p.tick),
+            value: p.value,
+            curve: p.curve,
+          })),
+        });
+        continue;
+      }
+      if (
+        tgt.param !== "gainDb" &&
+        tgt.param !== "hpHz" &&
+        tgt.param !== "lpHz" &&
+        tgt.param !== "pan" &&
+        tgt.param !== "sendA" &&
+        tgt.param !== "sendB"
+      ) {
+        continue;
+      }
+      const tr = byIndex.get(tgt.trackIndex);
+      if (!tr) continue;
+      out.push({
+        scope: "track",
+        trackId: tr.id,
+        param: tgt.param,
+        baseGainLin: dbToGain(tr.gainDb),
+        points: lane.points.map((p) => ({
+          sample: tickToSample(p.tick),
+          value: p.value,
+          curve: p.curve,
+        })),
+      });
+    }
+    this.#engine.setAutomation(out);
   }
 
   #renderMasterMix() {
@@ -3514,6 +3727,14 @@ export class GlSequencerPage extends LitElement {
             ${t("seq.synthKit")}
           </sonic-button>
           <sonic-button
+            variant="outline"
+            type="neutral"
+            ?disabled=${this.#genPoolSamples().length === 0}
+            @click=${() => void this.#commitGenerate({ regen: true })}
+          >
+            ${t("seq.regenUnlocked")}
+          </sonic-button>
+          <sonic-button
             type="primary"
             ?disabled=${this.#genPoolSamples().length === 0}
             @click=${() => void this.#commitGenerate()}
@@ -3573,10 +3794,29 @@ export class GlSequencerPage extends LitElement {
     this.seqModal = null;
   }
 
-  async #commitGenerate(): Promise<void> {
+  async #commitGenerate(opts?: { regen?: boolean }): Promise<void> {
+    if (opts?.regen) {
+      this.draftGenRegenSalt = `r${(Math.random() * 0xffffffff) >>> 0}`;
+    } else {
+      // Full generate: keep seed, reset regen timeline; locks re-freeze at "".
+      this.draftGenRegenSalt = "";
+      const next: Partial<Record<LockLayerId, string>> = {};
+      for (const id of LOCK_LAYER_IDS) {
+        if (this.draftGenLockSalts[id] != null) next[id] = "";
+      }
+      this.draftGenLockSalts = next;
+    }
     this.#persistGenUi();
     this.seqModal = null;
     await this.#generateSequence({ confirmed: true });
+  }
+
+  #toggleGenLock(id: LockLayerId): void {
+    const next = { ...this.draftGenLockSalts };
+    if (next[id] != null) delete next[id];
+    else next[id] = this.draftGenRegenSalt;
+    this.draftGenLockSalts = next;
+    this.#persistGenUi();
   }
 
   /** Open synth Song kit with BPM / tonic from the generate dialog. */
@@ -3605,12 +3845,18 @@ export class GlSequencerPage extends LitElement {
     this.draftGenDrumsTextures = "auto";
     this.draftGenMusicStyle = "auto";
     this.draftGenGroove = "auto";
+    this.draftGenGrooveFromSamples = "auto";
+    this.draftGenRegenSalt = "";
+    this.draftGenLockSalts = {};
     this.draftGenKey = "auto";
     this.draftGenScale = "auto";
     this.draftGenPalette = "auto";
     this.draftGenForm = "auto";
+    this.draftGenEnergyShape = "auto";
     this.draftGenHumanize = "auto";
     this.draftGenVariation = "auto";
+    this.draftGenLife = "auto";
+    this.draftGenSpace = "auto";
     this.draftGenSampleVariety = "auto";
     this.draftGenBpmSync = "auto";
     this.draftGenLockTempoPow2 = "off";
@@ -3783,6 +4029,8 @@ export class GlSequencerPage extends LitElement {
                 size="sm"
                 @click=${() => {
                   this.draftGenSeed = (Math.random() * 0xffffffff) >>> 0;
+                  this.draftGenRegenSalt = "";
+                  this.draftGenLockSalts = {};
                   this.#persistGenUi();
                 }}
               >
@@ -3797,6 +4045,26 @@ export class GlSequencerPage extends LitElement {
                 ${t("seq.genRandomizeAll")}
               </sonic-button>
             </sonic-form-actions>
+            <div class="form-item-container flex flex-col gap-1">
+              <span class="form-label">${t("seq.genLocks")}</span>
+              <div class="flex flex-wrap gap-2">
+                ${LOCK_LAYER_IDS.map((id) => {
+                  const on = this.draftGenLockSalts[id] != null;
+                  return html`
+                    <sonic-button
+                      size="sm"
+                      variant="outline"
+                      type=${on ? "primary" : "neutral"}
+                      ?active=${on}
+                      @click=${() => this.#toggleGenLock(id)}
+                    >
+                      ${t(`seq.genLock.${id}` as MessageKey)}
+                    </sonic-button>
+                  `;
+                })}
+              </div>
+              <p class="form-description m-0">${t("seq.genLocksHint")}</p>
+            </div>
           </sonic-form-layout>
         </gl-form-section>
 
@@ -3889,6 +4157,30 @@ export class GlSequencerPage extends LitElement {
               },
             })}
             ${this.#renderGenSlider({
+              label: t("seq.genLife"),
+              value: this.draftGenLife,
+              min: 0,
+              max: 100,
+              fallback: 55,
+              format: (n) => `${Math.round(n)}%`,
+              onChange: (v) => {
+                this.draftGenLife = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            <p class="form-description m-0">${t("seq.genLifeHint")}</p>
+            ${this.#renderGenSlider({
+              label: t("seq.genSpace"),
+              value: this.draftGenSpace,
+              min: 0,
+              max: 100,
+              fallback: 40,
+              format: (n) => `${Math.round(n)}%`,
+              onChange: (v) => {
+                this.draftGenSpace = v === "auto" ? "auto" : v / 100;
+              },
+            })}
+            <p class="form-description m-0">${t("seq.genSpaceHint")}</p>
+            ${this.#renderGenSlider({
               label: t("seq.genDrumsTextures"),
               value: this.draftGenDrumsTextures,
               min: 0,
@@ -3947,6 +4239,21 @@ export class GlSequencerPage extends LitElement {
                 this.draftGenGroove = v as GenGrooveChoice;
               },
             })}
+            ${this.#renderGenChoice({
+              label: t("seq.genGrooveFromSamples"),
+              value: this.draftGenGrooveFromSamples,
+              options: [
+                ["auto", t("seq.genAuto")],
+                ["on", t("seq.genOn")],
+                ["off", t("seq.genOff")],
+              ],
+              onPick: (v) => {
+                this.draftGenGrooveFromSamples = v as GenTriState;
+              },
+            })}
+            <p class="form-description m-0">
+              ${t("seq.genGrooveFromSamplesHint")}
+            </p>
             ${this.#renderGenChoice({
               label: t("seq.genEnsembleRelation"),
               value: this.draftGenEnsembleRelation,
@@ -4096,6 +4403,12 @@ export class GlSequencerPage extends LitElement {
                     value: this.draftGenForm,
                     options: [
                       ["auto", t("seq.genAuto")],
+                      ["verse-chorus", t("seq.genFormVerseChorus")],
+                      ["aaba", t("seq.genFormAaba")],
+                      ["build-drop", t("seq.genFormBuildDrop")],
+                      ["arch", t("seq.genFormArch")],
+                      ["rondo", t("seq.genFormRondo")],
+                      ["loop-evolve", t("seq.genFormLoopEvolve")],
                       ["song", t("seq.genFormSong")],
                       ["ambient", t("seq.genFormAmbient")],
                     ],
@@ -4103,6 +4416,23 @@ export class GlSequencerPage extends LitElement {
                       this.draftGenForm = v as GenFormStyle;
                     },
                   })}
+                  ${this.#renderGenChoice({
+                    label: t("seq.genEnergyShape"),
+                    value: this.draftGenEnergyShape,
+                    options: [
+                      ["auto", t("seq.genAuto")],
+                      ["rise", t("seq.genEnergyShapeRise")],
+                      ["arch", t("seq.genEnergyShapeArch")],
+                      ["waves", t("seq.genEnergyShapeWaves")],
+                      ["plateau", t("seq.genEnergyShapePlateau")],
+                    ],
+                    onPick: (v) => {
+                      this.draftGenEnergyShape = v as GenEnergyShape;
+                    },
+                  })}
+                  <p class="form-description m-0">
+                    ${t("seq.genEnergyShapeHint")}
+                  </p>
                   ${this.#renderGenSlider({
                     label: t("seq.genHumanize"),
                     value: this.draftGenHumanize,
@@ -4365,6 +4695,7 @@ export class GlSequencerPage extends LitElement {
     await db.projects.put(this.project);
     this.#syncTransportLoop();
     this.#syncMasterFx();
+    this.#syncSendSpaces();
     this.#syncTrackBuses();
     if (this.playing) await this.#resyncSchedule();
   }
@@ -4847,7 +5178,9 @@ export class GlSequencerPage extends LitElement {
       // Decode only the next ~16 beats — never the whole sequence up front.
       const preload = this.#playPreloadTicks();
       this.#syncMasterFx();
+      this.#syncSendSpaces();
       this.#syncTrackBuses();
+      this.#syncAutomation();
       const scheduled = await this.#buildSchedule({
         windowTicks: { from: fromTick, to: fromTick + preload },
       });
@@ -4856,7 +5189,9 @@ export class GlSequencerPage extends LitElement {
         return;
       }
 
-      this.#engine.master.gain.value = dbToGain(this.project.masterGainDb);
+      const masterLin = dbToGain(this.project.masterGainDb);
+      this.#engine.setBaseMasterGain(masterLin);
+      this.#engine.master.gain.value = masterLin;
       this.#engine.setClips(scheduled);
 
       const from = ticksToSamples(
@@ -4866,6 +5201,7 @@ export class GlSequencerPage extends LitElement {
       );
 
       this.#engine.play(from);
+      this.#syncAutomation();
       if (gen !== this.#playGen) {
         this.#engine.stop();
         return;
@@ -6304,6 +6640,23 @@ export class GlSequencerPage extends LitElement {
         .map((a) => [a.sampleId, a]),
     );
 
+    const sampleGenes =
+      this.draftGenGrooveFromSamples === "off"
+        ? []
+        : await collectSampleGenes({
+            projectBpm: this.project.bpm,
+            samples: pool.map((s) => {
+              const a = analysisById.get(s.id);
+              return {
+                id: s.id,
+                durationMs: s.durationMs,
+                class: s.class,
+                loopScore: s.loopScore ?? a?.loopScore,
+                analysisBpm: a?.bpm,
+              };
+            }),
+          });
+
     const planned = planSequence({
       bars: this.project.bars,
       beatsPerBar: this.project.timeSignature[0],
@@ -6315,12 +6668,19 @@ export class GlSequencerPage extends LitElement {
       drumsVsTexture: this.draftGenDrumsTextures,
       musicStyle: this.draftGenMusicStyle,
       groove: this.draftGenGroove,
+      grooveFromSamples: this.draftGenGrooveFromSamples,
+      sampleGenes,
+      locks: locksFromLayers(this.draftGenLockSalts),
+      regenSalt: this.draftGenRegenSalt,
       keyRootPc: this.draftGenKey,
       scaleMode: this.draftGenScale,
       palette: this.draftGenPalette,
       formStyle: this.draftGenForm,
+      energyShape: this.draftGenEnergyShape,
       humanize: this.draftGenHumanize,
       variation: this.draftGenVariation,
+      life: this.draftGenLife,
+      space: this.draftGenSpace,
       sampleVariety: this.draftGenSampleVariety,
       bpmSync: this.draftGenBpmSync,
       reverse: this.draftGenReverse,
@@ -6395,12 +6755,63 @@ export class GlSequencerPage extends LitElement {
         gainDb: mix.gainDb,
         pan: mix.pan,
         fx: mix.fx,
+        sendA: mix.sendA ?? 0,
+        sendB: mix.sendB ?? 0,
       };
     });
     await db.tracks.bulkPut(nextTracks);
     this.tracks = nextTracks;
+    if (this.project) {
+      const automation: AutomationLane[] | undefined = planned.automation
+        ?.map((lane) => AutomationLaneSchema.safeParse(lane))
+        .filter((r): r is { success: true; data: AutomationLane } => r.success)
+        .map((r) => r.data);
+      const formSections: FormSection[] | undefined = planned.score?.sections
+        ?.map((sec) =>
+          FormSectionSchema.safeParse({
+            id: sec.id,
+            kind: sec.kind,
+            startBar: sec.startBar,
+            bars: sec.bars,
+            energy: sec.energy,
+          }),
+        )
+        .filter((r): r is { success: true; data: FormSection } => r.success)
+        .map((r) => r.data);
+      const spaces = planned.spaces
+        ? {
+            A: normalizeMasterFx(planned.spaces.A),
+            B: normalizeMasterFx(planned.spaces.B),
+          }
+        : undefined;
+      this.project = {
+        ...this.project,
+        ...(planned.master
+          ? {
+              masterGainDb: planned.master.masterGainDb,
+              preampGainDb: planned.master.preampGainDb,
+              masterFx: planned.master.fx,
+            }
+          : {}),
+        spaces,
+        automation: automation && automation.length > 0 ? automation : undefined,
+        formSections:
+          formSections && formSections.length > 0 ? formSections : undefined,
+        updatedAt: nowIso(),
+        revision: this.project.revision + 1,
+      };
+      await db.projects.put(this.project);
+      if (this.#engine) {
+        const masterLin = dbToGain(this.project.masterGainDb);
+        this.#engine.setBaseMasterGain(masterLin);
+        this.#engine.master.gain.value = masterLin;
+      }
+      this.#syncMasterFx();
+      this.#syncSendSpaces();
+    }
     this.#bounceCache = null;
     this.#syncTrackBuses();
+    this.#syncAutomation();
 
     const sampleById = new Map(pool.map((s) => [s.id, s]));
     const created: Clip[] = planned.clips.map((p) => {

@@ -1,6 +1,7 @@
 import type { ExprRole } from "@glane/core-model";
 import { PPQ } from "@glane/core-model";
 import type { MusicStyleId } from "./styles/ids.js";
+import { styleGeneratorProfile } from "./styles/profiles.js";
 import type {
   NoteEvent,
   Section,
@@ -16,29 +17,8 @@ export type EnsembleAssign = {
 
 const MELODIC: ExprRole[] = ["lead", "arp", "chord"];
 
-function styleBias(style: MusicStyleId): {
-  lock: number;
-  respond: number;
-  kinship: number;
-} {
-  if (
-    style === "techno" ||
-    style === "house" ||
-    style === "dnb" ||
-    style === "breakbeat"
-  ) {
-    return { lock: 0.7, respond: 0.15, kinship: 0.15 };
-  }
-  if (style === "jazz" || style === "folk" || style === "blues") {
-    return { lock: 0.2, respond: 0.5, kinship: 0.3 };
-  }
-  if (style === "ambient" || style === "dub" || style === "triphop") {
-    return { lock: 0.15, respond: 0.2, kinship: 0.65 };
-  }
-  if (style === "reggae" || style === "funk" || style === "hiphop") {
-    return { lock: 0.25, respond: 0.55, kinship: 0.2 };
-  }
-  return { lock: 0.4, respond: 0.35, kinship: 0.25 };
+function styleBias(style: MusicStyleId) {
+  return styleGeneratorProfile(style).ensemble;
 }
 
 function sectionPreferred(

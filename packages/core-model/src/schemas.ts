@@ -360,6 +360,84 @@ export function normalizeMasterFx(raw: unknown): TrackFx {
   };
 }
 
+/** Automation breakpoint (musical ticks → engine converts to samples). */
+export const AutoPointSchema = z.object({
+  tick: z.number(),
+  value: z.number(),
+  curve: z.enum(["step", "lin", "exp", "s"]).default("lin"),
+});
+export type AutoPoint = z.infer<typeof AutoPointSchema>;
+
+export const AutomationTargetSchema = z.discriminatedUnion("scope", [
+  z.object({
+    scope: z.literal("track"),
+    trackIndex: z.number().int().nonnegative(),
+    param: z.enum([
+      "gainDb",
+      "pan",
+      "hpHz",
+      "lpHz",
+      "sendA",
+      "sendB",
+      "fxMix",
+      "fxFeedback",
+      "fxDecay",
+      "fxRateHz",
+      "fxDepth",
+      "attackMs",
+      "decayMs",
+      "sustain",
+      "releaseMs",
+    ]),
+  }),
+  z.object({
+    scope: z.literal("bus"),
+    bus: z.enum(["A", "B"]),
+    param: z.enum([
+      "returnDb",
+      "decay",
+      "feedback",
+      "damping",
+      "delayBeats",
+    ]),
+  }),
+  z.object({
+    scope: z.literal("master"),
+    param: z.enum(["gainDb", "hpHz", "lpHz", "fx0Mix", "fx1Mix", "width"]),
+  }),
+]);
+export type AutomationTarget = z.infer<typeof AutomationTargetSchema>;
+
+export const AutomationLaneSchema = z.object({
+  target: AutomationTargetSchema,
+  points: z.array(AutoPointSchema).min(1),
+  gesture: z.string().optional(),
+});
+export type AutomationLane = z.infer<typeof AutomationLaneSchema>;
+
+/** Song-form section marker from the hierarchical composer (timeline banner). */
+export const FormSectionKindSchema = z.enum([
+  "intro",
+  "verse",
+  "prechorus",
+  "chorus",
+  "bridge",
+  "break",
+  "build",
+  "drop",
+  "outro",
+]);
+export type FormSectionKind = z.infer<typeof FormSectionKindSchema>;
+
+export const FormSectionSchema = z.object({
+  id: z.string(),
+  kind: FormSectionKindSchema,
+  startBar: z.number().int().nonnegative(),
+  bars: z.number().int().positive(),
+  energy: z.number().min(0).max(1),
+});
+export type FormSection = z.infer<typeof FormSectionSchema>;
+
 export const ProjectSchema = z.object({
   id: z.string().uuid(),
   title: z.string(),
@@ -374,6 +452,20 @@ export const ProjectSchema = z.object({
    * Tone / ADSR on these rows are ignored (track-only).
    */
   masterFx: z.tuple([TrackFxSchema, TrackFxSchema]).optional(),
+  /**
+   * Shared send-return spaces (composer SpacePlan A/B).
+   * Tracks route via `sendA` / `sendB`.
+   */
+  spaces: z
+    .object({
+      A: TrackFxSchema,
+      B: TrackFxSchema,
+    })
+    .optional(),
+  /** Composer / generator automation (optional; ignored if empty). */
+  automation: z.array(AutomationLaneSchema).optional(),
+  /** Last generated song form (optional; timeline banner). */
+  formSections: z.array(FormSectionSchema).optional(),
   snapConfig: z.string().optional(),
   revision: z.number().int().nonnegative(),
   createdAt: z.string().datetime(),
@@ -382,6 +474,30 @@ export const ProjectSchema = z.object({
 });
 export type Project = z.infer<typeof ProjectSchema>;
 
+function normalizeAutomation(
+  raw: Project["automation"],
+): AutomationLane[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: AutomationLane[] = [];
+  for (const lane of raw) {
+    const parsed = AutomationLaneSchema.safeParse(lane);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function normalizeFormSections(
+  raw: Project["formSections"],
+): FormSection[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: FormSection[] = [];
+  for (const sec of raw) {
+    const parsed = FormSectionSchema.safeParse(sec);
+    if (parsed.success) out.push(parsed.data);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /** Fill missing mix fields (legacy IDB rows without `preampGainDb` / `masterFx`). */
 export function normalizeProject(raw: Project): Project {
   const masterFxRaw = raw.masterFx;
@@ -389,11 +505,22 @@ export function normalizeProject(raw: Project): Project {
     normalizeMasterFx(masterFxRaw?.[0]),
     normalizeMasterFx(masterFxRaw?.[1]),
   ];
+  const spacesRaw = raw.spaces;
+  const spaces =
+    spacesRaw && typeof spacesRaw === "object"
+      ? {
+          A: normalizeMasterFx(spacesRaw.A),
+          B: normalizeMasterFx(spacesRaw.B),
+        }
+      : undefined;
   return {
     ...raw,
     masterGainDb: Number.isFinite(raw.masterGainDb) ? raw.masterGainDb : 0,
     preampGainDb: Number.isFinite(raw.preampGainDb) ? raw.preampGainDb : 0,
     masterFx,
+    spaces,
+    automation: normalizeAutomation(raw.automation),
+    formSections: normalizeFormSections(raw.formSections),
   };
 }
 
@@ -530,15 +657,25 @@ export const TrackSchema = z.object({
   color: z.string().optional(),
   heightPx: z.number().int().positive(),
   fx: TrackFxSchema.default(DEFAULT_TRACK_FX),
+  /** Post-fader send to project space bus A (0…1). */
+  sendA: z.number().min(0).max(1).optional(),
+  /** Post-fader send to project space bus B (0…1). */
+  sendB: z.number().min(0).max(1).optional(),
 });
 export type Track = z.infer<typeof TrackSchema>;
 
 /** Fill missing track fields (legacy IDB rows without `fx`). */
 export function normalizeTrack(raw: Track): Track {
+  const clamp01 = (n: unknown) =>
+    typeof n === "number" && Number.isFinite(n)
+      ? Math.min(1, Math.max(0, n))
+      : 0;
   return {
     ...raw,
     pan: Number.isFinite(raw.pan) ? raw.pan : 0,
     fx: normalizeTrackFx(raw.fx),
+    sendA: clamp01(raw.sendA),
+    sendB: clamp01(raw.sendB),
   };
 }
 

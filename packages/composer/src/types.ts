@@ -280,6 +280,8 @@ export type Score = {
   warnings: string[];
 };
 
+export type GrooveFromSamples = "on" | "off" | "auto";
+
 export type ComposeSettings = {
   seed: number;
   style: MusicStyleId | "auto";
@@ -299,7 +301,19 @@ export type ComposeSettings = {
   tuningRef: "440" | "library" | "auto";
   targetLufs: number;
   lockPitch?: boolean;
+  /** When set, one role per project track (from library inventory). */
+  trackRoles?: ExprRole[];
+  /**
+   * Frozen path prefixes for lock-regenerate.
+   * Locked path uses `salt`; unlocked paths use `regenSalt`.
+   */
   locks?: Array<{ path: Path; salt: string }>;
+  /** Salt applied to unlocked RNG paths (bump to reshuffle). */
+  regenSalt?: string;
+  /** Pre-extracted RhythmGenes from library loops (onset → 16th grid). */
+  sampleGenes?: RhythmGene[];
+  /** Prefer sample genes in DNA rhythm set. Default auto. */
+  grooveFromSamples?: GrooveFromSamples;
 };
 
 export type ComposeResult = {

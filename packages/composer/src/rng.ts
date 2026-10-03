@@ -35,6 +35,39 @@ export function withSalt(path: Path, salt: string): Path {
   return salt ? `${path}#salt:${salt}` : path;
 }
 
+function pathMatchesLock(path: Path, lockPath: Path): boolean {
+  return (
+    path === lockPath ||
+    path.startsWith(`${lockPath}/`) ||
+    path.startsWith(`${lockPath}#`)
+  );
+}
+
+/**
+ * Addressable RNG with lock-regenerate:
+ * - locked prefix → frozen salt (stable across regen)
+ * - else → `regenSalt` (bump to reshuffle unlocked layers)
+ */
+export function makeComposeRng(
+  seed: number,
+  opts?: {
+    locks?: ReadonlyArray<{ path: Path; salt: string }>;
+    regenSalt?: string;
+  },
+): Rng {
+  const locks = opts?.locks ?? [];
+  const regen = opts?.regenSalt ?? "";
+  return (path) => {
+    let best: { path: Path; salt: string } | null = null;
+    for (const lock of locks) {
+      if (!pathMatchesLock(path, lock.path)) continue;
+      if (!best || lock.path.length > best.path.length) best = lock;
+    }
+    if (best) return rng(seed, withSalt(path, best.salt));
+    return rng(seed, withSalt(path, regen));
+  };
+}
+
 export function pick<T>(r: Rng, path: Path, arr: readonly T[]): T {
   if (arr.length === 0) {
     throw new Error(`pick: empty array at ${path}`);

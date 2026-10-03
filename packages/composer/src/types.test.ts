@@ -31,7 +31,7 @@ describe("composer scaffold", () => {
     };
     const { score, resolved } = compose(settings);
     assert.equal(resolved.style, "ambient");
-    assert.equal(resolved.formFamily, "verse-chorus");
+    assert.equal(resolved.formFamily, "loop-evolve");
     assert.equal(resolved.mode, "aeolian");
     assert.equal(score.dna.seed, 1);
     assert.ok(score.sections.length > 0);
