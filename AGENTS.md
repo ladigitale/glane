@@ -133,6 +133,13 @@ Front: `apps/web` — Lit custom elements `gl-*` + `@supersoniks/concorde`.
 | `.cursor/skills/glane-arranger/SKILL.md` | Sequence gen: lock / call–response / kinship between melodic voices |
 | `.cursor/skills/glane-themes/SKILL.md` | UI theme palettes (nord / dark / matcha): review & retune `--sc-*` |
 
+## Claude connector (ADR-0024)
+
+- `packages/agent` — `ScoreSchema` (agent score), `compileScore` / `decompileArrangement`, library digest, `describeCapabilities()` (the guide Claude reads), bridge protocol
+- `apps/mcp` — stateless MCP relay (`POST /mcp/<token>`, `WS /agent/bridge`); tools `glane_*`
+- `apps/web/src/app/agent/` — browser bridge, handlers (library, arrangement write/undo with snapshots, transport), account UI
+- Adding a track / clip / FX parameter: update `ScoreSchema`, the compiler, `describeCapabilities()` and the guide-example test together
+
 ## Architecture
 
 - **`apps/web/src/app/`** — product UI (capture, library, editor, sequencer, …)

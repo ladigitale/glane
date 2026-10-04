@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
+  /** Claude connector relay (apps/mcp). Default: VITE_API_BASE_URL. */
+  readonly VITE_AGENT_RELAY_URL?: string;
 }
 
 interface ImportMeta {

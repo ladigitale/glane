@@ -159,3 +159,7 @@ docker compose -f compose.prod.yaml exec php bin/console doctrine:migrations:mig
 | `deploy/Caddyfile.edge` | TLS SPA + API reverse proxy (solo) |
 | `deploy/tadaaa-cohost/` | Tadaaa edge overlay + `glane.caddy` |
 | `scripts/install-prod.sh` / `update-prod.sh` | One-shot install / update |
+
+## Claude connector (`mcp` service)
+
+`compose.prod.yaml` builds `apps/mcp/Dockerfile` (repo root context) into `glane-mcp`. The API host routes `/mcp/*` and `/agent/*` to it (`deploy/Caddyfile.edge`; cohost: `deploy/tadaaa-cohost/glane.caddy` → `glane-mcp:8787`, so re-copy the snippet into Tadaaa's `deploy/cohost/` and reload its edge). `AGENT_ALLOWED_ORIGINS` defaults to `https://$APP_SERVER_NAME`. The relay is stateless: restarting it only makes open tabs reconnect.

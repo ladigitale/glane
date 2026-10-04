@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "workspaces": [
     "apps/web",
+    "apps/mcp",
     "packages/*"
   ],
   "scripts": {
@@ -20,7 +21,7 @@
     "preview": "yarn --cwd apps/web preview",
     "typecheck": "yarn workspaces run typecheck",
     "ai:sync": "node scripts/sync-ai.mjs",
-    "test": "yarn --cwd packages/audio-dsp test && yarn --cwd packages/gestures test && yarn --cwd packages/core-model test && yarn --cwd packages/audio-io test && yarn --cwd packages/audio-ml test && yarn --cwd packages/audio-synth test && yarn --cwd packages/composer test && yarn --cwd packages/audio-engine test && yarn --cwd apps/web test",
+    "test": "yarn --cwd packages/audio-dsp test && yarn --cwd packages/gestures test && yarn --cwd packages/core-model test && yarn --cwd packages/audio-io test && yarn --cwd packages/audio-ml test && yarn --cwd packages/audio-synth test && yarn --cwd packages/composer test && yarn --cwd packages/agent test && yarn --cwd packages/audio-engine test && yarn --cwd apps/web test && yarn --cwd apps/mcp test",
     "api:up": "yarn env:up",
     "api:down": "yarn env:down",
     "api:logs": "docker compose logs -f php database",
@@ -30,7 +31,8 @@
     "api:composer": "docker compose exec php composer",
     "api:sh": "docker compose exec php sh",
     "prod:install": "bash scripts/install-prod.sh",
-    "prod:update": "bash scripts/update-prod.sh"
+    "prod:update": "bash scripts/update-prod.sh",
+    "mcp:dev": "yarn --cwd apps/mcp dev"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
   "devDependencies": {

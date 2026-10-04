@@ -8,6 +8,7 @@ import { set } from "@supersoniks/concorde/utils";
 import { ensurePrefs } from "./db.js";
 import { bootRecoverSessions } from "./boot-recover.js";
 import { startSyncScheduler } from "./sync.js";
+import { startAgentBridge } from "./agent/bridge.js";
 import { processQueue, type ProcessQueueSnapshot } from "./process-queue.js";
 import { t, tf, setLocale } from "./i18n/messages.js";
 import { getWordingsServiceUrl } from "./i18n/wordings-fetch.js";
@@ -247,6 +248,7 @@ export class GlApp extends LitElement {
       this.proc = s;
     });
     startSyncScheduler();
+    startAgentBridge();
   }
 
   override disconnectedCallback(): void {

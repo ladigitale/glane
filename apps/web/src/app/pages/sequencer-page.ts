@@ -123,6 +123,7 @@ import {
   type ReelSceneId,
 } from "../reel-export.js";
 import { auth } from "../auth.js";
+import { registerSequencer } from "../agent/seq-link.js";
 import { saveBounceToLibrary } from "../sample-actions.js";
 import {
   CANCEL_ZONE_H,
@@ -912,9 +913,18 @@ export class GlSequencerPage extends LitElement {
   @state() private viewMode: "global" | "vue" = "global";
 
   #unsubWheel: (() => void) | null = null;
+  #unlinkAgent: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.#unlinkAgent = registerSequencer({
+      projectId: () => this.project?.id ?? null,
+      reloadFromDb: () => this.#reloadFromDb(),
+      play: (fromBar) => this.#agentPlay(fromBar),
+      stop: () => this.#haltTransport(),
+      isPlaying: () => this.playing,
+      audioState: () => this.#engine?.ctx.state ?? "none",
+    });
     set(seqDrawerKey, { filter: "all" });
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener(SAMPLE_PROCESSED_EVENT, this.#onSampleProcessed);
@@ -1038,6 +1048,8 @@ export class GlSequencerPage extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    this.#unlinkAgent?.();
+    this.#unlinkAgent = null;
     chromeMore.clear();
     this.#persistUiState();
     window.removeEventListener("keydown", this.#onKey);
@@ -1080,6 +1092,59 @@ export class GlSequencerPage extends LitElement {
       void this.#paintClipWaves();
     });
   };
+
+  /**
+   * Agent bridge wrote the arrangement to IndexedDB: re-read it without
+   * rebuilding the audio engine (keeps the already-unlocked AudioContext).
+   */
+  async #reloadFromDb(): Promise<void> {
+    if (!this.project) return;
+    this.#haltTransport(0);
+    const p = await db.projects.get(this.project.id);
+    if (!p) return;
+    this.project = normalizeProject(p);
+    const rawTracks = await db.tracks
+      .where("projectId")
+      .equals(p.id)
+      .sortBy("index");
+    this.tracks = rawTracks.map(normalizeTrack);
+    this.clips = await db.clips
+      .where("trackId")
+      .anyOf(this.tracks.map((t) => t.id))
+      .toArray();
+    this.selectedId = null;
+    this.#bufferCache.clear();
+    this.#bounceCache = null;
+    if (this.#engine) {
+      const masterLin = dbToGain(this.project.masterGainDb);
+      this.#engine.setBaseMasterGain(masterLin);
+      this.#engine.master.gain.value = masterLin;
+    }
+    this.#syncMasterFx();
+    this.#syncSendSpaces();
+    this.#syncTrackBuses();
+    this.#syncAutomation();
+  }
+
+  async #agentPlay(
+    fromBar?: number,
+  ): Promise<{ playing: boolean; audio: AudioContextState | "none" }> {
+    if (!this.#engine || !this.project) return { playing: false, audio: "none" };
+    this.#haltTransport(
+      fromBar != null
+        ? Math.max(0, (fromBar - 1) * this.project.timeSignature[0] * PPQ)
+        : 0,
+    );
+    if (this.#engine.ctx.state === "suspended") {
+      // Without user activation, resume() can stay pending: don't wait on it.
+      await Promise.race([
+        this.#engine.ctx.resume().catch(() => undefined),
+        new Promise((r) => setTimeout(r, 800)),
+      ]);
+    }
+    await this.#handleTransport("play");
+    return { playing: this.playing, audio: this.#engine.ctx.state };
+  }
 
   async #boot(): Promise<void> {
     await this.#ensureProject();

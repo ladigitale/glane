@@ -1,0 +1,28 @@
+{
+  "name": "@glane/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude connector for Glane: MCP server relaying tool calls to the open Glane tab",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/relay.test.ts",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/main.mjs --external:bufferutil --external:utf-8-validate \"--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
+  },
+  "dependencies": {
+    "@glane/agent": "0.1.0",
+    "@glane/core-model": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "tsx": "4.19.2",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.3",
+    "esbuild": "^0.23.1"
+  }
+}

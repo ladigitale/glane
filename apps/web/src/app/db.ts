@@ -83,6 +83,21 @@ export type UserPrefs = {
   mlClapLimit?: number;
   /** Demucs FT stems to materialize (default all four). */
   mlDemucsStems?: string[];
+  /** Claude connector (MCP relay) — bridge active when true. */
+  agentEnabled?: boolean;
+  /** Secret shared with the relay; part of the connector URL. */
+  agentToken?: string;
+};
+
+/** Pre-write copy of an arrangement (agent writes are undoable). */
+export type AgentSnapshot = {
+  id: string;
+  projectId: string;
+  createdAt: string;
+  reason: string;
+  project: Project;
+  tracks: Track[];
+  clips: Clip[];
 };
 
 export type ProcessJobStatus = "pending" | "running" | "done" | "error";
@@ -107,6 +122,7 @@ export class GlaneDb extends Dexie {
   ops!: Table<EditOperation, string>;
   prefs!: Table<UserPrefs, string>;
   processJobs!: Table<ProcessJob, string>;
+  agentSnapshots!: Table<AgentSnapshot, string>;
 
   constructor() {
     super(`${STORAGE_PREFIX}-db`);
@@ -238,6 +254,19 @@ export class GlaneDb extends Dexie {
           await prefsTbl.put({ ...pref, currentProjectId: workspaceId });
         }
       });
+    this.version(6).stores({
+      sessions: "id, status, startedAt, deletedAt, title, projectId",
+      samples:
+        "id, sessionId, projectId, class, favorite, deletedAt, name, captureName, *tags",
+      analyses: "sampleId",
+      projects: "id, updatedAt, deletedAt",
+      tracks: "id, projectId, index",
+      clips: "id, trackId, sampleId",
+      ops: "id, clientSeq, entityId, createdAt, syncedAt",
+      prefs: "id",
+      processJobs: "id, sampleId, status, createdAt",
+      agentSnapshots: "id, projectId, createdAt",
+    });
   }
 }
 

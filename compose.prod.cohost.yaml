@@ -19,6 +19,13 @@ services:
         aliases:
           - glane-php
 
+  mcp:
+    networks:
+      default: {}
+      web:
+        aliases:
+          - glane-mcp
+
 networks:
   web:
     external: true

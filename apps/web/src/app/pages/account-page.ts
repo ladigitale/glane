@@ -10,6 +10,7 @@ import { accountFormKey, type AccountForm } from "../dp-keys.js";
 import { t } from "../i18n/messages.js";
 import { glIcon } from "../icon.js";
 import { pathFor } from "../router.js";
+import "../agent/agent-connector.js";
 
 @customElement("gl-account-page")
 export class GlAccountPage extends LitElement {
@@ -166,6 +167,7 @@ export class GlAccountPage extends LitElement {
         ${this.message
           ? html`<sonic-alert status="success" label="OK">${this.message}</sonic-alert>`
           : nothing}
+        <gl-agent-connector></gl-agent-connector>
         <a
           class="text-sm text-neutral-9 underline-offset-2 hover:underline"
           href=${pathFor({ name: "landing" })}

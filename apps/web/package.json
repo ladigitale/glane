@@ -14,6 +14,7 @@
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
     "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
+    "@glane/agent": "0.1.0",
     "@glane/audio-dsp": "0.1.0",
     "@glane/audio-engine": "0.1.0",
     "@glane/audio-io": "0.1.0",

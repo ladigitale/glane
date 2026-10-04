@@ -19,6 +19,12 @@
 
 {$API_SERVER_NAME:api.example.com} {
 	@mercure path /.well-known/mercure*
+	# Claude connector: MCP endpoint + WebSocket bridge (apps/mcp)
+	@agent path /mcp/* /agent/*
+
+	handle @agent {
+		reverse_proxy mcp:8787
+	}
 
 	handle @mercure {
 		reverse_proxy php:80 {

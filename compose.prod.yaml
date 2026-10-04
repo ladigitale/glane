@@ -33,6 +33,7 @@ services:
         protocol: udp
     depends_on:
       - php
+      - mcp
 
   php:
     image: ${IMAGES_PREFIX:-}glane-api:prod
@@ -74,6 +75,19 @@ services:
     depends_on:
       database:
         condition: service_healthy
+
+  # Claude connector — MCP relay to the open Glane tab (stores nothing).
+  mcp:
+    image: ${IMAGES_PREFIX:-}glane-mcp:prod
+    build:
+      context: .
+      dockerfile: apps/mcp/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+      AGENT_ALLOWED_ORIGINS: ${AGENT_ALLOWED_ORIGINS:-https://${APP_SERVER_NAME:-app.example.com}}
+    expose:
+      - "8787"
 
   database:
     image: postgres:${POSTGRES_VERSION:-16}-alpine
