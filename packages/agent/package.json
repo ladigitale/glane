@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/compile.test.ts src/decompile.test.ts src/library.test.ts"
+    "test": "tsx --test src/compile.test.ts src/decompile.test.ts src/library.test.ts src/synth.test.ts"
   },
   "dependencies": {
     "@glane/core-model": "0.1.0",

@@ -5,25 +5,29 @@ import {
   SampleClassSchema,
 } from "@glane/core-model";
 import {
+  BakeFxSchema,
   LIBRARY_MAX_LIMIT,
+  LibraryUpdateFieldsSchema,
+  SampleListSchema,
   ScoreSchema,
+  SynthConfigSchema,
   describeCapabilities,
   type BridgeMethod,
   type BridgeMethodMap,
 } from "@glane/agent";
 import { NoAppConnectedError, type Relay } from "./relay.js";
 
-export const SERVER_INSTRUCTIONS = `Glane est un instrument de field recording : captures → bibliothèque de sons → séquenceur 6 pistes.
+export const SERVER_INSTRUCTIONS = `Glane est un instrument de field recording : captures → synthèse optionnelle → bibliothèque → séquenceur 6 pistes.
 Ce connecteur pilote l'onglet Glane ouvert par l'utilisateur (les sons restent sur son appareil).
 
-Pour composer un morceau :
-1. glane_status pour vérifier que l'app est ouverte et voir le projet courant.
-2. glane_guide une fois par conversation : syntaxe de la partition et tous les paramètres (pistes, master, spaces, clips, automation).
-3. glane_library pour connaître les sons (classe, rôle inféré, durée, boucle seamless, BPM, note, brillance, densité de transitoires, LUFS, tags, notes de l'utilisateur).
-4. Écrire la partition complète avec glane_write_arrangement (play: true pour l'écouter tout de suite). Elle remplace l'arrangement courant ; un snapshot est pris avant, glane_undo_write revient en arrière.
-5. Itérer : glane_get_arrangement relit l'état actuel (y compris les retouches faites à la main), puis réécrire.
+Parcours typique :
+1. glane_status — app ouverte, projet courant.
+2. glane_guide une fois — synth, biblio, FX bake, syntaxe de partition.
+3. Optionnel : glane_synth_generate pour créer des sons (config → génération → save biblio en one-shot).
+4. glane_library pour lister les sons ; glane_library_update / delete / duplicate / crop pour les muter ; glane_bake_fx pour baker un insert sur un son.
+5. glane_write_arrangement (play: true) pour composer ; glane_undo_write pour annuler ; glane_get_arrangement pour relire.
 
-Tu n'entends pas le rendu : appuie-toi sur les descripteurs (rôle, note, BPM, boucle, centroïde, densité), privilégie les favoris et les sons bien notés, garde une structure claire (sections), et décris à l'utilisateur ce que tu as construit pour qu'il te guide à l'oreille.`;
+Tu n'entends pas le rendu : appuie-toi sur les descripteurs, privilégie favoris et notes, structure claire (sections), et décris ce que tu as construit pour que l'utilisateur te guide à l'oreille.`;
 
 type Text = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -169,6 +173,122 @@ export function createGlaneMcpServer(relay: Relay, token: string): McpServer {
       return table != null
         ? { content: [{ type: "text", text: JSON.stringify(meta) }, { type: "text", text: table }] }
         : ok(r.value);
+    },
+  );
+
+  register<BridgeMethodMap["synth.generate"]["params"]>(server,
+    "glane_synth_generate",
+    {
+      title: "Synthèse → bibliothèque",
+      description:
+        "Configure, génère et enregistre des sons synthétiques dans la bibliothèque du projet (one-shot, pas de brouillon). Voir glane_guide section Synthèse. Timeout long (rendu OfflineAudioContext).",
+      inputSchema: {
+        mode: SynthConfigSchema.shape.mode,
+        intention: SynthConfigSchema.shape.intention,
+        coherence: SynthConfigSchema.shape.coherence,
+        tonicPc: SynthConfigSchema.shape.tonicPc,
+        scaleMode: SynthConfigSchema.shape.scaleMode,
+        bpm: SynthConfigSchema.shape.bpm,
+        freeFmRatios: SynthConfigSchema.shape.freeFmRatios,
+        seed: SynthConfigSchema.shape.seed,
+        cards: SynthConfigSchema.shape.cards,
+        open: SynthConfigSchema.shape.open,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      const r = await bridge("synth.generate", args, 180_000);
+      if (!r.ok) return r.res;
+      return r.value.ok ? ok(r.value) : fail(JSON.stringify({ errors: r.value.errors }, null, 1));
+    },
+  );
+
+  register<BridgeMethodMap["library.update"]["params"]>(server,
+    "glane_library_update",
+    {
+      title: "Modifier des sons",
+      description:
+        "Met à jour favori, note (1–5 ou null), nom, rôle générateur forcé, tags (add/remove) sur un ou plusieurs sons (ids courts ok).",
+      inputSchema: {
+        samples: LibraryUpdateFieldsSchema.shape.samples,
+        favorite: LibraryUpdateFieldsSchema.shape.favorite,
+        rating: LibraryUpdateFieldsSchema.shape.rating,
+        name: LibraryUpdateFieldsSchema.shape.name,
+        forceRole: LibraryUpdateFieldsSchema.shape.forceRole,
+        addTags: LibraryUpdateFieldsSchema.shape.addTags,
+        removeTags: LibraryUpdateFieldsSchema.shape.removeTags,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      const r = await bridge("library.update", args);
+      if (!r.ok) return r.res;
+      return r.value.ok ? ok(r.value) : fail(JSON.stringify({ errors: r.value.errors }, null, 1));
+    },
+  );
+
+  register<BridgeMethodMap["library.delete"]["params"]>(server,
+    "glane_library_delete",
+    {
+      title: "Supprimer des sons",
+      description: "Supprime des sons de la bibliothèque (et leurs clips associés).",
+      inputSchema: { samples: SampleListSchema.shape.samples },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (args) => {
+      const r = await bridge("library.delete", args);
+      if (!r.ok) return r.res;
+      return r.value.ok ? ok(r.value) : fail(JSON.stringify({ errors: r.value.errors }, null, 1));
+    },
+  );
+
+  register<BridgeMethodMap["library.duplicate"]["params"]>(server,
+    "glane_library_duplicate",
+    {
+      title: "Dupliquer des sons",
+      description: "Duplique des sons dans le projet courant (nouvelle copie PCM + nom « (copie) »).",
+      inputSchema: { samples: SampleListSchema.shape.samples },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      const r = await bridge("library.duplicate", args);
+      if (!r.ok) return r.res;
+      return r.value.ok ? ok(r.value) : fail(JSON.stringify({ errors: r.value.errors }, null, 1));
+    },
+  );
+
+  register<BridgeMethodMap["library.crop"]["params"]>(server,
+    "glane_library_crop",
+    {
+      title: "Auto-crop des sons",
+      description: "Recadre attaques tardives et queues silencieuses (même logique que l'UI).",
+      inputSchema: { samples: SampleListSchema.shape.samples },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (args) => {
+      const r = await bridge("library.crop", args, 60_000);
+      if (!r.ok) return r.res;
+      return r.value.ok ? ok(r.value) : fail(JSON.stringify({ errors: r.value.errors }, null, 1));
+    },
+  );
+
+  register<BridgeMethodMap["sample.bake_fx"]["params"]>(server,
+    "glane_bake_fx",
+    {
+      title: "Baker FX sur un son",
+      description:
+        "Applique un insert FX (même schéma que les pistes) sur tout le PCM d'un son et le réenregistre. Voir glane_guide section fx.",
+      inputSchema: {
+        sample: BakeFxSchema.shape.sample,
+        fx: BakeFxSchema.shape.fx as unknown as z.ZodTypeAny,
+        bpm: BakeFxSchema.shape.bpm,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    },
+    async (args) => {
+      const r = await bridge("sample.bake_fx", args, 60_000);
+      if (!r.ok) return r.res;
+      return r.value.ok ? ok(r.value) : fail(JSON.stringify({ errors: r.value.errors }, null, 1));
     },
   );
 

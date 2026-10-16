@@ -1,4 +1,6 @@
 import type { LibraryQuery } from "./library.js";
+import type { LibraryUpdate, SampleList, SynthConfig } from "./synth.js";
+import type { FxPatch } from "./score.js";
 
 /**
  * Relay ↔ browser bridge protocol (JSON over WebSocket).
@@ -9,6 +11,13 @@ import type { LibraryQuery } from "./library.js";
 export const AGENT_BRIDGE_PATH = "/agent/bridge";
 export const AGENT_MCP_PATH_PREFIX = "/mcp";
 export const AGENT_PROTOCOL_VERSION = 1;
+
+export type BridgeSynthSample = {
+  id: string;
+  name: string;
+  role?: string;
+  durationMs: number;
+};
 
 export type BridgeMethodMap = {
   status: { params: Record<string, never>; result: BridgeStatus };
@@ -24,6 +33,44 @@ export type BridgeMethodMap = {
       summary?: Record<string, unknown>;
       table?: string;
       rows?: unknown[];
+    };
+  };
+  "library.update": {
+    params: LibraryUpdate;
+    result: { ok: boolean; updated: number; errors?: string[]; note?: string };
+  };
+  "library.delete": {
+    params: SampleList;
+    result: { ok: boolean; deleted: number; errors?: string[] };
+  };
+  "library.duplicate": {
+    params: SampleList;
+    result: { ok: boolean; duplicated: number; ids?: string[]; errors?: string[] };
+  };
+  "library.crop": {
+    params: SampleList;
+    result: { ok: boolean; cropped: number; skipped: number; errors?: string[] };
+  };
+  "synth.generate": {
+    params: SynthConfig;
+    result: {
+      ok: boolean;
+      projectId?: string;
+      seed?: number;
+      saved?: number;
+      samples?: BridgeSynthSample[];
+      errors?: string[];
+      note?: string;
+    };
+  };
+  "sample.bake_fx": {
+    params: { sample: string; fx: FxPatch; bpm?: number };
+    result: {
+      ok: boolean;
+      sampleId?: string;
+      durationMs?: number;
+      errors?: string[];
+      note?: string;
     };
   };
   "arrangement.get": { params: Record<string, never>; result: { projectId: string; score: unknown } };
@@ -53,6 +100,12 @@ export const BRIDGE_METHODS: readonly BridgeMethod[] = [
   "projects.list",
   "projects.select",
   "library.list",
+  "library.update",
+  "library.delete",
+  "library.duplicate",
+  "library.crop",
+  "synth.generate",
+  "sample.bake_fx",
   "arrangement.get",
   "arrangement.write",
   "arrangement.undo",

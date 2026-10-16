@@ -14,12 +14,51 @@ import {
 import { AGENT_MAX_BARS, AGENT_MAX_TRACKS } from "./score.js";
 
 /**
- * Reference sheet handed to the agent: every parameter it can set on tracks,
- * master, spaces and clip instances, with ranges and the score syntax.
+ * Reference sheet handed to the agent: synth, library mutations, FX bake,
+ * and every parameter it can set on tracks / master / spaces / clips.
  */
 export function describeCapabilities(): string {
-  return `# Glane — partition d'arrangement (agent)
+  return `# Glane — guide agent
 
+## Synthèse (one-shot)
+\`glane_synth_generate\` configure, génère et enregistre **tous** les rendus dans la bibliothèque du projet courant (pas d'étape brouillon — tu n'entends pas le rendu).
+
+- \`mode\` : variations | family | song (défaut song)
+- \`intention\` (song) : minimal | full | drums | bassPad | ambient — propose les rôles si \`cards\` omis
+- sans \`cards\` : song → kit intention ; family → kick/snare/hat ×6 ; variations → 1 pivot ×6
+- \`cards[]\` : \`{ role, quantity? 1–40, randomness? 0–1, engines? [], machine? {knob:0–1} }\`
+  - rôles : pivot, kick, snare, hat, perc, bass, pad, lead, arp, fx, texture
+  - engines : subtractive, fm, granular, additive, physical, noise, voice
+  - machine (ex.) : body, punch, click, length, brightness, warmth, space, attack, bite, grain…
+- cohérence musicale : \`coherence\` parametric|musical, \`tonicPc\` 0–11, \`scaleMode\` major|minor, \`bpm\` 60–180, \`freeFmRatios\`
+- \`seed\` optionnel (reproductibilité)
+- Renvoie les ids courts des sons créés (tags synth, rôle, analyse en file)
+
+### Exemple synth
+\`\`\`json
+{
+  "mode": "song",
+  "intention": "drums",
+  "bpm": 104,
+  "coherence": "musical",
+  "tonicPc": 0,
+  "scaleMode": "minor",
+  "cards": [
+    { "role": "kick", "quantity": 4, "machine": { "body": 0.7, "punch": 0.6 } },
+    { "role": "hat", "quantity": 4, "randomness": 0.5 }
+  ]
+}
+\`\`\`
+
+## Bibliothèque (mutations)
+- \`glane_library\` (lecture) — ids courts utilisables partout
+- \`glane_library_update\` — \`samples\`, puis \`favorite\`, \`rating\` 1–5|null, \`name\`|null, \`forceRole\` (rôle générateur ExprRole)|null, \`addTags\` / \`removeTags\`
+- \`glane_library_delete\` / \`glane_library_duplicate\` / \`glane_library_crop\` (auto-crop attaque/queue)
+
+## FX baked sur un son
+\`glane_bake_fx\` : \`{ sample, fx, bpm? }\` — même schéma \`fx\` que les pistes (type, mix, filtres, ADSR…). Remplace le PCM du son (scope = son entier).
+
+## Partition d'arrangement
 Un appel \`glane_write_arrangement\` REMPLACE l'arrangement courant du projet actif
 (snapshot automatique avant écriture, \`glane_undo_write\` pour revenir en arrière).
 Positions : \`bar\` à partir de 1, \`beat\` à partir de 1 (temps = noire, décimales ok : 2.5 = croche après le 2).
@@ -74,7 +113,7 @@ Positions : \`bar\` à partir de 1, \`beat\` à partir de 1 (temps = noire, déc
 - Graves : une seule source tonale grave à la fois ; hpHz 120–250 sur les textures pour dégager le bas.
 - Réverbe partagée en space A plutôt qu'en insert sur chaque piste.
 
-## Exemple
+## Exemple arrangement
 \`\`\`json
 {
   "title": "Pluie sur tôle", "bpm": 92, "bars": 16,

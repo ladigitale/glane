@@ -79,11 +79,18 @@ test("tools are listed and calls fail clearly without an open tab", async () => 
     const names = tools.map((t) => t.name);
     assert.ok(names.includes("glane_write_arrangement"));
     assert.ok(names.includes("glane_library"));
+    assert.ok(names.includes("glane_synth_generate"));
+    assert.ok(names.includes("glane_library_update"));
+    assert.ok(names.includes("glane_library_delete"));
+    assert.ok(names.includes("glane_library_duplicate"));
+    assert.ok(names.includes("glane_library_crop"));
+    assert.ok(names.includes("glane_bake_fx"));
     const write = tools.find((t) => t.name === "glane_write_arrangement")!;
     assert.ok(JSON.stringify(write.inputSchema).includes("patterns"));
 
     const guide = await client.callTool({ name: "glane_guide", arguments: {} });
     assert.match(text(guide), /Pattern/);
+    assert.match(text(guide), /Synthèse/);
 
     const status = await client.callTool({ name: "glane_status", arguments: {} });
     assert.equal(status.isError, true);

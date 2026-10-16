@@ -3,34 +3,59 @@ import {
   createEntityId,
   normalizeTrack,
   nowIso,
+  trackFxIsActive,
   DEFAULT_TRACK_COUNT,
   DEFAULT_TRACK_FX,
   type Clip,
   type EditOperation,
+  type ExprRole,
   type Project,
   type Sample,
   type Track,
 } from "@glane/core-model";
 import {
   AGENT_PROTOCOL_VERSION,
+  BakeFxSchema,
+  LibraryUpdateSchema,
+  SampleListSchema,
+  SynthConfigSchema,
   compileScore,
   decompileArrangement,
   filterLibrary,
   formatLibraryTable,
   librarySummary,
+  mergeFx,
+  resolveSampleIds,
   shortIdLength,
   type AgentLibraryRow,
   type BridgeMethod,
   type BridgeMethodMap,
   type BridgeProject,
+  type SynthCard,
 } from "@glane/agent";
+import { durationMsFromPcm } from "@glane/audio-dsp";
+import { bakeTrackFx } from "@glane/audio-engine";
+import { sampleOpfs } from "@glane/audio-io";
+import {
+  audioSynth,
+  type MachineParams,
+  type SynthEngineId,
+  type SynthRoleCard,
+  type SynthRoleId,
+} from "@glane/audio-synth";
 import { db, type AgentSnapshot } from "../db.js";
 import { projectWorkspace } from "../project-workspace.js";
 import { navigate } from "../router.js";
 import { applyOverlapFades } from "../seq-schedule.js";
 import { resolveExprRole } from "../generative.js";
 import { parseStemFromTags, resolveYamnetSlugs } from "../generative-cues.js";
-import { resolveSamplePitchHz } from "../process-queue.js";
+import { processQueue, resolveSamplePitchHz } from "../process-queue.js";
+import {
+  autoCropSamples,
+  deleteSamples,
+  duplicateSample,
+  saveSynthBatch,
+} from "../sample-actions.js";
 import { sequencer, waitForSequencer } from "./seq-link.js";
 
 const SNAPSHOTS_PER_PROJECT = 10;
@@ -247,6 +272,61 @@ async function playFrom(projectId: string, bar?: number) {
   };
 }
 
+function buildSynthCard(spec: SynthCard): SynthRoleCard {
+  const role = spec.role as SynthRoleId;
+  let card = audioSynth.roles.createRoleCard(role, {
+    quantity: spec.quantity,
+  });
+  if (spec.randomness != null) card = { ...card, randomness: spec.randomness };
+  if (spec.usePivot != null) card = { ...card, usePivot: spec.usePivot };
+  if (spec.engines?.length) {
+    const live = new Set(audioSynth.liveEngines);
+    const engines = spec.engines.filter((e): e is SynthEngineId => live.has(e));
+    if (engines.length) card = { ...card, engines };
+  }
+  if (spec.machine && Object.keys(spec.machine).length > 0) {
+    card = {
+      ...card,
+      machine: { ...card.machine, ...(spec.machine as MachineParams) },
+    };
+    card = audioSynth.roles.applyCardMachine(card);
+  }
+  return card;
+}
+
+function cardsFromConfig(cfg: {
+  mode: string;
+  intention?: string;
+  cards?: SynthCard[];
+}): SynthRoleCard[] {
+  if (cfg.cards?.length) return cfg.cards.map(buildSynthCard);
+  if (cfg.mode === "song") {
+    return audioSynth.song.proposeSongCards(
+      (cfg.intention as "full") ?? "full",
+    );
+  }
+  if (cfg.mode === "family") return audioSynth.roles.defaultFamilyCards();
+  return [audioSynth.roles.createRoleCard("pivot", { quantity: 6 })];
+}
+
+function draftTitle(role: string | undefined, index: number): string {
+  if (role && role !== "pivot") {
+    return `${role[0]!.toUpperCase()}${role.slice(1)} ${index + 1}`;
+  }
+  return `Synth ${index + 1}`;
+}
+
+async function resolveProjectSampleIds(
+  refs: readonly string[],
+): Promise<{ ok: true; ids: string[] } | { ok: false; errors: string[] }> {
+  const project = await currentProject();
+  const samples = await projectSamples(project.id);
+  return resolveSampleIds(
+    refs,
+    samples.map((s) => s.id),
+  );
+}
+
 export const agentHandlers: Handlers = {
   async status() {
     const currentId = await projectWorkspace.currentId();
@@ -290,6 +370,237 @@ export const agentHandlers: Handlers = {
       return { ...base, rows: page.map((r) => ({ ...r, id: r.id.slice(0, idLen) })) };
     }
     return { ...base, table: formatLibraryTable(page, idLen) };
+  },
+
+  async "library.update"(raw) {
+    const parsed = LibraryUpdateSchema.safeParse(raw);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        updated: 0,
+        errors: parsed.error.issues.map((i) => i.message),
+      };
+    }
+    const params = parsed.data;
+    const resolved = await resolveProjectSampleIds(params.samples);
+    if (!resolved.ok) return { ok: false, updated: 0, errors: resolved.errors };
+    const now = nowIso();
+    let updated = 0;
+    for (const id of resolved.ids) {
+      const sample = await db.samples.get(id);
+      if (!sample || sample.deletedAt) continue;
+      const next: Sample = {
+        ...sample,
+        updatedAt: now,
+        revision: (sample.revision ?? 0) + 1,
+      };
+      if (params.favorite !== undefined) next.favorite = params.favorite;
+      if (params.rating !== undefined) {
+        if (params.rating === null) delete (next as { rating?: number }).rating;
+        else next.rating = params.rating;
+      }
+      if (params.name !== undefined) {
+        const name = params.name?.trim() || undefined;
+        if (!name) delete (next as { userName?: string }).userName;
+        else next.userName = name;
+      }
+      if (params.forceRole !== undefined) {
+        if (params.forceRole === null) {
+          delete (next as { forceRole?: ExprRole }).forceRole;
+        } else {
+          next.forceRole = params.forceRole as ExprRole;
+        }
+      }
+      if (params.addTags?.length || params.removeTags?.length) {
+        const remove = new Set((params.removeTags ?? []).map((t) => t.toLowerCase()));
+        let tags = [...(sample.tags ?? [])].filter((t) => !remove.has(t.toLowerCase()));
+        for (const t of params.addTags ?? []) {
+          if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+        }
+        next.tags = tags;
+      }
+      await db.samples.put(next);
+      updated++;
+    }
+    return { ok: true, updated };
+  },
+
+  async "library.delete"(raw) {
+    const parsed = SampleListSchema.safeParse(raw);
+    if (!parsed.success) {
+      return { ok: false, deleted: 0, errors: parsed.error.issues.map((i) => i.message) };
+    }
+    const resolved = await resolveProjectSampleIds(parsed.data.samples);
+    if (!resolved.ok) return { ok: false, deleted: 0, errors: resolved.errors };
+    const deleted = await deleteSamples(resolved.ids);
+    return { ok: true, deleted };
+  },
+
+  async "library.duplicate"(raw) {
+    const parsed = SampleListSchema.safeParse(raw);
+    if (!parsed.success) {
+      return { ok: false, duplicated: 0, errors: parsed.error.issues.map((i) => i.message) };
+    }
+    const resolved = await resolveProjectSampleIds(parsed.data.samples);
+    if (!resolved.ok) return { ok: false, duplicated: 0, errors: resolved.errors };
+    const ids: string[] = [];
+    for (const id of resolved.ids) {
+      const cloned = await duplicateSample(id);
+      if (cloned) ids.push(cloned.id);
+    }
+    const idLen = shortIdLength([...resolved.ids, ...ids]);
+    return {
+      ok: true,
+      duplicated: ids.length,
+      ids: ids.map((id) => id.slice(0, idLen)),
+    };
+  },
+
+  async "library.crop"(raw) {
+    const parsed = SampleListSchema.safeParse(raw);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        cropped: 0,
+        skipped: 0,
+        errors: parsed.error.issues.map((i) => i.message),
+      };
+    }
+    const resolved = await resolveProjectSampleIds(parsed.data.samples);
+    if (!resolved.ok) {
+      return { ok: false, cropped: 0, skipped: 0, errors: resolved.errors };
+    }
+    const r = await autoCropSamples(resolved.ids);
+    return { ok: true, cropped: r.cropped, skipped: r.skipped };
+  },
+
+  async "synth.generate"(raw) {
+    const parsed = SynthConfigSchema.safeParse(raw);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        errors: parsed.error.issues.map(
+          (i) => `${i.path.join(".") || "config"}: ${i.message}`,
+        ),
+      };
+    }
+    const cfg = parsed.data;
+    const project = await currentProject();
+    const cards = cardsFromConfig(cfg);
+    if (
+      cards.some(
+        (c) =>
+          !audioSynth.usesRoleSynth(c.role) &&
+          c.role !== "arp" &&
+          c.engines.length === 0,
+      )
+    ) {
+      return { ok: false, errors: ["Chaque carte non-arp / non-machine doit avoir au moins un engine."] };
+    }
+    const seed = cfg.seed ?? ((Math.random() * 0xffffffff) >>> 0);
+    const items = await audioSynth.generateFromRoles({
+      cards,
+      seed,
+      mode: cfg.mode,
+      yieldEvery: 1,
+      intention: cfg.mode === "song" ? cfg.intention : undefined,
+      coherence: {
+        kind: cfg.mode === "song" ? (cfg.coherence ?? "musical") : "musical",
+        tonicPc: cfg.tonicPc ?? 0,
+        bpm: cfg.bpm ?? project.bpm ?? 120,
+        scaleMode: cfg.scaleMode ?? "major",
+        freeFmRatios: cfg.freeFmRatios ?? false,
+      },
+    });
+    if (items.length === 0) {
+      return { ok: false, errors: ["Aucun rendu généré."], seed };
+    }
+    const batch = items.map((d, i) => ({
+      pcm: d.pcm,
+      sampleRate: d.sampleRate,
+      channelCount: d.channelCount,
+      durationMs: d.durationMs,
+      name: draftTitle(d.meta.role, i),
+      meta: d.meta,
+    }));
+    const before = new Set((await projectSamples(project.id)).map((s) => s.id));
+    const saved = await saveSynthBatch(project.id, batch);
+    const after = await projectSamples(project.id);
+    const created = after.filter((s) => !before.has(s.id));
+    const idLen = shortIdLength(created.map((s) => s.id));
+    if (cfg.open) navigate({ name: "synth" });
+    return {
+      ok: true,
+      projectId: project.id,
+      seed,
+      saved,
+      samples: created.map((s) => ({
+        id: s.id.slice(0, idLen),
+        name: s.userName?.trim() || s.name,
+        role: s.forceRole ?? undefined,
+        durationMs: s.durationMs,
+      })),
+    };
+  },
+
+  async "sample.bake_fx"(raw) {
+    const parsed = BakeFxSchema.safeParse(raw);
+    if (!parsed.success) {
+      return { ok: false, errors: parsed.error.issues.map((i) => i.message) };
+    }
+    const { sample: ref, fx, bpm } = parsed.data;
+    const resolved = await resolveProjectSampleIds([ref]);
+    if (!resolved.ok) return { ok: false, errors: resolved.errors };
+    const sampleId = resolved.ids[0]!;
+    const sample = await db.samples.get(sampleId);
+    if (!sample || sample.deletedAt) {
+      return { ok: false, errors: [`son introuvable « ${ref} »`] };
+    }
+    const merged = mergeFx(fx);
+    if (!trackFxIsActive(merged)) {
+      return {
+        ok: false,
+        errors: ["fx inactif (type none sans filtres ni ADSR)."],
+      };
+    }
+    const audio = await sampleOpfs.loadPcm(sampleId);
+    if (!audio || audio.pcm.length === 0) {
+      return { ok: false, errors: ["PCM manquant pour ce son."] };
+    }
+    const project = await currentProject();
+    const useBpm = bpm ?? project.bpm ?? 120;
+    const baked = await bakeTrackFx(
+      audio.pcm,
+      audio.sampleRate,
+      merged,
+      useBpm,
+      audio.channelCount,
+    );
+    await sampleOpfs.savePcm(
+      sampleId,
+      baked,
+      audio.sampleRate,
+      audio.channelCount,
+    );
+    const durationMs = Math.max(
+      1,
+      durationMsFromPcm(baked, audio.sampleRate, audio.channelCount),
+    );
+    await db.samples.update(sampleId, {
+      durationMs,
+      updatedAt: nowIso(),
+      revision: (sample.revision ?? 0) + 1,
+    });
+    void processQueue.enqueue(
+      sampleId,
+      durationMs >= 800 ? "texture" : "oneshot",
+    );
+    const idLen = shortIdLength([sampleId]);
+    return {
+      ok: true,
+      sampleId: sampleId.slice(0, idLen),
+      durationMs,
+    };
   },
 
   async "arrangement.get"() {

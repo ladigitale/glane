@@ -214,10 +214,12 @@ test("automation compiles to ticks and checks track index", () => {
   assert.equal(bad.ok, false);
 });
 
-test("the example in the agent guide compiles", async () => {
+test("the arrangement example in the agent guide compiles", async () => {
   const { describeCapabilities } = await import("./capabilities.js");
   const doc = describeCapabilities();
-  const json = /```json\n([\s\S]+?)\n```/.exec(doc)![1]!;
+  const blocks = [...doc.matchAll(/```json\n([\s\S]+?)\n```/g)].map((m) => m[1]!);
+  const json = blocks.find((b) => b.includes('"bars"') && b.includes('"tracks"'));
+  assert.ok(json, "arrangement example missing from guide");
   const ids = ["3f2a9c1e", "a81b77d0", "c0de1234", "c0de9876"];
   const res = compileScore(JSON.parse(json), {
     samples: ids.map((p, i) => ({
