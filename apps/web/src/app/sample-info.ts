@@ -20,6 +20,7 @@ import {
   parseStemFromTags,
   type YamnetLabelScore,
 } from "./generative-cues.js";
+import { renderModalOk } from "./form-actions.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
 
 @customElement("gl-sample-info")
@@ -121,9 +122,7 @@ export class GlSampleInfo extends LitElement {
         <sonic-modal-content>
           ${this.sample ? this.#body(this.sample) : this.#empty()}
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }

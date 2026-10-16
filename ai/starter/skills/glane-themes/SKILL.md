@@ -65,7 +65,7 @@ Rules:
 |----|---------------|----------|---------------|
 | `nord` | Polar night (`Nord`) | Cool ink blue-grey, sharp steps | Electric aurora teal |
 | `dark` | Ink (`Encre` / `Ink`) | Near-black cool ink | Hot pink — high chroma |
-| `matcha` | Sorbet (`Sorbet`) | Lilac mist paper — **not white** | Electric indigo |
+| `matcha` | Brume (`Mist`) | Cool paper grey — soft, high contrast (not mid lilac) | Firm indigo |
 
 ## Review workflow
 

@@ -1,0 +1,14 @@
+{
+  "buildPath": "code",
+  "projectRoots": ["apps/web"],
+  "detector": {
+    "designSystem": { "enabled": true },
+    "extensions": [
+      { "ext": ".html.twig", "engine": "html" }
+    ]
+  },
+  "hook": {
+    "enabled": true,
+    "quiet": true
+  }
+}

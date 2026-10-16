@@ -4,6 +4,7 @@ import { customElement, state } from "lit/decorators.js";
 import "@supersoniks/concorde/button";
 import "@supersoniks/concorde/menu";
 import "@supersoniks/concorde/menu-item";
+import "@supersoniks/concorde/pop";
 import tailwind from "../../css/tailwind";
 import { glDialog } from "../dialog.js";
 import { t } from "../i18n/messages.js";
@@ -16,18 +17,62 @@ import { navigate, pathFor } from "../router.js";
 import "../locale-switch.js";
 import "./landing-flow.js";
 
+/**
+ * Landing — Persuade. Full-bleed flow canvas + flat action dock.
+ * Working action = create / open project (not a decorative CTA).
+ */
 @customElement("gl-landing-page")
 export class GlLandingPage extends LitElement {
   static override styles = [
     tailwind,
     css`
       :host {
-        display: block;
-        position: relative;
+        display: flex;
+        flex-direction: column;
         height: 100%;
         min-height: 0;
         min-width: 0;
         overflow: hidden;
+      }
+      /* Viz owns remaining height — anim centers in this box, not the page. */
+      .landing-viz {
+        position: relative;
+        flex: 1 1 auto;
+        min-height: 0;
+        min-width: 0;
+      }
+      .landing-top {
+        position: absolute;
+        top: 0;
+        right: 0;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: max(0.75rem, env(safe-area-inset-top))
+          max(1rem, env(safe-area-inset-right)) 0.5rem 1rem;
+        pointer-events: auto;
+      }
+      .landing-top a {
+        color: color-mix(in srgb, var(--sc-base-content) 65%, transparent);
+        font-size: 0.8rem;
+        text-underline-offset: 0.15em;
+      }
+      .landing-top a:hover {
+        color: var(--sc-base-content);
+      }
+      .landing-dock {
+        flex: 0 0 auto;
+        z-index: 2;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.75rem 1.25rem;
+        padding: 0.9rem max(1.25rem, env(safe-area-inset-right))
+          max(0.9rem, env(safe-area-inset-bottom))
+          max(1.25rem, env(safe-area-inset-left));
+        background: var(--sc-base, var(--sc-neutral-0));
+        border-top: 1px solid
+          color-mix(in srgb, var(--sc-base-content) 12%, transparent);
       }
       .hero-brand {
         --sc-font-family-base: var(--gl-font-display);
@@ -36,54 +81,13 @@ export class GlLandingPage extends LitElement {
         font-variation-settings: "wdth" var(--gl-font-display-wdth);
         letter-spacing: var(--gl-font-display-tracking);
       }
-      .landing-stage {
-        position: fixed;
-        inset: 0;
-        z-index: 1;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: safe center;
-        box-sizing: border-box;
-        padding: max(1rem, env(safe-area-inset-top))
-          max(1rem, env(safe-area-inset-right))
-          max(1rem, env(safe-area-inset-bottom))
-          max(1rem, env(safe-area-inset-left));
-        pointer-events: none;
-        overflow: hidden;
-      }
-      .landing-copy {
-        position: relative;
-        z-index: 1;
-        width: min(100%, 32rem);
-        max-height: min(
-          calc(100dvh - 2rem),
-          calc(
-            100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) -
-              1.5rem
-          )
-        );
-        min-height: 0;
-        overflow-x: hidden;
-        overflow-y: auto;
-        overscroll-behavior: contain;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-gutter: stable;
-        pointer-events: auto;
-        color: var(--sc-base-content);
-        background: color-mix(in srgb, var(--sc-base) 72%, transparent);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border: 1px solid
-          color-mix(in srgb, var(--sc-base-content) 14%, transparent);
-        border-radius: calc(var(--sc-rounded, 0.5rem) + 0.35rem);
-        padding: 1.5rem 1.25rem;
-        box-shadow: 0 12px 40px
-          color-mix(in srgb, var(--sc-base-content) 8%, transparent);
-      }
       @media (min-width: 640px) {
-        .landing-copy {
-          padding: 2rem 1.75rem;
+        .landing-dock {
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: end;
+          padding: 1rem max(2rem, env(safe-area-inset-right))
+            max(1rem, env(safe-area-inset-bottom))
+            max(2rem, env(safe-area-inset-left));
         }
       }
     `,
@@ -135,104 +139,138 @@ export class GlLandingPage extends LitElement {
   }
 
   override render() {
-    return html`
-      <div class="landing-stage">
-        <gl-landing-flow></gl-landing-flow>
-        <div class="landing-copy flex min-h-0 flex-col gap-6 sm:gap-8">
-          <div class="space-y-5">
-            <div class="flex items-start justify-between gap-3">
-              <div
-                class="hero-brand inline-flex min-w-0 items-center gap-3 text-primary"
-              >
-                ${glBrandMark({ size: "2.75rem" })}
-                <span class="min-w-0 text-4xl leading-none sm:text-5xl"
-                  >${APP_NAME}</span
-                >
-              </div>
-              <gl-locale-switch
-                class="shrink-0"
-                size="sm"
-              ></gl-locale-switch>
-            </div>
-            <div class="space-y-3">
-              <p class="text-base leading-relaxed text-neutral-700 sm:text-lg">
-                ${t("landing.tagline")}
-              </p>
-              <p class="text-sm leading-relaxed text-neutral-500">
-                ${t("landing.localBody")}
-              </p>
-            </div>
-          </div>
-          ${this.ready ? this.#workspaceBlock() : nothing}
-          <nav
-            class="flex items-center justify-between gap-3 text-sm text-neutral-500"
-          >
-            <span>${APP_NAME}</span>
-            <a
-              class="underline-offset-2 hover:underline"
-              href=${pathFor({ name: "privacy" })}
-              @click=${this.#goPrivacy}
-            >
-              ${t("nav.privacy")}
-            </a>
-          </nav>
-        </div>
-      </div>
-    `;
-  }
-
-  #workspaceBlock() {
     const hasProjects = this.projects.length > 0;
     return html`
-      <div class="flex flex-col gap-3">
-        <p class="text-sm text-neutral-500">
-          ${hasProjects ? t("landing.projectsTitle") : t("landing.emptyHint")}
-        </p>
-        ${hasProjects
-          ? html`
-              <sonic-menu
-                direction="column"
-                align="left"
-                size="sm"
-                class="w-full min-w-0"
-              >
-                ${this.projects.map(
-                  (p) => html`
-                    <sonic-menu-item
-                      class="min-w-0"
-                      @click=${() => void this.#openProject(p.id)}
-                    >
-                      ${glIcon("folder", { slot: "prefix", size: "xs" })}
-                      <span class="block truncate">${p.title}</span>
-                    </sonic-menu-item>
-                  `,
-                )}
-              </sonic-menu>
-            `
-          : nothing}
-        <div class="flex flex-col gap-3">
-          <sonic-button
-            type="primary"
-            size="lg"
-            class="w-full justify-center"
-            @click=${() => void this.#createProject()}
+      <div class="landing-viz">
+        <gl-landing-flow></gl-landing-flow>
+        <div class="landing-top">
+          <a
+            href=${pathFor({ name: "privacy" })}
+            @click=${this.#goPrivacy}
           >
-            ${glIcon("plus", { slot: "prefix" })}
-            ${t("project.new")}
-          </sonic-button>
-          <sonic-button
-            variant="outline"
-            type="neutral"
-            size="lg"
-            class="w-full justify-center"
-            href=${pathFor({ name: "account" })}
-            ?pushState=${true}
-          >
-            ${glIcon("user", { slot: "prefix" })}
-            ${t("landing.account")}
-          </sonic-button>
+            ${t("nav.privacy")}
+          </a>
+          <gl-locale-switch size="sm"></gl-locale-switch>
         </div>
       </div>
+      <footer class="landing-dock">
+          <div class="flex min-w-0 flex-col gap-1.5">
+            <div
+              class="hero-brand inline-flex min-w-0 items-center gap-2.5 text-primary"
+            >
+              ${glBrandMark({ size: "2.25rem" })}
+              <span class="min-w-0 text-3xl leading-none sm:text-4xl"
+                >${APP_NAME}</span
+              >
+            </div>
+            <p
+              class="m-0 max-w-xl text-sm leading-snug text-neutral-700 sm:text-base"
+            >
+              ${t("landing.tagline")}
+            </p>
+            <p class="m-0 text-xs text-neutral-500">
+              ${hasProjects
+                ? t("landing.localTitle")
+                : t("landing.emptyHint")}
+            </p>
+          </div>
+          <div class="flex min-w-0 flex-col gap-2 sm:min-w-[14rem]">
+            ${hasProjects
+              ? html`
+                  <sonic-button
+                    type="primary"
+                    size="lg"
+                    class="w-full justify-center"
+                    @click=${() =>
+                      void this.#openProject(this.projects[0]!.id)}
+                  >
+                    ${glIcon("arrow-right", { slot: "prefix" })}
+                    ${t("landing.openInstrument")}
+                  </sonic-button>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <sonic-pop placement="top-start" shadow="md">
+                      <sonic-button
+                        variant="outline"
+                        type="neutral"
+                        size="sm"
+                      >
+                        ${glIcon("folder", { slot: "prefix", size: "xs" })}
+                        ${t("landing.projectsTitle")}
+                        (${this.projects.length})
+                      </sonic-button>
+                      <div
+                        slot="content"
+                        class="min-w-56 bg-neutral-0 p-1.5"
+                        @click=${(e: Event) => e.stopPropagation()}
+                      >
+                        <sonic-menu
+                          direction="column"
+                          align="left"
+                          size="sm"
+                        >
+                          ${this.projects.map(
+                            (p) => html`
+                              <sonic-menu-item
+                                class="min-w-0"
+                                @click=${() => void this.#openProject(p.id)}
+                              >
+                                ${glIcon("folder", {
+                                  slot: "prefix",
+                                  size: "xs",
+                                })}
+                                <span class="block truncate">${p.title}</span>
+                              </sonic-menu-item>
+                            `,
+                          )}
+                        </sonic-menu>
+                      </div>
+                    </sonic-pop>
+                    <sonic-button
+                      variant="outline"
+                      type="neutral"
+                      size="sm"
+                      @click=${() => void this.#createProject()}
+                    >
+                      ${glIcon("plus", { slot: "prefix", size: "xs" })}
+                      ${t("project.new")}
+                    </sonic-button>
+                    <sonic-button
+                      variant="outline"
+                      type="neutral"
+                      size="sm"
+                      class="flex-1"
+                      href=${pathFor({ name: "account" })}
+                      ?pushState=${true}
+                    >
+                      ${glIcon("user", { slot: "prefix", size: "xs" })}
+                      ${t("landing.account")}
+                    </sonic-button>
+                  </div>
+                `
+              : html`
+                  <sonic-button
+                    type="primary"
+                    size="lg"
+                    class="w-full justify-center"
+                    @click=${() => void this.#createProject()}
+                  >
+                    ${glIcon("plus", { slot: "prefix" })}
+                    ${t("project.new")}
+                  </sonic-button>
+                  <sonic-button
+                    variant="outline"
+                    type="neutral"
+                    size="sm"
+                    class="w-full justify-center"
+                    href=${pathFor({ name: "account" })}
+                    ?pushState=${true}
+                  >
+                    ${glIcon("user", { slot: "prefix", size: "xs" })}
+                    ${t("landing.account")}
+                  </sonic-button>
+                `}
+          </div>
+      </footer>
     `;
   }
 }

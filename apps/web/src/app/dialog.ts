@@ -2,7 +2,10 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { t } from "./i18n/messages.js";
+import { renderModalActions } from "./form-actions.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
+import "@supersoniks/concorde/input";
+import "@supersoniks/concorde/form-layout";
 
 export type GlConfirmOpts = {
   title?: string;
@@ -277,76 +280,82 @@ export class GlDialogHost extends LitElement {
               : nothing}
             ${p.kind === "prompt"
               ? html`
-                  <input
-                    class="rounded-lg border border-neutral-500/25 bg-neutral-0 px-2.5 py-2 text-inherit [font:inherit]"
-                    type="text"
-                    autofocus
-                    aria-label=${p.label || p.title}
-                    placeholder=${p.label}
-                    .value=${this.draft}
-                    @input=${(e: Event) => {
-                      this.draft = (e.target as HTMLInputElement).value;
-                    }}
-                    @keydown=${(e: KeyboardEvent) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        this.#accept();
-                      }
-                    }}
-                  />
+                  <sonic-form-layout>
+                    <sonic-input
+                      type="text"
+                      autofocus
+                      label=${p.label || p.title}
+                      .value=${this.draft}
+                      @input=${(e: Event) => {
+                        const el = e.target as HTMLInputElement & {
+                          value?: string;
+                        };
+                        this.draft =
+                          el.value ??
+                          (e.target as HTMLInputElement).value ??
+                          "";
+                      }}
+                      @keydown=${(e: KeyboardEvent) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          this.#accept();
+                        }
+                      }}
+                    ></sonic-input>
+                  </sonic-form-layout>
                 `
               : nothing}
             ${p.kind === "choose"
               ? html`
-                  <select
-                    class="cursor-pointer rounded-lg border border-neutral-500/25 bg-neutral-0 px-2.5 py-2 text-inherit [font:inherit]"
-                    autofocus
-                    aria-label=${p.title}
-                    .value=${this.draft}
-                    @change=${(e: Event) => {
-                      this.draft = (e.target as HTMLSelectElement).value;
-                    }}
-                  >
-                    ${p.options.map(
-                      (o) =>
-                        html`<option value=${o.value}>${o.label}</option>`,
-                    )}
-                  </select>
+                  <sonic-form-layout>
+                    <label class="flex flex-col gap-1.5">
+                      <span class="text-sm font-medium">${p.title}</span>
+                      <select
+                        class="cursor-pointer rounded-md border border-neutral-500/25 bg-neutral-0 px-2.5 py-2 text-inherit [font:inherit]"
+                        autofocus
+                        aria-label=${p.title}
+                        .value=${this.draft}
+                        @change=${(e: Event) => {
+                          this.draft = (e.target as HTMLSelectElement).value;
+                        }}
+                      >
+                        ${p.options.map(
+                          (o) =>
+                            html`<option value=${o.value}>${o.label}</option>`,
+                        )}
+                      </select>
+                    </label>
+                  </sonic-form-layout>
                 `
               : nothing}
             ${p.kind === "chooseMany" ? this.#renderChooseMany(p) : nothing}
           </div>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          ${p.kind !== "alert"
-            ? html`
-                <sonic-button
-                  variant="outline"
-                  type="neutral"
-                  @click=${this.#dismiss}
-                >
-                  ${p.cancelLabel}
-                </sonic-button>
-              `
-            : nothing}
-          ${p.kind === "unsaved"
-            ? html`
-                <sonic-button
-                  variant="outline"
-                  type="neutral"
-                  @click=${this.#discard}
-                >
-                  ${p.discardLabel}
-                </sonic-button>
-              `
-            : nothing}
-          <sonic-button
-            type=${p.danger ? "danger" : "primary"}
-            @click=${this.#accept}
-          >
-            ${p.confirmLabel}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary:
+            p.kind !== "alert"
+              ? {
+                  label: p.cancelLabel,
+                  variant: "outline",
+                  type: "neutral",
+                  onClick: this.#dismiss,
+                }
+              : undefined,
+          tertiary:
+            p.kind === "unsaved"
+              ? {
+                  label: p.discardLabel,
+                  variant: "outline",
+                  type: "neutral",
+                  onClick: this.#discard,
+                }
+              : undefined,
+          primary: {
+            label: p.confirmLabel,
+            type: p.danger ? "danger" : "primary",
+            onClick: this.#accept,
+          },
+        })}
       </sonic-modal>
     `;
   }

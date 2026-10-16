@@ -22,6 +22,7 @@ import {
   type MachineKnobId,
   type MachineFilterType,
 } from "@glane/audio-synth";
+import { CLASS_COLORS, type SampleClass } from "@glane/core-model";
 import tailwind from "../../css/tailwind";
 import { soundCountLabel, t, tf } from "../i18n/messages.js";
 import { navigate } from "../router.js";
@@ -45,12 +46,13 @@ import {
 import { glIcon } from "../icon.js";
 import { tip } from "../tip.js";
 import { chromeMore } from "../more-menu.js";
+import { renderFormActions } from "../form-actions.js";
 import { renderSamplePlayButton } from "../sample-play-button.js";
+import { renderSampleListIdentity } from "../sample-row.js";
 import "../form-stack.js";
 import "../pop-select.js";
 import "@supersoniks/concorde/button";
 import "@supersoniks/concorde/form-layout";
-import "@supersoniks/concorde/form-actions";
 import "@supersoniks/concorde/checkbox";
 import "@supersoniks/concorde/switch";
 import "@supersoniks/concorde/divider";
@@ -59,6 +61,7 @@ import "@supersoniks/concorde/table";
 import "@supersoniks/concorde/table-tbody";
 import "@supersoniks/concorde/table-tr";
 import "@supersoniks/concorde/table-td";
+import "@supersoniks/concorde/badge";
 
 type Phase = "edit" | "validate";
 type DraftItem = VariationBatchItem;
@@ -205,7 +208,7 @@ export class GlSynthPage extends LitElement {
       :host {
         display: block;
         box-sizing: border-box;
-        padding: 1rem;
+        padding: 0.75rem 1rem 1rem;
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
         padding-bottom: max(5.5rem, env(safe-area-inset-bottom));
@@ -234,13 +237,36 @@ export class GlSynthPage extends LitElement {
       canvas.gl-synth-wave {
         display: block;
         width: 100%;
-        height: 36px;
+        height: 40px;
         border-radius: 4px;
         background: color-mix(
           in srgb,
-          var(--sc-neutral-100, #222) 80%,
+          var(--sc-base-100, #222) 85%,
           transparent
         );
+      }
+      .synth-validate-footer {
+        position: sticky;
+        bottom: 0;
+        z-index: 10;
+        margin-inline: -1rem;
+        margin-top: 0.75rem;
+        padding: 0.75rem 1rem
+          max(0.75rem, env(safe-area-inset-bottom));
+        border-top: 1px solid var(--sc-base-200, var(--sc-neutral-200));
+        background: color-mix(
+          in srgb,
+          var(--sc-base, var(--sc-neutral-0)) 92%,
+          transparent
+        );
+        backdrop-filter: blur(8px);
+      }
+      .synth-validate-title {
+        margin: 0;
+        font-family: var(--gl-font-display);
+        font-size: 1.125rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
       }
     `,
   ];
@@ -426,6 +452,12 @@ export class GlSynthPage extends LitElement {
       "freeFmRatiosFlag",
     ] as const;
     if (persistKeys.some((k) => changed.has(k))) this.#queuePersist();
+    if (
+      this.phase === "validate" &&
+      (changed.has("phase") || changed.has("drafts"))
+    ) {
+      queueMicrotask(() => this.#paintWaves());
+    }
   }
 
   #snapshotUi(): SynthUiSnapshot {
@@ -851,13 +883,35 @@ export class GlSynthPage extends LitElement {
         selected: items.map((_, i) => String(i)),
       });
       this.phase = "validate";
-      queueMicrotask(() => this.#paintWaves());
     } catch (err) {
       this.statusMsg = err instanceof Error ? err.message : String(err);
     } finally {
       this.busy = false;
       this.progress = "";
     }
+  }
+
+  #draftSampleClass(d: DraftItem): SampleClass {
+    const role = d.meta.role;
+    if (
+      role === "kick" ||
+      role === "snare" ||
+      role === "hat" ||
+      role === "perc" ||
+      d.durationMs < 600
+    ) {
+      return "percussive";
+    }
+    if (role === "bass" || role === "lead" || role === "arp") return "tonal";
+    return "texture";
+  }
+
+  #draftTitle(d: DraftItem, index: number): string {
+    const role = d.meta.role;
+    if (role && role !== "pivot") {
+      return `${t(ROLE_LABEL[role] as "synth.role.pivot")} ${index + 1}`;
+    }
+    return `Synth ${index + 1}`;
   }
 
   #paintWaves(): void {
@@ -869,17 +923,16 @@ export class GlSynthPage extends LitElement {
       ) as HTMLCanvasElement | null;
       if (!canvas) return;
       const w = canvas.clientWidth || 280;
-      const h = 36;
+      const h = 40;
       canvas.width = w * devicePixelRatio;
       canvas.height = h * devicePixelRatio;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      ctx.scale(devicePixelRatio, devicePixelRatio);
+      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      ctx.strokeStyle =
-        getComputedStyle(this).getPropertyValue("--sc-primary").trim() ||
-        "#3d7ea6";
-      ctx.lineWidth = 1;
+      const cls = this.#draftSampleClass(d);
+      ctx.strokeStyle = CLASS_COLORS[cls] ?? CLASS_COLORS.texture;
+      ctx.lineWidth = 1.25;
       ctx.beginPath();
       const step = Math.max(1, Math.floor(d.pcm.length / w));
       for (let x = 0; x < w; x++) {
@@ -898,7 +951,7 @@ export class GlSynthPage extends LitElement {
 
   async #saveSelected(): Promise<void> {
     const sel = new Set(this.validateSelected);
-      const selected = this.drafts.filter((_, i) => sel.has(String(i)));
+    const selected = this.drafts.filter((_, i) => sel.has(String(i)));
     if (selected.length === 0) return;
     this.busy = true;
     try {
@@ -906,14 +959,14 @@ export class GlSynthPage extends LitElement {
       if (!projectId) throw new Error("no_project");
       const n = await saveSynthBatch(
         projectId,
-        selected.map((d, i) => {
-          const role = d.meta.role && d.meta.role !== "pivot" ? d.meta.role : "";
+        selected.map((d) => {
+          const idx = this.drafts.indexOf(d);
           return {
             pcm: d.pcm,
             sampleRate: d.sampleRate,
             channelCount: d.channelCount,
             durationMs: d.durationMs,
-            name: role ? `${role} ${i + 1}` : `Synth ${i + 1}`,
+            name: this.#draftTitle(d, idx >= 0 ? idx : 0),
             meta: d.meta,
           };
         }),
@@ -1704,118 +1757,173 @@ export class GlSynthPage extends LitElement {
     const total = this.drafts.length;
     const selectedCount = this.validateSelected.length;
     const allSelected = total > 0 && selectedCount >= total;
+    const selSet = new Set(this.validateSelected);
     return html`
       <div
-        class="box-border flex w-full max-w-full flex-col gap-4"
+        class="box-border flex w-full max-w-full flex-col gap-3"
         formDataProvider=${synthValidateFormKey.path}
       >
-        <div class="flex flex-col gap-1.5">
-          <sonic-checkbox
-            class="text-xs text-neutral-500"
-            size="sm"
-            checksAll
-            title=${t("synth.selectAll")}
-            .checked=${allSelected
-              ? true
-              : selectedCount > 0
-                ? "indeterminate"
-                : null}
-            ?disabled=${total === 0}
-            @change=${() => {
-              set(
-                synthValidateFormKey.selected,
-                allSelected ? [] : this.drafts.map((_, i) => String(i)),
-              );
-            }}
-          >
-            ${soundCountLabel(total)}
-          </sonic-checkbox>
-          <sonic-table
-            size="sm"
-            bordered
-            rounded
-            maxHeight="calc(100dvh - 16rem)"
-          >
-            <sonic-tbody>
-              ${this.drafts.map(
-                (d, i) => html`
-                  <sonic-tr>
-                    <sonic-td width="2.5rem" vAlign="middle" align="center">
-                      <sonic-checkbox
-                        name="selected"
-                        value=${String(i)}
-                        size="sm"
-                      ></sonic-checkbox>
-                    </sonic-td>
-                    <sonic-td minWidth="12rem" vAlign="middle">
-                      <div>
-                        #${i + 1}
-                        ${d.meta.role && d.meta.role !== "pivot"
-                          ? html` · ${t(ROLE_LABEL[d.meta.role] as "synth.role.pivot")}`
-                          : nothing}
-                      </div>
-                      <div class="font-mono text-xs text-neutral-500">
-                        ${d.durationMs} ms
-                        ${d.meta.fundHz != null
-                          ? html` · ${Math.round(d.meta.fundHz)} Hz`
-                          : nothing}
-                        ·
-                        ${d.meta.roleSynth
+        <header class="flex flex-col gap-1">
+          <div class="flex flex-wrap items-baseline justify-between gap-2">
+            <h1 class="synth-validate-title">${t("synth.validateTitle")}</h1>
+            ${total > 0
+              ? html`<sonic-badge size="sm" type="neutral"
+                  >${tf("synth.validateSelected", {
+                    n: String(selectedCount),
+                  })}</sonic-badge
+                >`
+              : nothing}
+          </div>
+          <p class="m-0 max-w-prose text-sm leading-snug text-neutral-500">
+            ${t("synth.validateHint")}
+          </p>
+        </header>
+
+        ${total === 0
+          ? html`
+              <div
+                class="flex flex-col items-start gap-3 rounded-md border border-neutral-200 px-4 py-6"
+                role="status"
+              >
+                <p class="m-0 text-sm text-neutral-500">
+                  ${t("synth.validateEmpty")}
+                </p>
+                <sonic-button
+                  size="sm"
+                  type="primary"
+                  @click=${() => {
+                    this.phase = "edit";
+                  }}
+                >
+                  ${t("synth.cancel")}
+                </sonic-button>
+              </div>
+            `
+          : html`
+              <div class="flex flex-col gap-1.5">
+                <sonic-checkbox
+                  class="text-xs text-neutral-500"
+                  size="sm"
+                  checksAll
+                  title=${t("synth.selectAll")}
+                  .checked=${allSelected
+                    ? true
+                    : selectedCount > 0
+                      ? "indeterminate"
+                      : null}
+                  @change=${() => {
+                    set(
+                      synthValidateFormKey.selected,
+                      allSelected
+                        ? []
+                        : this.drafts.map((_, i) => String(i)),
+                    );
+                  }}
+                >
+                  ${t("synth.selectAll")} · ${soundCountLabel(total)}
+                </sonic-checkbox>
+                <sonic-table
+                  size="sm"
+                  bordered
+                  rounded
+                  maxHeight="calc(100dvh - 18rem)"
+                >
+                  <sonic-tbody>
+                    ${this.drafts.map((d, i) => {
+                      const on = selSet.has(String(i));
+                      const cls = this.#draftSampleClass(d);
+                      const crumbs = [
+                        d.meta.fundHz != null
+                          ? `${Math.round(d.meta.fundHz)} Hz`
+                          : "",
+                        d.meta.roleSynth
                           ? t("synth.roleSynth")
-                          : d.meta.engines.join("+")}
-                      </div>
-                      <canvas
-                        class="gl-synth-wave mt-2"
-                        data-wave=${String(i)}
-                      ></canvas>
-                    </sonic-td>
-                    <sonic-td width="2.5rem" align="right" vAlign="middle">
-                      ${renderSamplePlayButton({
-                        onClick: () => void this.#playPcm(d.pcm, d.sampleRate),
-                      })}
-                    </sonic-td>
-                  </sonic-tr>
-                `,
-              )}
-            </sonic-tbody>
-          </sonic-table>
-        </div>
+                          : d.meta.engines.join("+"),
+                      ].filter(Boolean);
+                      return html`
+                        <sonic-tr type=${on ? "info" : nothing}>
+                          <sonic-td
+                            width="2.5rem"
+                            vAlign="middle"
+                            align="center"
+                          >
+                            <sonic-checkbox
+                              name="selected"
+                              value=${String(i)}
+                              size="sm"
+                            ></sonic-checkbox>
+                          </sonic-td>
+                          <sonic-td minWidth="12rem" vAlign="middle">
+                            ${renderSampleListIdentity({
+                              title: this.#draftTitle(d, i),
+                              sampleClass: cls,
+                              durationMs: d.durationMs,
+                              crumbs,
+                            })}
+                            <canvas
+                              class="gl-synth-wave mt-2"
+                              data-wave=${String(i)}
+                            ></canvas>
+                          </sonic-td>
+                          <sonic-td
+                            width="2.75rem"
+                            align="right"
+                            vAlign="middle"
+                          >
+                            ${renderSamplePlayButton({
+                              onClick: () =>
+                                void this.#playPcm(d.pcm, d.sampleRate),
+                            })}
+                          </sonic-td>
+                        </sonic-tr>
+                      `;
+                    })}
+                  </sonic-tbody>
+                </sonic-table>
+              </div>
+            `}
 
         ${this.statusMsg
-          ? html`<sonic-alert status="error" label="Erreur"
+          ? html`<sonic-alert status="error" label=${t("synth.validateTitle")}
               >${this.statusMsg}</sonic-alert
             >`
           : nothing}
 
-        <footer
-          class="sticky bottom-0 z-10 -mx-4 mt-2 flex flex-col gap-2 border-t border-neutral-200 bg-neutral-0/95 px-4 py-3 backdrop-blur"
-        >
-          <sonic-form-actions>
-            <sonic-button
-              variant="outline"
-              type="neutral"
-              size="md"
-              ?disabled=${this.busy}
-              @click=${() => {
-                this.#stopPlay();
-                this.phase = "edit";
-              }}
-            >
-              ${glIcon("x", { slot: "prefix" })}
-              ${t("synth.cancel")}
-            </sonic-button>
-            <sonic-button
-              type="primary"
-              size="md"
-              ?disabled=${this.busy || selectedCount === 0}
-              ?loading=${this.busy}
-              @click=${() => void this.#saveSelected()}
-            >
-              ${glIcon("library", { slot: "prefix" })}
-              ${t("synth.addToLibrary")}
-            </sonic-button>
-          </sonic-form-actions>
-        </footer>
+        ${total > 0
+          ? html`<footer class="synth-validate-footer">
+              ${renderFormActions({
+                secondary: {
+                  label: html`${glIcon("arrow-left", {
+                    slot: "prefix",
+                    size: "xs",
+                  })}
+                  ${t("synth.cancel")}`,
+                  variant: "outline",
+                  type: "neutral",
+                  size: "md",
+                  disabled: this.busy,
+                  onClick: () => {
+                    this.#stopPlay();
+                    this.phase = "edit";
+                  },
+                },
+                primary: {
+                  label: html`${glIcon("library", {
+                    slot: "prefix",
+                    size: "xs",
+                  })}
+                  ${t("synth.addToLibrary")}${selectedCount > 0
+                    ? ` (${selectedCount})`
+                    : ""}`,
+                  type: "primary",
+                  size: "md",
+                  disabled: this.busy || selectedCount === 0,
+                  loading: this.busy,
+                  onClick: () => void this.#saveSelected(),
+                },
+              })}
+            </footer>`
+          : nothing}
       </div>
     `;
   }

@@ -119,32 +119,36 @@ html[data-theme="nord"] sonic-theme {
   --sc-dark-danger-content: var(--sc-danger-content);
 }
 
-/* Matcha — sorbet: lilac mist + electric indigo (dim paper, bold brand) */
+/*
+ * Matcha (UI label: Brume) — cool paper instrument light.
+ * Was “Sorbet”: mid lilac #c5bfd4 + neon indigo — muddy page + eye strain.
+ * Keep id `matcha` for prefs; calm cool grey paper, deep ink text, firm indigo.
+ */
 html[data-theme="matcha"],
 html[data-theme="matcha"] sonic-theme {
   color-scheme: light;
-  --sc-base: #c5bfd4;
-  --sc-base-content: #16141f;
-  --sc-base-50: #b7b0c8;
-  --sc-base-100: #a69dbb;
-  --sc-base-200: #8f84a8;
-  --sc-base-300: #6e6488;
-  --sc-base-400: #524a68;
-  --sc-base-500: #3e3850;
-  --sc-base-600: #2e293c;
-  --sc-base-700: #221e2c;
-  --sc-base-800: #16131e;
-  --sc-base-900: #0c0a12;
-  --sc-primary: #4f3dff;
-  --sc-primary-content: #f2f0ff;
-  --sc-info: #1a7ae8;
+  --sc-base: #e9ecf1;
+  --sc-base-content: #14161c;
+  --sc-base-50: #dfe3ea;
+  --sc-base-100: #d2d8e3;
+  --sc-base-200: #b8c1d0;
+  --sc-base-300: #8a95a8;
+  --sc-base-400: #5c6678;
+  --sc-base-500: #454d5c;
+  --sc-base-600: #323844;
+  --sc-base-700: #232830;
+  --sc-base-800: #171a20;
+  --sc-base-900: #0d0f13;
+  --sc-primary: #2f3ae0;
+  --sc-primary-content: #f3f4ff;
+  --sc-info: #1570c9;
   --sc-info-content: #eef5ff;
-  --sc-success: #0a9f62;
-  --sc-success-content: #e8f8f0;
-  --sc-warning: #e09800;
-  --sc-warning-content: #2a1a00;
-  --sc-danger: #e01840;
-  --sc-danger-content: #ffe8ec;
+  --sc-success: #0d8a55;
+  --sc-success-content: #e6f7ef;
+  --sc-warning: #b87a00;
+  --sc-warning-content: #1f1500;
+  --sc-danger: #c91436;
+  --sc-danger-content: #fff0f2;
   --sc-rounded: 1.5rem;
   --sc-btn-rounded: 9999px;
 }

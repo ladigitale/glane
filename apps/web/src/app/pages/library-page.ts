@@ -80,10 +80,12 @@ import { glDialog } from "../dialog.js";
 import { glIcon } from "../icon.js";
 import type { MoreMenuEntry } from "../more-menu.js";
 import { chromeMore, renderMoreMenu } from "../more-menu.js";
+import { renderSampleListIdentity } from "../sample-row.js";
 import { renderSamplePlayButton, setSampleAuditionPlaying, getSampleAuditionPlaying, clearSampleAudition } from "../sample-play-button.js";
 import { tip } from "../tip.js";
 import { patchSampleInQueue } from "../sample-queue-patch.js";
 import { SAMPLES_CULLED_EVENT } from "../sample-interest-cull.js";
+import { renderModalActions } from "../form-actions.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
 import "../sample-info.js";
@@ -114,7 +116,7 @@ export class GlLibraryPage extends LitElement {
     css`
       :host {
         display: block;
-        padding: 1rem;
+        padding: 0.75rem 1rem 1rem;
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
         padding-bottom: max(1rem, env(safe-area-inset-bottom));
@@ -125,6 +127,41 @@ export class GlLibraryPage extends LitElement {
       /* sonic-queue forces display:block — stay in table flow */
       sonic-queue.table-queue {
         display: contents !important;
+      }
+      .lib-empty {
+        display: flex;
+        min-height: 12rem;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        border: 1px solid var(--sc-base-200, var(--sc-neutral-200));
+        border-radius: var(--sc-radius, 0.35rem);
+        padding: 1.75rem 1.25rem;
+        text-align: center;
+      }
+      .lib-empty__title {
+        margin: 0;
+        font-family: var(--gl-font-display);
+        font-size: 1.125rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .lib-empty__hint {
+        margin: 0;
+        max-width: 22rem;
+        font-size: 0.875rem;
+        line-height: 1.45;
+        color: var(--sc-base-content);
+        opacity: 0.65;
+      }
+      .lib-empty__actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        margin-top: 0.25rem;
       }
     `,
   ];
@@ -350,6 +387,73 @@ export class GlLibraryPage extends LitElement {
       ariaLabel: t("library.batchMore"),
       items: this.#batchMoreItems(),
     });
+  }
+
+  #pickImport = (): void => {
+    this.renderRoot
+      .querySelector<HTMLInputElement>("#import-audio")
+      ?.click();
+  };
+
+  #clearLibraryFilters = (): void => {
+    set(libraryFiltersKey.classFilter, "all");
+    set(libraryFiltersKey.sessionFilter, "");
+    set(libraryFiltersKey.tagFilter, []);
+    set(libraryFiltersKey.q, "");
+    set(libraryFiltersKey.semantic, "");
+    setSampleListOrder(null);
+  };
+
+  #libraryEmptyPanel(filtersActive: boolean) {
+    if (filtersActive) {
+      return html`
+        <div class="lib-empty" role="status">
+          <span class="text-primary" aria-hidden="true"
+            >${glIcon("filter", { size: "lg" })}</span
+          >
+          <p class="lib-empty__title">${t("library.feedEmptyFilteredTitle")}</p>
+          <p class="lib-empty__hint">${t("library.feedEmptyFilteredHint")}</p>
+          <div class="lib-empty__actions">
+            <sonic-button
+              size="sm"
+              type="primary"
+              @click=${this.#clearLibraryFilters}
+            >
+              ${t("library.clearFilters")}
+            </sonic-button>
+          </div>
+        </div>
+      `;
+    }
+    return html`
+      <div class="lib-empty" role="status">
+        <span class="text-primary" aria-hidden="true"
+          >${glIcon("library", { size: "lg" })}</span
+        >
+        <p class="lib-empty__title">${t("library.feedEmptyTitle")}</p>
+        <p class="lib-empty__hint">${t("library.feedEmptyHint")}</p>
+        <div class="lib-empty__actions">
+          <sonic-button
+            size="sm"
+            type="primary"
+            @click=${() => navigate({ name: "capture" })}
+          >
+            ${glIcon("mic", { slot: "prefix", size: "xs" })}
+            ${t("library.goCapture")}
+          </sonic-button>
+          <sonic-button
+            size="sm"
+            variant="outline"
+            type="neutral"
+            ?disabled=${this.batchBusy}
+            @click=${this.#pickImport}
+          >
+            ${glIcon("upload", { slot: "prefix", size: "xs" })}
+            ${t("library.import")}
+          </sonic-button>
+        </div>
+      </div>
+    `;
   }
 
   #onSampleRowPatch = (ev: Event): void => {
@@ -648,16 +752,20 @@ export class GlLibraryPage extends LitElement {
             ></gl-pop-select>
           </sonic-form-layout>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button
-            variant="outline"
-            type="neutral"
-            ?disabled=${!filtersActive}
-            @click=${this.#resetFilters}
-            >${t("library.resetFilters")}</sonic-button
-          >
-          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary: {
+            label: t("library.resetFilters"),
+            variant: "outline",
+            type: "neutral",
+            disabled: !filtersActive,
+            onClick: this.#resetFilters,
+          },
+          primary: {
+            label: t("dialog.ok"),
+            hideModal: true,
+            type: "primary",
+          },
+        })}
       </sonic-modal>
     `;
   }
@@ -674,6 +782,15 @@ export class GlLibraryPage extends LitElement {
   #renderSampleRow = (s: Sample) => {
     const isSel = this.selected.has(s.id);
     const playing = getSampleAuditionPlaying() === s.id;
+    const status = isProcessingBusy(s.tags)
+      ? ("busy" as const)
+      : isProcessingError(s.tags)
+        ? ("error" as const)
+        : null;
+    const crumbs = [
+      s.captureName?.trim() || "",
+      ...(s.tags ?? []).filter((tag) => !tag.startsWith("processing:")).slice(0, 2),
+    ].filter(Boolean);
     return html`
       <sonic-tr type=${playing ? "info" : nothing}>
         <sonic-td width="2.5rem" vAlign="middle" align="center">
@@ -695,23 +812,24 @@ export class GlLibraryPage extends LitElement {
         >
           ${tip(
             t("library.rowHint"),
-            html`
-              <div>${s.userName ?? s.name}</div>
-              <div class="font-mono text-xs text-neutral-500">
-                ${s.captureName ? `${s.captureName} · ` : ""}${s.class}
-                · ${s.durationMs}ms
-                ${s.loopProposed ? " · boucle" : ""}${
-                  isProcessingBusy(s.tags)
-                    ? ` · ${t("library.processing")}`
-                    : isProcessingError(s.tags)
-                      ? ` · ${t("library.processingError")}`
-                      : ""
-                }
-                ${(s.tags ?? []).length
-                  ? ` · ${(s.tags ?? []).slice(0, 3).join(", ")}`
-                  : ""}
-              </div>
-            `,
+            renderSampleListIdentity({
+              title: s.userName ?? s.name,
+              sampleClass: s.class,
+              durationMs: s.durationMs,
+              favorite: s.favorite,
+              loopProposed: s.loopProposed,
+              interestPct:
+                s.interestScore != null
+                  ? Math.round(s.interestScore * 100)
+                  : null,
+              status,
+              statusLabel: status
+                ? status === "busy"
+                  ? t("library.processing")
+                  : t("library.processingError")
+                : undefined,
+              crumbs,
+            }),
             { class: "w-full max-w-full justify-start text-left", focusable: true },
           )}
         </sonic-td>
@@ -801,11 +919,7 @@ export class GlLibraryPage extends LitElement {
     `;
   };
 
-  #noSampleItems = () => html`
-    <sonic-tr>
-      <sonic-td .colSpan=${4}>${t("library.empty")}</sonic-td>
-    </sonic-tr>
-  `;
+  #noSampleItems = () => nothing;
 
   override render() {
     const selectedCount = this.selected.size;
@@ -815,10 +929,12 @@ export class GlLibraryPage extends LitElement {
       this.listTotal > 0;
     const filterCaption = this.#filterCaption();
     const filterCount = this.#filterCount();
-    const filtersActive = filterCount > 0;
+    const filtersActive =
+      filterCount > 0 || !!this.captureQuery.trim();
     const endpoint = this.projectId
       ? `samples?projectId=${encodeURIComponent(this.projectId)}&offset=$offset&limit=$limit`
       : "";
+    const showEmpty = this.queueMounted && this.listTotal === 0;
 
     return html`
       <div
@@ -844,10 +960,10 @@ export class GlLibraryPage extends LitElement {
               <sonic-button
                 shape="circle"
                 variant="ghost"
-                type=${filtersActive ? "primary" : "neutral"}
+                type=${filterCount > 0 ? "primary" : "neutral"}
                 size="sm"
                 icon
-                ?active=${filtersActive}
+                ?active=${filterCount > 0}
                 data-aria-label=${t("library.filters")}
                 @click=${() => {
                   this.filtersModalOpen = true;
@@ -890,7 +1006,9 @@ export class GlLibraryPage extends LitElement {
           </p>`
         : nothing}
 
-      <div class="flex flex-col gap-1.5">
+      ${showEmpty ? this.#libraryEmptyPanel(filtersActive) : nothing}
+
+      <div class=${showEmpty ? "hidden" : "flex flex-col gap-1.5"}>
         <sonic-checkbox
           class="text-xs text-neutral-500"
           size="sm"
@@ -904,9 +1022,9 @@ export class GlLibraryPage extends LitElement {
           ?disabled=${!this.listTotal}
           @change=${() => void this.#toggleSelectAll()}
         >
-          ${filterCaption ? html`${filterCaption} · ` : nothing}${soundCountLabel(
-            this.listTotal,
-          )}
+          ${filterCaption
+            ? html`${filterCaption} · `
+            : nothing}${soundCountLabel(this.listTotal)}
         </sonic-checkbox>
         <sonic-table
           size="sm"

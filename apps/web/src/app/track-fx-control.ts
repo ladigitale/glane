@@ -22,12 +22,14 @@ import {
   type TrackFx,
   type TrackFxType,
 } from "@glane/core-model";
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, css, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import tailwind from "../css/tailwind";
 import { glIcon } from "./icon.js";
 import { tip } from "./tip.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "./modal-layout.js";
+import { renderModalOk } from "./form-actions.js";
+import { t } from "./i18n/messages.js";
 import "./form-stack.js";
 
 const FX_LABEL: Record<TrackFxType, string> = {
@@ -148,6 +150,130 @@ export function formatTrackFxSummaryLines(
     if (trackFxHasEnvelope(n)) lines.push("ADSR");
   }
   return lines;
+}
+
+export type MixConfChipKind = "gain" | "mute" | "wet" | "filter";
+
+export type MixConfChip = {
+  label: string;
+  kind: MixConfChipKind;
+  /** Full tooltip (params). */
+  title?: string;
+};
+
+/** Structured chips for arrangement track / master gutters. */
+export function mixConfChips(opts: {
+  gainDb: number;
+  mute?: boolean;
+  /** One or more FX buses (track = 1, master = up to 2). */
+  fx: TrackFx | readonly TrackFx[];
+  wetOnly?: boolean;
+}): MixConfChip[] {
+  const chips: MixConfChip[] = [];
+  if (opts.mute) {
+    chips.push({ label: "M", kind: "mute", title: "Muet" });
+  }
+  const lin = Math.pow(10, opts.gainDb / 20);
+  const gainLabel = `×${lin.toFixed(lin === 0 || lin === 1 || lin === 2 ? 0 : 2)}`;
+  chips.push({
+    label: gainLabel,
+    kind: "gain",
+    title: `${opts.gainDb >= 0 ? "+" : ""}${opts.gainDb.toFixed(1)} dB`,
+  });
+  const list = Array.isArray(opts.fx) ? opts.fx : [opts.fx];
+  for (const raw of list) {
+    const n = normalizeTrackFx(raw);
+    if (n.type !== "none") {
+      const hint = wetHint(n);
+      chips.push({
+        label: FX_LABEL[n.type],
+        kind: "wet",
+        title: hint ? `${FX_LABEL[n.type]} · ${hint}` : FX_LABEL[n.type],
+      });
+    }
+    if (!opts.wetOnly) {
+      if (trackFxHasHp(n)) {
+        chips.push({
+          label: "HP",
+          kind: "filter",
+          title: `HP ${hzLabel(n.hpHz)}`,
+        });
+      }
+      if (trackFxHasLp(n)) {
+        chips.push({
+          label: "LP",
+          kind: "filter",
+          title: `LP ${hzLabel(n.lpHz)}`,
+        });
+      }
+      if (trackFxHasEnvelope(n)) {
+        chips.push({
+          label: "ADSR",
+          kind: "filter",
+          title: `A${Math.round(n.attackMs)}/D${Math.round(n.decayMs)}/S${Math.round(n.sustain * 100)}/R${Math.round(n.releaseMs)}`,
+        });
+      }
+    }
+  }
+  return chips;
+}
+
+/** Lit template for gutter chips — shared track + master. */
+export function renderMixConfChips(chips: MixConfChip[]): TemplateResult {
+  const tip = chips
+    .map((c) => c.title ?? c.label)
+    .filter(Boolean)
+    .join(" · ");
+  return html`
+    <div
+      class="mix-conf flex min-w-0 flex-col gap-0.5"
+      title=${tip}
+    >
+      <div class="mix-conf-head flex min-w-0 flex-wrap items-center gap-0.5">
+        ${chips
+          .filter((c) => c.kind === "mute" || c.kind === "gain")
+          .map(
+            (c) => html`
+              <span
+                class="mix-chip mix-chip--${c.kind} inline-flex max-w-full truncate font-mono text-[0.62rem] leading-tight tabular-nums"
+                title=${c.title ?? c.label}
+                >${c.label}</span
+              >
+            `,
+          )}
+      </div>
+      ${chips.some((c) => c.kind === "wet" || c.kind === "filter")
+        ? html`<div
+            class="mix-conf-fx flex min-w-0 flex-wrap items-center gap-0.5"
+          >
+            ${chips
+              .filter((c) => c.kind === "wet" || c.kind === "filter")
+              .map(
+                (c) => html`
+                  <span
+                    class="mix-chip mix-chip--${c.kind} inline-flex max-w-full truncate rounded-sm px-0.5 font-mono text-[0.55rem] leading-tight"
+                    title=${c.title ?? c.label}
+                    >${c.label}</span
+                  >
+                `,
+              )}
+          </div>`
+        : nothing}
+    </div>
+  `;
+}
+
+export function mixConfHasFx(
+  fx: TrackFx | readonly TrackFx[],
+  wetOnly = false,
+): boolean {
+  const list = Array.isArray(fx) ? fx : [fx];
+  return list.some((raw) => {
+    const n = normalizeTrackFx(raw);
+    if (n.type !== "none") return true;
+    if (wetOnly) return false;
+    return trackFxHasHp(n) || trackFxHasLp(n) || trackFxHasEnvelope(n);
+  });
 }
 
 /**
@@ -538,11 +664,7 @@ export class GlTrackFxControl extends LitElement {
         <sonic-modal-content>
           ${this.#params(fx)}
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            Fermer
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }

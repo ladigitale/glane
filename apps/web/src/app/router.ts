@@ -7,6 +7,8 @@ export type Route =
   | { name: "synth" }
   | { name: "project"; id?: string }
   | { name: "privacy" }
+  | { name: "sync" }
+  | { name: "connector" }
   | { name: "diagnostic" }
   | { name: "session"; id: string }
   | { name: "account" }
@@ -19,6 +21,8 @@ export function parsePath(pathname: string): Route {
   if (p === "/workspace") return { name: "workspace" };
   if (p === "/library") return { name: "library" };
   if (p === "/privacy") return { name: "privacy" };
+  if (p === "/sync") return { name: "sync" };
+  if (p === "/connector") return { name: "connector" };
   if (p === "/diagnostic") return { name: "diagnostic" };
   if (p === "/account") return { name: "account" };
   let m = /^\/listen\/([^/]+)$/.exec(p);
@@ -45,6 +49,10 @@ export function pathFor(route: Route): string {
       return "/library";
     case "privacy":
       return "/privacy";
+    case "sync":
+      return "/sync";
+    case "connector":
+      return "/connector";
     case "diagnostic":
       return "/diagnostic";
     case "account":

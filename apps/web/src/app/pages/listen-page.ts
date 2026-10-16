@@ -6,6 +6,7 @@ import { t } from "../i18n/messages.js";
 import { glBrandMark } from "../icon.js";
 import { APP_NAME } from "@glane/core-model";
 import { pathFor } from "../router.js";
+import { renderOperateEmpty } from "../operate-empty.js";
 
 @customElement("gl-listen-page")
 export class GlListenPage extends LitElement {
@@ -67,11 +68,13 @@ export class GlListenPage extends LitElement {
           <span class="text-2xl">${APP_NAME}</span>
         </div>
         ${this.loading
-          ? html`<p>${t("listen.loading")}</p>`
+          ? html`<p class="m-0 text-sm text-neutral-600">${t("listen.loading")}</p>`
           : this.error || !this.meta
-            ? html`<p>${t("listen.missing")}</p>`
+            ? renderOperateEmpty({ message: t("listen.missing") })
             : html`
-                <h1 class="font-display text-3xl">${this.meta.title}</h1>
+                <h1 class="m-0 font-display text-3xl tracking-tight">
+                  ${this.meta.title}
+                </h1>
                 ${audioSrc
                   ? html`<audio
                       class="w-full"

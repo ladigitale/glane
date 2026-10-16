@@ -144,16 +144,30 @@ import {
 } from "../timeline/timeline.js";
 import "../track-volume-rotary.js";
 import "../track-fx-control.js";
-import { formatTrackFxSummaryLines } from "../track-fx-control.js";
+import {
+  mixConfChips,
+  mixConfHasFx,
+  renderMixConfChips,
+} from "../track-fx-control.js";
 import "../pop-select.js";
 import "../seek-bar.js";
 import "../transport-bar.js";
 import "../vu-meter.js";
 import { glIcon } from "../icon.js";
 import { renderSamplePlayButton, setSampleAuditionPlaying, getSampleAuditionPlaying, clearSampleAudition } from "../sample-play-button.js";
+import {
+  formatSampleDuration,
+  renderSampleListIdentity,
+} from "../sample-row.js";
 import { tip } from "../tip.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
-import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
+import { renderModalActions, renderModalOk } from "../form-actions.js";
+import {
+  chromeMore,
+  type ChromePrimary,
+  type MoreMenuEntry,
+} from "../more-menu.js";
+import "@supersoniks/concorde/alert";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import type { TransportAction } from "../transport-bar.js";
 import type { GlSeekBar } from "../seek-bar.js";
@@ -238,14 +252,16 @@ export class GlSequencerPage extends LitElement {
       margin-top: 0.2em;
       display: block;
     }
-    .seq-settings-modal {
-      max-height: min(80vh, 42rem);
-      overflow-y: auto;
-    }
     .transport-wrap,
     .master-mix,
     .master-mix-conf {
       overflow: visible;
+    }
+    .gl-transport-dock {
+      flex-shrink: 0;
+      border-top: 1px solid var(--sc-base-200, var(--sc-neutral-200));
+      background: var(--sc-base-100, var(--sc-neutral-100));
+      padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
     }
     .seq-gen-modal input[type="range"] {
       width: 100%;
@@ -262,6 +278,7 @@ export class GlSequencerPage extends LitElement {
       -ms-overflow-style: none;
       background: var(--gl-ink-elevated);
       position: relative;
+      border-radius: 6px;
     }
     .timeline::-webkit-scrollbar {
       display: none;
@@ -288,6 +305,7 @@ export class GlSequencerPage extends LitElement {
     .track-label {
       width: ${TRACK_GUTTER_PX}px;
       flex-shrink: 0;
+      align-self: stretch;
       min-height: 0;
       overflow: visible;
       background: var(--gl-ink);
@@ -295,6 +313,61 @@ export class GlSequencerPage extends LitElement {
       right: 0;
       z-index: 5;
       box-shadow: -4px 0 10px color-mix(in srgb, #000 28%, transparent);
+      box-sizing: border-box;
+    }
+    .mix-chip--mute {
+      color: var(--sc-danger, #ff5a7a);
+      font-weight: 700;
+    }
+    .mix-chip--gain {
+      color: var(--gl-fg-muted, var(--sc-base-500));
+    }
+    .mix-chip--wet {
+      color: var(--gl-accent, var(--sc-primary));
+      background: color-mix(
+        in srgb,
+        var(--gl-accent, var(--sc-primary)) 16%,
+        transparent
+      );
+    }
+    .mix-chip--filter {
+      color: var(--gl-fg-muted, var(--sc-base-500));
+      background: color-mix(in srgb, var(--gl-fg) 8%, transparent);
+    }
+    .track-label[data-muted] .mix-chip--gain {
+      opacity: 0.55;
+      text-decoration: line-through;
+    }
+    .master-mix-conf .mix-chip--wet {
+      color: var(--gl-accent, var(--sc-primary));
+    }
+    .seq-stage-empty {
+      pointer-events: none;
+      position: absolute;
+      inset: 2.5rem 4.5rem 1rem 1rem;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+    .drawer-empty {
+      display: flex;
+      min-height: 8rem;
+      flex: 1;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.65rem;
+      padding: 1rem 0.75rem;
+      text-align: center;
+    }
+    .drawer-empty-title {
+      margin: 0;
+      font-family: var(--gl-font-display);
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
     }
     /* Active track switch: checked = audible (green). */
     .track-active-sw {
@@ -324,12 +397,19 @@ export class GlSequencerPage extends LitElement {
       box-shadow: 0 0 8px color-mix(in srgb, var(--gl-accent) 55%, transparent);
     }
     .clip {
+      --clip-color: var(--gl-accent);
       position: absolute;
-      top: 8px;
-      height: calc(100% - 16px);
-      background: var(--gl-accent);
-      border-radius: 4px;
-      opacity: 0.9;
+      top: 6px;
+      height: calc(100% - 12px);
+      box-sizing: border-box;
+      background: color-mix(
+        in srgb,
+        var(--clip-color) 26%,
+        var(--gl-ink-elevated, var(--gl-ink))
+      );
+      border-radius: 5px;
+      box-shadow: inset 0 0 0 1px
+        color-mix(in srgb, var(--clip-color) 55%, transparent);
       min-width: 8px;
       cursor: grab;
       z-index: 1;
@@ -350,8 +430,8 @@ export class GlSequencerPage extends LitElement {
       z-index: 4;
       outline: 2px solid var(--gl-fg);
       box-shadow:
-        0 0 0 1px color-mix(in srgb, var(--gl-accent) 70%, transparent),
-        0 0 14px color-mix(in srgb, var(--gl-accent) 45%, transparent);
+        inset 0 0 0 1px color-mix(in srgb, var(--clip-color) 70%, transparent),
+        0 0 14px color-mix(in srgb, var(--clip-color) 45%, transparent);
     }
     .clip canvas.wave {
       position: absolute;
@@ -359,33 +439,64 @@ export class GlSequencerPage extends LitElement {
       width: 100%;
       height: 100%;
       pointer-events: none;
-      border-radius: 4px;
+      border-radius: 5px;
+      opacity: 0.92;
     }
-    .clip-name {
+    .clip-meta {
       position: absolute;
       top: 2px;
       left: 4px;
       right: 4px;
       z-index: 2;
-      margin: 0;
-      padding: 0 2px;
-      font-size: 0.65rem;
-      font-weight: 600;
-      line-height: 1.2;
-      color: #fff;
-      text-shadow: 0 1px 2px color-mix(in srgb, var(--gl-ink) 70%, transparent);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      display: flex;
+      min-width: 0;
+      align-items: baseline;
+      gap: 0.35rem;
       pointer-events: none;
       user-select: none;
     }
+    .clip-name {
+      min-width: 0;
+      margin: 0;
+      padding: 0 3px;
+      border-radius: 2px;
+      background: color-mix(in srgb, var(--gl-ink) 62%, transparent);
+      font-size: 0.65rem;
+      font-weight: 600;
+      line-height: 1.25;
+      color: var(--gl-fg, #fff);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .clip-dur {
+      flex-shrink: 0;
+      margin: 0;
+      padding: 0 2px;
+      border-radius: 2px;
+      background: color-mix(in srgb, var(--gl-ink) 50%, transparent);
+      font-family: var(--gl-font-mono);
+      font-size: 0.55rem;
+      line-height: 1.25;
+      color: color-mix(in srgb, var(--gl-fg) 78%, transparent);
+      font-variant-numeric: tabular-nums;
+    }
     .clip.selected {
+      background: color-mix(
+        in srgb,
+        var(--clip-color) 36%,
+        var(--gl-ink-elevated, var(--gl-ink))
+      );
       outline: 2px solid var(--gl-fg);
+      outline-offset: 0;
       z-index: 2;
+      box-shadow: inset 0 0 0 1px
+        color-mix(in srgb, var(--clip-color) 70%, transparent);
     }
     .clip.snap {
-      box-shadow: 0 0 0 2px #e8c547;
+      box-shadow:
+        inset 0 0 0 1px color-mix(in srgb, var(--clip-color) 55%, transparent),
+        0 0 0 2px #e8c547;
     }
     .clip-ctx-backdrop {
       position: fixed;
@@ -1041,8 +1152,28 @@ export class GlSequencerPage extends LitElement {
 
   #syncChromeMore(): void {
     if (!this.isConnected) return;
+    const canGen =
+      !!this.project &&
+      this.samples.length > 0 &&
+      this.tracks.length > 0;
+    const primaries: ChromePrimary[] = [
+      {
+        label: t("seq.generate"),
+        icon: "wand",
+        emphasis: "primary",
+        disabled: !canGen,
+        onClick: () => this.#openSeqModal("generate"),
+      },
+      {
+        label: t("seq.undo"),
+        icon: "undo",
+        emphasis: "outline",
+        onClick: () => void this.#undo(),
+      },
+    ];
     chromeMore.set({
       ariaLabel: t("seq.more"),
+      primaries,
       items: this.#seqMoreItems(),
     });
   }
@@ -1069,6 +1200,8 @@ export class GlSequencerPage extends LitElement {
     this.#tlRo = null;
     cancelAnimationFrame(this.#raf);
     cancelAnimationFrame(this.#wavePaintRaf);
+    cancelAnimationFrame(this.#selAdvanceRaf);
+    this.#selAdvanceRaf = 0;
     this.#stopSelEdgeScroll();
     this.#scrollInertia.cancel();
     this.#engine?.stop();
@@ -1356,9 +1489,132 @@ export class GlSequencerPage extends LitElement {
     this.#setFollowPlayhead(false);
   };
 
+  #lastTimelineScrollLeft = 0;
+  #selAdvanceRaf = 0;
+  #pendingSelDir: 1 | -1 = 1;
+
   #onTimelineScroll = (): void => {
+    const timeline = this.#timelineEl();
+    const left = timeline?.scrollLeft ?? 0;
+    const dir: 1 | -1 = left >= this.#lastTimelineScrollLeft ? 1 : -1;
+    this.#lastTimelineScrollLeft = left;
     this.#syncViewWindow();
+    this.#scheduleSelectionAdvance(dir);
   };
+
+  #scheduleSelectionAdvance(dir: 1 | -1): void {
+    this.#pendingSelDir = dir;
+    if (this.#selAdvanceRaf) return;
+    this.#selAdvanceRaf = requestAnimationFrame(() => {
+      this.#selAdvanceRaf = 0;
+      this.#advanceSelectionIfOffscreen(this.#pendingSelDir);
+    });
+  }
+
+  /** Overlap ticks of clip with [viewStart, viewEnd). */
+  #clipVisibleTicks(
+    c: Clip,
+    viewStart: number,
+    viewEnd: number,
+  ): number {
+    const a = c.startTick;
+    const b = c.startTick + c.lengthTick;
+    return Math.max(0, Math.min(b, viewEnd) - Math.max(a, viewStart));
+  }
+
+  /**
+   * Clip still “owns” the view if a meaningful slice stays on screen.
+   * A 1px sliver must not keep selection / waveform attached.
+   */
+  #clipMeaningfullyInView(
+    c: Clip,
+    viewStart: number,
+    viewEnd: number,
+  ): boolean {
+    const viewLen = Math.max(1, viewEnd - viewStart);
+    const clipLen = Math.max(1, c.lengthTick);
+    const vis = this.#clipVisibleTicks(c, viewStart, viewEnd);
+    if (vis <= 0) return false;
+    const visPx = vis * this.pxPerTick;
+    // Keep if ≥30% of clip, or ≥18% of viewport, or ≥48px — else treat as gone.
+    return (
+      vis / clipLen >= 0.3 ||
+      vis / viewLen >= 0.18 ||
+      visPx >= 48
+    );
+  }
+
+  /**
+   * Selected clip left the viewport → pick a visible sibling on the same track
+   * (scroll direction / view center). Clear selection if none — no orphan wave.
+   */
+  #advanceSelectionIfOffscreen(dir: 1 | -1): void {
+    if (!this.selectedId) return;
+    const sel = this.clips.find((c) => c.id === this.selectedId);
+    if (!sel) {
+      this.selectedId = null;
+      return;
+    }
+    const range = this.#visibleTickRange();
+    if (!range) return;
+    const { start: vs, end: ve } = range;
+    if (this.#clipMeaningfullyInView(sel, vs, ve)) return;
+
+    const siblings = this.clips
+      .filter((c) => c.trackId === sel.trackId)
+      .sort(
+        (a, b) =>
+          a.startTick - b.startTick || a.id.localeCompare(b.id),
+      );
+    const visible = siblings.filter((c) =>
+      this.#clipMeaningfullyInView(c, vs, ve),
+    );
+    if (visible.length === 0) {
+      this.selectedId = null;
+      return;
+    }
+
+    const center = (vs + ve) / 2;
+    const idx = siblings.findIndex((c) => c.id === sel.id);
+    const step = dir >= 0 ? 1 : -1;
+    if (idx >= 0) {
+      for (let i = idx + step; i >= 0 && i < siblings.length; i += step) {
+        const c = siblings[i]!;
+        if (visible.some((v) => v.id === c.id)) {
+          this.selectedId = c.id;
+          return;
+        }
+      }
+    }
+
+    // Fallback: clip covering view center, else closest mid to center.
+    let best = visible[0]!;
+    let bestScore = Infinity;
+    for (const c of visible) {
+      const mid = c.startTick + c.lengthTick / 2;
+      const covers = c.startTick <= center && c.startTick + c.lengthTick >= center;
+      const dist = Math.abs(mid - center);
+      const score = covers ? dist : dist + (ve - vs);
+      if (score < bestScore) {
+        best = c;
+        bestScore = score;
+      }
+    }
+    this.selectedId = best.id;
+  }
+
+  #visibleTickRange(): { start: number; end: number } | null {
+    const timeline = this.#timelineEl();
+    if (!timeline) return null;
+    const max = Math.max(1, this.#projectLengthTick());
+    const usableW = Math.max(64, timeline.clientWidth - TRACK_GUTTER_PX);
+    const start = timeline.scrollLeft / this.pxPerTick;
+    const end = (timeline.scrollLeft + usableW) / this.pxPerTick;
+    return {
+      start: Math.max(0, Math.min(max, start)),
+      end: Math.max(0, Math.min(max, end)),
+    };
+  }
 
   #setFollowPlayhead(follow: boolean): void {
     this.#followPlayhead = follow;
@@ -1414,11 +1670,15 @@ export class GlSequencerPage extends LitElement {
     if (timeline.scrollLeft !== next) {
       if (Math.abs(next - timeline.scrollLeft) >= 1) {
         timeline.scrollLeft = next;
+        // scroll event will advance selection; keep last dir as forward play.
+        this.#pendingSelDir = 1;
       } else {
         this.#syncViewWindow();
+        this.#scheduleSelectionAdvance(this.#pendingSelDir);
       }
     } else {
       this.#syncViewWindow();
+      this.#scheduleSelectionAdvance(this.#pendingSelDir);
     }
   }
 
@@ -1560,22 +1820,23 @@ export class GlSequencerPage extends LitElement {
     return html`
       ${this.rotateClipTool
         ? html`<div
-            class="toolbar flex shrink-0 flex-wrap items-center gap-2 px-4 pb-1.5 pt-3 max-md:gap-1.5 max-md:px-2.5 max-md:pb-1 max-md:pt-2"
+            class="shrink-0 px-4 pb-1.5 pt-2 max-md:px-2.5"
           >
-            <div
-              class="flex min-w-0 flex-1 items-center gap-2 text-xs text-content"
-              role="status"
-            >
-              <span class="truncate">${t("seq.rotateHint")}</span>
-              <sonic-button
-                size="xs"
-                variant="ghost"
-                type="neutral"
-                @click=${() => this.#clearRotateClipTool()}
-              >
-                ${t("dialog.cancel")}
-              </sonic-button>
-            </div>
+            <sonic-alert status="info" label=${t("seq.rotate")}>
+              <div class="flex min-w-0 flex-wrap items-center gap-2">
+                <span class="min-w-0 flex-1 text-sm"
+                  >${t("seq.rotateHint")}</span
+                >
+                <sonic-button
+                  size="xs"
+                  variant="outline"
+                  type="neutral"
+                  @click=${() => this.#clearRotateClipTool()}
+                >
+                  ${t("dialog.cancel")}
+                </sonic-button>
+              </div>
+            </sonic-alert>
           </div>`
         : nothing}
       ${this.#renderExportModal()}
@@ -1597,6 +1858,15 @@ export class GlSequencerPage extends LitElement {
                   : t("seq.dropCancel")}
               >
                 ${glIcon("trash-2", { size: "sm" })}
+              </div>`
+            : nothing}
+          ${this.project && this.clips.length === 0
+            ? html`<div class="seq-stage-empty" role="status">
+                <p
+                  class="m-0 max-w-xs text-sm leading-snug text-neutral-500"
+                >
+                  ${t("seq.stageEmptyHint")}
+                </p>
               </div>`
             : nothing}
           <div
@@ -1672,7 +1942,7 @@ export class GlSequencerPage extends LitElement {
           @gl-seek-end=${this.#onSeekBarEnd}
         ></gl-seek-bar>
       </div>
-      <div class="transport-wrap shrink-0 px-4 pb-2.5 max-md:px-2.5 max-md:pb-2">
+      <div class="gl-transport-dock transport-wrap px-4 max-md:px-2.5">
         <gl-transport-bar
           .playing=${this.playing}
           .loading=${this.loadingPlay}
@@ -1735,27 +2005,43 @@ export class GlSequencerPage extends LitElement {
           ${this.#renderDrawerFilterPop(filters)}
         </div>
         <div class="drawer-list flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
-          <sonic-table
-            class="block h-full min-h-0 w-full max-w-full"
-            size="sm"
-            bordered
-            rounded
-            maxHeight="100%"
-          >
-            <sonic-tbody>
-              ${this.#drawerSamples.length === 0
-                ? html`
-                    <sonic-tr>
-                      <sonic-td>
-                        <span class="font-mono text-[0.7rem] text-neutral-500"
-                          >Aucun sample — capture d’abord.</span
-                        >
-                      </sonic-td>
-                    </sonic-tr>
-                  `
-                : this.#drawerSamples.map((s) => this.#renderDrawerSampleRow(s))}
-            </sonic-tbody>
-          </sonic-table>
+          ${this.#drawerSamples.length === 0
+            ? html`
+                <div class="drawer-empty" role="status">
+                  <span class="text-primary" aria-hidden="true"
+                    >${glIcon("audio-lines", { size: "md" })}</span
+                  >
+                  <p class="drawer-empty-title">
+                    ${t("seq.drawerEmptyTitle")}
+                  </p>
+                  <p class="m-0 max-w-[14rem] text-xs leading-snug text-neutral-500">
+                    ${t("seq.drawerEmptyHint")}
+                  </p>
+                  <sonic-button
+                    size="sm"
+                    type="primary"
+                    @click=${() => navigate({ name: "capture" })}
+                  >
+                    ${glIcon("mic", { slot: "prefix", size: "xs" })}
+                    ${t("library.goCapture")}
+                  </sonic-button>
+                </div>
+              `
+            : html`
+                <sonic-table
+                  class="block h-full min-h-0 w-full max-w-full"
+                  size="sm"
+                  bordered
+                  rounded
+                  maxHeight="100%"
+                >
+                  <sonic-tbody>
+                    ${this.#drawerSamples.map((s) =>
+                      this.#renderDrawerSampleRow(s),
+                    )}
+                  </sonic-tbody>
+                </sonic-table>
+              `}
         </div>
       </aside>
     `;
@@ -1771,23 +2057,15 @@ export class GlSequencerPage extends LitElement {
         type=${placing || playing ? "info" : nothing}
         @pointerdown=${(e: PointerEvent) => this.#drawerDown(e, s)}
       >
-        <sonic-td width="0.75rem" vAlign="middle">
-          <span
-            class="block h-7 w-2 rounded-sm"
-            style="background:${CLASS_COLORS[s.class]}"
-          ></span>
-        </sonic-td>
         <sonic-td vAlign="middle">
           ${tip(
             t("seq.placeSample"),
-            html`
-              <div class="drawer-row-title">${title}</div>
-              <div
-                class="drawer-row-title font-mono text-[0.7rem] text-neutral-500"
-              >
-                ${s.class} · ${s.durationMs}ms
-              </div>
-            `,
+            renderSampleListIdentity({
+              title,
+              sampleClass: s.class,
+              durationMs: s.durationMs,
+              favorite: s.favorite,
+            }),
             { class: "w-full max-w-full justify-start text-left", focusable: true },
           )}
         </sonic-td>
@@ -1799,8 +2077,8 @@ export class GlSequencerPage extends LitElement {
           })}
         </sonic-td>
         <sonic-td width="1.25rem" align="right" vAlign="middle">
-          <span class="font-mono text-[0.7rem] text-neutral-500"
-            >${s.favorite ? "★" : "⋮⋮"}</span
+          <span class="font-mono text-[0.7rem] text-neutral-500" aria-hidden="true"
+            >⋮⋮</span
           >
         </sonic-td>
       </sonic-tr>
@@ -1976,7 +2254,12 @@ export class GlSequencerPage extends LitElement {
   #renderTrack(tr: Track, laneW: number) {
     const laneClips = this.clips.filter((c) => c.trackId === tr.id);
     const xfades = trackXfadeZones(laneClips);
-    const lines = this.#trackConfLines(tr);
+    const chips = mixConfChips({
+      gainDb: tr.gainDb,
+      mute: tr.mute,
+      fx: tr.fx,
+    });
+    const fxOn = mixConfHasFx(tr.fx);
     return html`
       <div class="track">
         <div
@@ -1998,23 +2281,17 @@ export class GlSequencerPage extends LitElement {
           ${laneClips.map((c) => this.#renderClip(c))}
         </div>
         <div
-          class="track-label relative flex min-h-0 flex-col justify-center overflow-visible py-1 pl-1 pr-7 text-neutral-500"
+          class="track-label relative flex h-full min-h-0 flex-col justify-center overflow-visible py-1 pl-1 pr-7"
+          ?data-muted=${tr.mute}
         >
-          <div
-            class="flex min-w-0 flex-col gap-px font-mono text-[0.6rem] leading-tight"
-            title=${lines.join(" · ")}
-          >
-            ${lines.map(
-              (line) => html`<span class="truncate">${line}</span>`,
-            )}
-          </div>
+          ${renderMixConfChips(chips)}
           ${tip(
             t("seq.trackSettingsHint"),
             html`
               <sonic-button
                 shape="circle"
                 variant="ghost"
-                type="neutral"
+                type=${fxOn || tr.mute ? "primary" : "neutral"}
                 size="xs"
                 icon
                 class="shrink-0"
@@ -2036,23 +2313,6 @@ export class GlSequencerPage extends LitElement {
   #gainLinLabel(gainDb: number): string {
     const lin = gainDbToLin(gainDb);
     return `×${lin.toFixed(lin === 0 || lin === 1 || lin === 2 ? 0 : 2)}`;
-  }
-
-  /** One line per conf family for the sticky gutter (no track name). */
-  #trackConfLines(tr: Track): string[] {
-    const lines: string[] = [];
-    if (tr.mute) lines.push("M");
-    lines.push(this.#gainLinLabel(tr.gainDb));
-    lines.push(...formatTrackFxSummaryLines(tr.fx));
-    return lines;
-  }
-
-  #masterConfLines(p: Project): string[] {
-    const [fx0, fx1] = this.#masterFxPair();
-    const lines = [this.#gainLinLabel(p.preampGainDb ?? 0)];
-    lines.push(...formatTrackFxSummaryLines(fx0, true));
-    lines.push(...formatTrackFxSummaryLines(fx1, true));
-    return lines;
   }
 
   #renderTrackSettingsModal() {
@@ -2080,7 +2340,7 @@ export class GlSequencerPage extends LitElement {
         <sonic-modal-content>
           ${tr
             ? html`
-                <gl-form-stack class="seq-settings-modal text-content">
+                <gl-form-stack class="text-content">
                   <gl-form-section label=${t("seq.sectionVolume")} tight>
                     <div class="flex flex-wrap items-center gap-2">
                       <sonic-switch
@@ -2126,11 +2386,7 @@ export class GlSequencerPage extends LitElement {
               `
             : nothing}
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${t("dialog.ok")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }
@@ -2145,28 +2401,43 @@ export class GlSequencerPage extends LitElement {
     const rotateTarget = this.rotateClipTool && selected;
     const clipW = Math.max(8, c.lengthTick * this.pxPerTick);
     const clipName = sample?.userName ?? sample?.name ?? "";
+    const bpm = this.project?.bpm ?? 120;
+    const durLabel = formatSampleDuration(
+      ticksToMs(c.lengthTick, bpm),
+    );
+    const showMeta = clipW >= 52;
+    const showDur = clipW >= 88;
+    const titleBits = [
+      clipName || null,
+      durLabel,
+      sample?.class ?? null,
+      `fade ${c.fadeInMs}/${c.fadeOutMs} ms`,
+    ].filter(Boolean);
     return html`
       <div
         class="clip ${selected ? "selected" : ""} ${rotateTarget
           ? "rotate-target"
           : ""} ${this.snapHighlightId === c.id ? "snap" : ""}"
-        style="left:${c.startTick * this.pxPerTick}px;width:${clipW}px;background:${color}"
+        style="left:${c.startTick * this.pxPerTick}px;width:${clipW}px;--clip-color:${color}"
         data-clip=${c.id}
-        title=${clipName
-          ? `${clipName} · fade ${c.fadeInMs}/${c.fadeOutMs} ms`
-          : `fade ${c.fadeInMs}/${c.fadeOutMs} ms`}
+        title=${titleBits.join(" · ")}
         @pointerdown=${(e: PointerEvent) => this.#clipDown(e, c)}
       >
-        ${clipName
-          ? html`<span class="clip-name">${clipName}</span>`
-          : nothing}
         ${selected
           ? html`<canvas
               class="wave"
               data-wave-clip=${c.id}
               aria-hidden="true"
             ></canvas>`
-          : null}
+          : nothing}
+        ${showMeta && clipName
+          ? html`<div class="clip-meta">
+              <span class="clip-name">${clipName}</span>
+              ${showDur
+                ? html`<span class="clip-dur">${durLabel}</span>`
+                : nothing}
+            </div>`
+          : nothing}
         ${selected && !this.rotateClipTool
           ? html`
               <div
@@ -2543,7 +2814,13 @@ export class GlSequencerPage extends LitElement {
   #renderMasterMix() {
     const p = this.project;
     if (!p) return nothing;
-    const lines = this.#masterConfLines(p);
+    const [fx0, fx1] = this.#masterFxPair();
+    const chips = mixConfChips({
+      gainDb: p.preampGainDb ?? 0,
+      fx: [fx0, fx1],
+      wetOnly: true,
+    });
+    const fxOn = mixConfHasFx([fx0, fx1], true);
     return html`
       <div
         class="master-mix flex items-center gap-2 overflow-visible"
@@ -2551,26 +2828,16 @@ export class GlSequencerPage extends LitElement {
         aria-label=${t("seq.masterMix")}
       >
         <div
-          class="master-mix-conf relative flex min-w-[5rem] flex-col justify-center overflow-visible py-0.5 pl-0.5 pr-7 text-neutral-500"
+          class="master-mix-conf relative flex min-w-[5.5rem] max-w-[7.5rem] flex-col justify-center overflow-visible py-0.5 pl-0.5 pr-7"
         >
-          <div
-            class="flex flex-col gap-px overflow-visible font-mono text-[0.6rem] leading-snug"
-            title=${lines.join(" · ")}
-          >
-            ${lines.map(
-              (line) =>
-                html`<span class="block overflow-visible whitespace-nowrap"
-                  >${line}</span
-                >`,
-            )}
-          </div>
+          ${renderMixConfChips(chips)}
           ${tip(
             t("seq.masterSettingsHint"),
             html`
               <sonic-button
                 shape="circle"
                 variant="ghost"
-                type="neutral"
+                type=${fxOn ? "primary" : "neutral"}
                 size="xs"
                 icon
                 class="shrink-0"
@@ -2615,7 +2882,7 @@ export class GlSequencerPage extends LitElement {
         <sonic-modal-content>
           ${p && fx0 && fx1
             ? html`
-                <gl-form-stack class="seq-settings-modal text-content">
+                <gl-form-stack class="text-content">
                   <gl-form-section label=${t("seq.preamp")} tight>
                     <div class="flex flex-wrap items-center gap-2">
                       <gl-track-volume-rotary
@@ -2664,11 +2931,7 @@ export class GlSequencerPage extends LitElement {
               `
             : nothing}
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${t("dialog.ok")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }
@@ -2804,6 +3067,9 @@ export class GlSequencerPage extends LitElement {
       `canvas[data-wave-clip="${CSS.escape(clip.id)}"]`,
     );
     if (!canvas) return;
+    const sample = this.samples.find((s) => s.id === clip.sampleId);
+    const stroke =
+      sample != null ? CLASS_COLORS[sample.class] : CLASS_COLORS.texture;
     const entry = await this.#ensureSamplePcm(clip.sampleId);
     if (token !== this.#wavePaintToken) return;
     if (!entry) return;
@@ -2832,6 +3098,7 @@ export class GlSequencerPage extends LitElement {
       offsetSamples,
       cssW,
       cssH,
+      stroke,
     );
   }
 
@@ -3637,12 +3904,10 @@ export class GlSequencerPage extends LitElement {
                     : nothing}
           </div>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${glIcon("x", { slot: "prefix", size: "xs" })}
-            ${t("export.close")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(html`
+          ${glIcon("x", { slot: "prefix", size: "xs" })}
+          ${t("export.close")}
+        `)}
       </sonic-modal>
     `;
   }
@@ -3693,33 +3958,36 @@ export class GlSequencerPage extends LitElement {
       >
         <sonic-modal-title>${t("seq.bpmTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-4 text-sm text-content">
-            <label class="flex flex-col gap-1.5 text-xs text-neutral-500">
-              ${t("seq.bpm")} (${MIN_BPM}–${MAX_BPM})
-              <input
-                class="box-border w-full rounded-md border border-neutral-500/25 bg-neutral-0 px-2.5 py-2 font-mono text-base text-inherit [font:inherit]"
+          <div class="seq-modal-body text-content">
+            <sonic-form-layout>
+              <sonic-input
                 type="number"
+                label=${`${t("seq.bpm")} (${MIN_BPM}–${MAX_BPM})`}
                 min=${MIN_BPM}
                 max=${MAX_BPM}
                 .value=${String(this.draftBpm)}
                 @input=${(e: Event) => {
-                  this.draftBpm = Number((e.target as HTMLInputElement).value);
+                  this.draftBpm = Number(
+                    (e.target as HTMLInputElement).value,
+                  );
                 }}
-              />
-            </label>
+              ></sonic-input>
+            </sonic-form-layout>
           </div>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${t("dialog.cancel")}
-          </sonic-button>
-          <sonic-button
-            type="primary"
-            @click=${() => void this.#commitBpm()}
-          >
-            ${t("seq.apply")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary: {
+            label: t("dialog.cancel"),
+            hideModal: true,
+            variant: "outline",
+            type: "neutral",
+          },
+          primary: {
+            label: t("seq.apply"),
+            type: "primary",
+            onClick: () => void this.#commitBpm(),
+          },
+        })}
       </sonic-modal>
 
       <sonic-modal
@@ -3734,36 +4002,39 @@ export class GlSequencerPage extends LitElement {
       >
         <sonic-modal-title>${t("seq.barsTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="seq-modal-body flex flex-col gap-4 text-sm text-content">
-            <label class="flex flex-col gap-1.5 text-xs text-neutral-500">
-              ${t("seq.barsUnit")} (${MIN_BARS}–${MAX_BARS})
-              <input
-                class="box-border w-full rounded-md border border-neutral-500/25 bg-neutral-0 px-2.5 py-2 font-mono text-base text-inherit [font:inherit]"
+          <div class="seq-modal-body flex flex-col gap-3 text-content">
+            <sonic-form-layout>
+              <sonic-input
                 type="number"
+                label=${`${t("seq.barsUnit")} (${MIN_BARS}–${MAX_BARS})`}
                 min=${MIN_BARS}
                 max=${MAX_BARS}
                 .value=${String(this.draftBars)}
                 @input=${(e: Event) => {
-                  this.draftBars = Number((e.target as HTMLInputElement).value);
+                  this.draftBars = Number(
+                    (e.target as HTMLInputElement).value,
+                  );
                 }}
-              />
-            </label>
+              ></sonic-input>
+            </sonic-form-layout>
             <span class="font-mono text-[0.7rem] text-neutral-500"
               >${bars} ${t("seq.barsUnit")} · ${formatClock(seqDurMs)}</span
             >
           </div>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${t("dialog.cancel")}
-          </sonic-button>
-          <sonic-button
-            type="primary"
-            @click=${() => void this.#commitBars()}
-          >
-            ${t("seq.apply")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary: {
+            label: t("dialog.cancel"),
+            hideModal: true,
+            variant: "outline",
+            type: "neutral",
+          },
+          primary: {
+            label: t("seq.apply"),
+            type: "primary",
+            onClick: () => void this.#commitBars(),
+          },
+        })}
       </sonic-modal>
 
       <sonic-modal
@@ -3780,33 +4051,35 @@ export class GlSequencerPage extends LitElement {
         <sonic-modal-content>
           ${this.#renderGenerateForm(bars, seqDurMs)}
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${t("dialog.cancel")}
-          </sonic-button>
-          <sonic-button
-            variant="outline"
-            type="neutral"
-            @click=${() => this.#openSynthSongKit()}
-          >
-            ${t("seq.synthKit")}
-          </sonic-button>
-          <sonic-button
-            variant="outline"
-            type="neutral"
-            ?disabled=${this.#genPoolSamples().length === 0}
-            @click=${() => void this.#commitGenerate({ regen: true })}
-          >
-            ${t("seq.regenUnlocked")}
-          </sonic-button>
-          <sonic-button
-            type="primary"
-            ?disabled=${this.#genPoolSamples().length === 0}
-            @click=${() => void this.#commitGenerate()}
-          >
-            ${t("seq.generateConfirm")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary: {
+            label: t("dialog.cancel"),
+            hideModal: true,
+            variant: "outline",
+            type: "neutral",
+          },
+          tertiary: [
+            {
+              label: t("seq.synthKit"),
+              variant: "outline",
+              type: "neutral",
+              onClick: () => this.#openSynthSongKit(),
+            },
+            {
+              label: t("seq.regenUnlocked"),
+              variant: "outline",
+              type: "neutral",
+              disabled: this.#genPoolSamples().length === 0,
+              onClick: () => void this.#commitGenerate({ regen: true }),
+            },
+          ],
+          primary: {
+            label: t("seq.generateConfirm"),
+            type: "primary",
+            disabled: this.#genPoolSamples().length === 0,
+            onClick: () => void this.#commitGenerate(),
+          },
+        })}
       </sonic-modal>
 
       <sonic-modal
@@ -3840,11 +4113,7 @@ export class GlSequencerPage extends LitElement {
             </ul>
           </div>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal type="primary">
-            ${t("dialog.ok")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }
@@ -6435,22 +6704,25 @@ export class GlSequencerPage extends LitElement {
               : nothing}
           </div>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          ${clip
-            ? html`<sonic-button
-                variant="outline"
-                type="primary"
-                size="sm"
-                @click=${() => this.#armRotateFromOpts()}
-              >
-                ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
-                ${t("seq.rotate")}
-              </sonic-button>`
-            : nothing}
-          <sonic-button hideModal type="primary">
-            ${t("dialog.ok")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalActions({
+          tertiary: clip
+            ? {
+                label: html`
+                  ${glIcon("refresh-cw", { slot: "prefix", size: "xs" })}
+                  ${t("seq.rotate")}
+                `,
+                variant: "outline",
+                type: "primary",
+                size: "sm",
+                onClick: () => this.#armRotateFromOpts(),
+              }
+            : undefined,
+          primary: {
+            label: t("dialog.ok"),
+            hideModal: true,
+            type: "primary",
+          },
+        })}
       </sonic-modal>
     `;
   }

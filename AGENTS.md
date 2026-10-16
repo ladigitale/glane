@@ -58,6 +58,14 @@ See plan: Bootstrap → P0 capture → P1 detect → P2 library → P3 editor �
 
 SSO handoff with Tadaaa is post-auth (Belts pattern); not required for local capture.
 
+## Design (Impeccable)
+
+- Context: `PRODUCT.md`, `DESIGN.md`, `.impeccable/` (code-led, root `apps/web`)
+- Skills: project `/impeccable` + global bridge `ssks-impeccable` (Concorde modes / anti-slop)
+- Modes: app screens **Operate** · landing **Persuade** · privacy/docs **Read**
+- Setup refresh: `npx impeccable update` · hooks in `.cursor/hooks.json`
+- Index: https://impeccable.style/llms.txt
+
 <!-- concorde-ai -->
 
 # Agents — Concorde

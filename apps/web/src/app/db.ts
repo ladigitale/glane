@@ -20,8 +20,12 @@ import {
 import { normalizeThemeId, type AppThemeId } from "./theme.js";
 import { resolveBrowserLocale, type AppLocale } from "./i18n/locale.js";
 
-/** How « Traiter un fichier » segments audio (live mic always hunts). */
-export type FileProcessMode = "hunt" | "song" | "whole";
+/**
+ * How to segment audio (fichier + micro pour les modes événement).
+ * - hunt / attack / harmonic : détecteurs d’événements
+ * - song / whole : grille tempo / fichier entier (fichier seulement ; micro → hunt)
+ */
+export type FileProcessMode = "hunt" | "attack" | "harmonic" | "song" | "whole";
 
 export type UserPrefs = {
   id: string;
@@ -44,8 +48,8 @@ export type UserPrefs = {
   /** Desired live captures per minute (2–60). */
   targetCapturesPerMin?: number;
   /**
-   * File import mode: event hunt, tempo grid slices, or whole file.
-   * Live mic ignores this (always hunt).
+   * Segmentation mode (hunt / attack / harmonic / song / whole).
+   * Live mic uses hunt|attack|harmonic; song|whole → hunt on mic.
    */
   fileProcessMode?: FileProcessMode;
   /**
@@ -60,6 +64,14 @@ export type UserPrefs = {
   sliceMaxDurationMs?: number | null;
   /** Preferred MediaDeviceInfo.deviceId for capture (empty = browser default). */
   captureAudioDeviceId?: string;
+  /** Harmonic mode sensitivity 0–100. */
+  harmonicSensitivity?: number;
+  /** Harmonic minimum harmonicity 0–1. */
+  harmonicMinHarmonicity?: number;
+  /** Harmonic maximum flatness 0–1. */
+  harmonicMaxFlatness?: number;
+  /** Harmonic minimum duration (ms). */
+  harmonicMinDurationMs?: number;
   /**
    * T2 YAMNet semantic tags after polish (ADR-0020). Default on.
    * Set false to skip model download / inference.

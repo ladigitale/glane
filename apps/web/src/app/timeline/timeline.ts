@@ -11,7 +11,7 @@ import { css } from "lit";
 /** Legacy wide left gutter (kept for shared chrome defaults). */
 export const TRACK_LABEL_PX = 176;
 /** Narrow arrangement-style gutter (conf + settings) — editor + sequencer. */
-export const TRACK_GUTTER_PX = 72;
+export const TRACK_GUTTER_PX = 88;
 export const RULER_H = 28;
 export const CANCEL_ZONE_H = 36;
 export const LANE_PAD_UNITS = 64;
@@ -375,6 +375,8 @@ export function paintStretchedWave(
   offsetSamples: number,
   cssW: number,
   cssH: number,
+  /** Wave stroke — defaults to dark ink for legacy solid fills. */
+  strokeColor = "rgba(0,0,0,0.45)",
 ): void {
   const w = Math.max(1, Math.floor(cssW));
   const h = Math.max(1, Math.floor(cssH));
@@ -387,7 +389,7 @@ export function paintStretchedWave(
   ctx.clearRect(0, 0, w, h);
   const mid = h / 2;
   const spp = clipSamples / w;
-  ctx.strokeStyle = "rgba(0,0,0,0.45)";
+  ctx.strokeStyle = strokeColor;
   ctx.beginPath();
   for (let x = 0; x < w; x++) {
     const t0 = x * spp;

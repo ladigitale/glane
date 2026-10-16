@@ -4,16 +4,17 @@
 import type { SampleClass } from "@glane/core-model";
 import {
   DSP_THRESHOLDS,
-  EventHunter,
+  DualEventHunter,
   computeInterestScore,
   durationMsFromPcm,
   frameCount,
   songSlice,
   toMonoPcm,
-  type Extraction,
+  type DualExtraction as Extraction,
   type TempoEstimate,
 } from "@glane/audio-dsp";
 import type { FileProcessMode } from "./db.js";
+import { dualHunterOptsFor, isEventProcessMode } from "./file-process-mode.js";
 import { INTEREST_CULL, targetKeepCount } from "./interest-cull-plan.js";
 import {
   durationPassesSliceFilter,
@@ -57,6 +58,10 @@ export type SlicePreviewAnalyzeOpts = {
   mode: FileProcessMode;
   targetPerMin: number;
   openFloorFactor?: number;
+  harmonicSensitivity?: number;
+  harmonicMinHarmonicity?: number;
+  harmonicMaxFlatness?: number;
+  harmonicMinDurationMs?: number;
   minDurationMs?: number | null;
   maxDurationMs?: number | null;
   /** Skip tempo detection when song-slicing the same file again. */
@@ -157,14 +162,26 @@ async function huntHits(opts: {
   pcm: Float32Array;
   sampleRate: number;
   channelCount: number;
+  eventMode: "hunt" | "attack" | "harmonic";
   openFloorFactor?: number;
+  harmonicSensitivity?: number;
+  harmonicMinHarmonicity?: number;
+  harmonicMaxFlatness?: number;
+  harmonicMinDurationMs?: number;
   signal?: AbortSignal;
 }): Promise<SlicePreviewHit[]> {
-  const { pcm, sampleRate, channelCount, signal } = opts;
-  const hunter = new EventHunter(sampleRate, {
-    openFloorFactor: opts.openFloorFactor,
-    channelCount,
-  });
+  const { pcm, sampleRate, channelCount, signal, eventMode } = opts;
+  const hunter = new DualEventHunter(
+    sampleRate,
+    dualHunterOptsFor(eventMode, {
+      openFloorFactor: opts.openFloorFactor,
+      channelCount,
+      harmonicSensitivity: opts.harmonicSensitivity,
+      harmonicMinHarmonicity: opts.harmonicMinHarmonicity,
+      harmonicMaxFlatness: opts.harmonicMaxFlatness,
+      harmonicMinDurationMs: opts.harmonicMinDurationMs,
+    }),
+  );
   const hop = DSP_THRESHOLDS.live.envelopeHop * channelCount;
   const chunk = Math.max(
     hop * 4,
@@ -317,17 +334,29 @@ async function analyze(
     };
   }
 
+  const eventMode = isEventProcessMode(mode) ? mode : "hunt";
   const hits =
     opts.huntHits ??
     (await huntHits({
       pcm,
       sampleRate,
       channelCount,
+      eventMode,
       openFloorFactor: opts.openFloorFactor,
+      harmonicSensitivity: opts.harmonicSensitivity,
+      harmonicMinHarmonicity: opts.harmonicMinHarmonicity,
+      harmonicMaxFlatness: opts.harmonicMaxFlatness,
+      harmonicMinDurationMs: opts.harmonicMinDurationMs,
       signal,
     }));
-  // Density cull first, then length filter — length never crops, only rejects.
-  const afterCull = applyCull(hits, durationMs, targetPerMin);
+  // Density cull only for hunt — attack / harmonic keep every detection hit.
+  const afterCull =
+    eventMode === "hunt"
+      ? applyCull(hits, durationMs, targetPerMin)
+      : withKept(
+          hits,
+          hits.map(() => true),
+        );
   const filter = resolveSliceDurationFilter({
     minMs: opts.minDurationMs,
     maxMs: opts.maxDurationMs,

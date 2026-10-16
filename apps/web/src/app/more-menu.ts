@@ -19,17 +19,40 @@ export type MoreMenuEntry =
   | "divider"
   | { section: string };
 
+/** Visible primary actions on the breadcrumb row (1–2 max). */
+export type ChromePrimary = MoreMenuItem & {
+  /** Default outline; use primary for the page’s main ingest/action. */
+  emphasis?: "primary" | "outline" | "ghost";
+};
+
 /** Page chrome more (breadcrumb row) — published by the active page. */
 export type ChromeMoreState = {
   ariaLabel: string;
   items: readonly MoreMenuEntry[];
+  /** Shown left of ⋮ — keep short; rest stays in `items`. */
+  primaries?: readonly ChromePrimary[];
 };
 
-const CHROME_MORE_EMPTY: ChromeMoreState = { ariaLabel: "", items: [] };
+const CHROME_MORE_EMPTY: ChromeMoreState = {
+  ariaLabel: "",
+  items: [],
+  primaries: [],
+};
 
 function chromeMoreSig(state: ChromeMoreState): string {
+  const primaries = state.primaries ?? [];
   return [
     state.ariaLabel,
+    ...primaries.map((e) =>
+      [
+        "p",
+        e.label,
+        e.hint ?? "",
+        e.icon ?? "",
+        e.emphasis ?? "outline",
+        e.disabled ? "1" : "0",
+      ].join(":"),
+    ),
     ...state.items.map((e) => {
       if (e === "divider") return "|";
       if ("section" in e) return `s:${e.section}`;
@@ -65,6 +88,7 @@ export const chromeMore = {
     const next: ChromeMoreState = {
       ariaLabel: state.ariaLabel,
       items: state.items ?? [],
+      primaries: state.primaries ?? [],
     };
     const sig = chromeMoreSig(next);
     if (sig === chromeMoreLastSig) return;
@@ -85,6 +109,38 @@ export const chromeMore = {
     };
   },
 } as const;
+
+/** Breadcrumb-row visible primaries (Operate grammar). */
+export function renderChromePrimaries(
+  primaries: readonly ChromePrimary[],
+): TemplateResult | typeof nothing {
+  if (!primaries.length) return nothing;
+  return html`
+    <div class="flex shrink-0 items-center gap-1">
+      ${primaries.map((item) => {
+        const emphasis = item.emphasis ?? "outline";
+        return tip(
+          item.label,
+          html`
+            <sonic-button
+              size="sm"
+              variant=${emphasis === "primary" ? nothing : emphasis}
+              type=${emphasis === "primary" ? "primary" : "neutral"}
+              ?disabled=${item.disabled}
+              data-aria-label=${item.label}
+              @click=${item.onClick}
+            >
+              ${item.icon
+                ? glIcon(item.icon, { slot: "prefix", size: "xs" })
+                : nothing}
+              <span class="hidden sm:inline">${item.label}</span>
+            </sonic-button>
+          `,
+        );
+      })}
+    </div>
+  `;
+}
 
 /**
  * Ellipsis actions menu — vertical by default; horizontal for list-row actions.

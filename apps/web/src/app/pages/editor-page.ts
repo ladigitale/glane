@@ -65,9 +65,14 @@ import {
 import { editorFormKey } from "../dp-keys.js";
 import { glDialog } from "../dialog.js";
 import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
+import { renderModalActions, renderModalOk } from "../form-actions.js";
 import { glIcon } from "../icon.js";
 import { tip } from "../tip.js";
-import { chromeMore, type MoreMenuEntry } from "../more-menu.js";
+import {
+  chromeMore,
+  type ChromePrimary,
+  type MoreMenuEntry,
+} from "../more-menu.js";
 import { isSpaceKey, shouldIgnoreShortcut } from "../keyboard.js";
 import { formatClock } from "../timeline/timeline.js";
 import type { TransportAction } from "../transport-bar.js";
@@ -78,6 +83,11 @@ import type { GlEditTimeline } from "../timeline/edit-timeline.js";
 import "../timeline/edit-timeline.js";
 import "../transport-bar.js";
 import "../sample-info.js";
+import "../form-stack.js";
+import "@supersoniks/concorde/form-layout";
+import "@supersoniks/concorde/input";
+import "@supersoniks/concorde/badge";
+import "@supersoniks/concorde/alert";
 
 type EditCheckpoint = {
   master: Float32Array;
@@ -119,28 +129,51 @@ export class GlEditorPage extends LitElement {
     css`
       :host {
         display: flex;
+        flex: 1;
+        min-height: 0;
         flex-direction: column;
-        gap: 0.75rem;
-        padding: 1rem;
-        padding-left: max(1rem, env(safe-area-inset-left));
-        padding-right: max(1rem, env(safe-area-inset-right));
-        padding-bottom: max(1rem, env(safe-area-inset-bottom));
+        gap: 0;
         max-width: 100%;
         box-sizing: border-box;
-        overflow-x: hidden;
-        min-height: 100%;
+        overflow: hidden;
       }
+      .gl-editor-stage {
+        display: flex;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        gap: 0.5rem;
+        overflow: auto;
+        overscroll-behavior: contain;
+        padding: 0.75rem 1rem 0.5rem;
+        padding-left: max(1rem, env(safe-area-inset-left));
+        padding-right: max(1rem, env(safe-area-inset-right));
+      }
+      .gl-transport-dock {
+        flex-shrink: 0;
+        border-top: 1px solid var(--sc-base-200, var(--sc-neutral-200));
+        background: var(--sc-base-100, var(--sc-neutral-100));
+        padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+      }
+      /* Stage owns the viewport — denser than capture list, taller than old 36vh. */
       gl-edit-timeline {
         display: block;
         width: 100%;
         min-width: 0;
-        height: 280px;
-        min-height: 280px;
+        height: min(52vh, 400px);
+        min-height: 240px;
         flex: none;
       }
-      .editor-settings-modal {
-        max-height: min(80vh, 42rem);
-        overflow-y: auto;
+      .editor-form-modal input[type="range"] {
+        width: 100%;
+        accent-color: var(--sc-primary, #3d7ea6);
+      }
+      .editor-empty-title {
+        margin: 0;
+        font-family: var(--gl-font-display);
+        font-size: 1.125rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
       }
     `,
   ];
@@ -186,6 +219,8 @@ export class GlEditorPage extends LitElement {
   @state() private infoOpen = false;
   @state() private settingsOpen = false;
   @state() private turntableOn = false;
+  /** True after `#load` finishes (success, missing sample, or superseded). */
+  @state() private loadDone = false;
 
   #engine: TransportEngine | null = null;
   /** Working PCM — @state so `.pcm` reaches the timeline after async load. */
@@ -278,11 +313,34 @@ export class GlEditorPage extends LitElement {
 
   #syncChromeMore(): void {
     if (!this.isConnected) return;
+    if (!this.sample) {
+      chromeMore.clear();
+      return;
+    }
     const selL = Math.min(this.selStart, this.selEnd);
     const selR = Math.max(this.selStart, this.selEnd);
     const hasSel = selR > selL + 1;
+    const busy = this.applyingFx || this.separating;
+    const primaries: ChromePrimary[] = [];
+    if (this.historyLen > 0) {
+      primaries.push({
+        label: t("editor.undo"),
+        icon: "undo",
+        emphasis: "outline",
+        onClick: () => void this.#undo(),
+      });
+    }
+    primaries.push({
+      label: t("editor.stretchTitle"),
+      icon: "move-horizontal",
+      hint: `×${this.state.stretchRatio.toFixed(2)}`,
+      emphasis: "outline",
+      disabled: busy,
+      onClick: () => this.#openStretchModal(),
+    });
     chromeMore.set({
       ariaLabel: t("editor.more"),
+      primaries: primaries.slice(0, 2),
       items: this.#editMenuItems(hasSel),
     });
   }
@@ -296,129 +354,179 @@ export class GlEditorPage extends LitElement {
       : CLASS_COLORS.texture;
 
     const clockMs = (this.playheadSample / this.#sampleRate) * 1000;
+    const empty =
+      !this.sampleId || (this.loadDone && !this.sample);
 
     return html`
-      <div
-        class="flex flex-wrap items-center gap-2"
-        formDataProvider=${editorFormKey.path}
-      >
-        ${peekEditorHandoff()
-          ? tip(
-              t("editor.backToProject"),
-              html`<sonic-button
-                shape="circle"
-                variant="ghost"
-                type="neutral"
-                size="sm"
-                icon
-                data-aria-label=${t("editor.backToProject")}
-                @click=${() => void this.#backToProject()}
+      <div class="gl-editor-stage">
+        ${empty
+          ? this.#renderEmpty()
+          : html`
+              <div
+                class="flex flex-wrap items-end gap-2"
+                formDataProvider=${editorFormKey.path}
               >
-                ${glIcon("arrow-left", { size: "sm" })}
-              </sonic-button>`,
-            )
-          : nothing}
-        <sonic-input
-          class="rename min-w-0 max-w-full flex-[1_1_10rem]"
-          name="name"
-          type="text"
-          placeholder="Nom du son"
-        ></sonic-input>
-        ${tip(
-          t("sample.info"),
-          html`
-            <sonic-button
-              shape="circle"
-              variant="ghost"
-              type="neutral"
-              size="sm"
-              icon
-              data-aria-label=${t("sample.info")}
-              @click=${() => {
-                this.infoOpen = true;
-              }}
-            >
-              ${glIcon("info", { size: "sm" })}
-            </sonic-button>
-          `,
-        )}
+                ${peekEditorHandoff()
+                  ? tip(
+                      t("editor.backToProject"),
+                      html`<sonic-button
+                        class="mb-0.5"
+                        shape="circle"
+                        variant="ghost"
+                        type="neutral"
+                        size="sm"
+                        icon
+                        data-aria-label=${t("editor.backToProject")}
+                        @click=${() => void this.#backToProject()}
+                      >
+                        ${glIcon("arrow-left", { size: "sm" })}
+                      </sonic-button>`,
+                    )
+                  : nothing}
+                <sonic-form-layout class="min-w-0 flex-[1_1_12rem]">
+                  <sonic-input
+                    class="rename w-full max-w-full"
+                    name="name"
+                    type="text"
+                    size="sm"
+                    label=${t("editor.rename")}
+                    placeholder=${t("library.renamePrompt")}
+                  ></sonic-input>
+                </sonic-form-layout>
+                ${this.dirty
+                  ? html`<sonic-badge
+                      class="mb-1.5 shrink-0"
+                      size="sm"
+                      type="warning"
+                      >${t("editor.dirty")}</sonic-badge
+                    >`
+                  : nothing}
+                ${tip(
+                  t("sample.info"),
+                  html`
+                    <sonic-button
+                      class="mb-0.5"
+                      shape="circle"
+                      variant="ghost"
+                      type="neutral"
+                      size="sm"
+                      icon
+                      data-aria-label=${t("sample.info")}
+                      @click=${() => {
+                        this.infoOpen = true;
+                      }}
+                    >
+                      ${glIcon("info", { size: "sm" })}
+                    </sonic-button>
+                  `,
+                )}
+              </div>
+              ${this.#processingMeta()}
+              ${this.rotateTool
+                ? html`<sonic-alert
+                    status="info"
+                    label=${t("editor.rotate")}
+                  >
+                    <div
+                      class="flex min-w-0 flex-wrap items-center gap-2"
+                    >
+                      <span class="min-w-0 flex-1 text-sm"
+                        >${t("editor.rotateHint")}</span
+                      >
+                      <sonic-button
+                        size="xs"
+                        variant="outline"
+                        type="neutral"
+                        @click=${() => this.#clearRotateTool()}
+                      >
+                        ${t("dialog.cancel")}
+                      </sonic-button>
+                    </div>
+                  </sonic-alert>`
+                : nothing}
+              ${this.turntableOn
+                ? html`<sonic-alert
+                    status="warning"
+                    label=${t("editor.turntable")}
+                  >
+                    <div
+                      class="flex min-w-0 flex-wrap items-center gap-2"
+                    >
+                      <span class="min-w-0 flex-1 text-sm"
+                        >${t("editor.turntableOn")}</span
+                      >
+                      <sonic-button
+                        size="xs"
+                        variant="outline"
+                        type="neutral"
+                        @click=${() => this.#stopTurntable()}
+                      >
+                        ${t("editor.turntableStop")}
+                      </sonic-button>
+                    </div>
+                  </sonic-alert>`
+                : nothing}
+              <gl-edit-timeline
+                .pcm=${this.master
+                  ? toMonoPcm(this.master, this.#channelCount)
+                  : null}
+                .sampleRate=${this.#sampleRate}
+                .label=${this.sample?.userName ??
+                this.sample?.name ??
+                "Sample"}
+                .color=${waveColor}
+                .confLines=${this.#editorConfLines(hasSel, selL, selR)}
+                .settingsHint=${t("editor.settingsHint")}
+                .startSample=${this.state.startSample}
+                .endSample=${this.state.endSample}
+                .selStart=${this.selStart}
+                .selEnd=${this.selEnd}
+                .playheadSample=${this.state.startSample + this.playheadSample}
+                .playing=${this.playing}
+                ?rotateMode=${this.rotateTool}
+                @gl-trim=${this.#onTimelineTrim}
+                @gl-sel=${this.#onTimelineSel}
+                @gl-seek=${this.#onTimelineSeek}
+                @gl-view=${this.#onTimelineView}
+                @gl-rotate=${this.#onTimelineRotate}
+                @gl-lane-longpress=${this.#onLaneLongpress}
+                @gl-scrub-start=${this.#onScrubStart}
+                @gl-scrub-end=${this.#onScrubEnd}
+                @gl-settings=${() => {
+                  this.settingsOpen = true;
+                }}
+              ></gl-edit-timeline>
+              <div class="mb-1 flex items-center gap-1.5">
+                <gl-seek-bar
+                  class="min-w-0 flex-1"
+                  .value=${this.playheadSample}
+                  .max=${Math.max(
+                    1,
+                    this.state.endSample - this.state.startSample,
+                  )}
+                  .viewStart=${this.viewStart}
+                  .viewEnd=${this.viewEnd}
+                  ?disabled=${!this.#viewBuffer}
+                  @gl-seek-start=${this.#onSeekBarStart}
+                  @gl-seek=${this.#onSeekBar}
+                  @gl-seek-end=${this.#onSeekBarEnd}
+                ></gl-seek-bar>
+              </div>
+            `}
       </div>
-      ${this.#processingMeta()}
-      ${this.rotateTool
-        ? html`<div
-            class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-content"
-            role="status"
-          >
-            <span class="min-w-0 flex-1 truncate">${t("editor.rotateHint")}</span>
-            <sonic-button
-              size="xs"
-              variant="ghost"
-              type="neutral"
-              @click=${() => this.#clearRotateTool()}
-            >
-              ${t("dialog.cancel")}
-            </sonic-button>
-          </div>`
-        : nothing}
-      <gl-edit-timeline
-        .pcm=${this.master
-          ? toMonoPcm(this.master, this.#channelCount)
-          : null}
-        .sampleRate=${this.#sampleRate}
-        .label=${this.sample?.userName ?? this.sample?.name ?? "Sample"}
-        .color=${waveColor}
-        .confLines=${this.#editorConfLines(hasSel, selL, selR)}
-        .settingsHint=${t("editor.settingsHint")}
-        .startSample=${this.state.startSample}
-        .endSample=${this.state.endSample}
-        .selStart=${this.selStart}
-        .selEnd=${this.selEnd}
-        .playheadSample=${this.state.startSample + this.playheadSample}
-        .playing=${this.playing}
-        ?rotateMode=${this.rotateTool}
-        @gl-trim=${this.#onTimelineTrim}
-        @gl-sel=${this.#onTimelineSel}
-        @gl-seek=${this.#onTimelineSeek}
-        @gl-view=${this.#onTimelineView}
-        @gl-rotate=${this.#onTimelineRotate}
-        @gl-lane-longpress=${this.#onLaneLongpress}
-        @gl-scrub-start=${this.#onScrubStart}
-        @gl-scrub-end=${this.#onScrubEnd}
-        @gl-settings=${() => {
-          this.settingsOpen = true;
-        }}
-      ></gl-edit-timeline>
-      <div class="mt-[0.15rem] mb-[0.35rem] flex items-center gap-[0.35rem]">
-        <gl-seek-bar
-          class="min-w-0 flex-1"
-          .value=${this.playheadSample}
-          .max=${Math.max(1, this.state.endSample - this.state.startSample)}
-          .viewStart=${this.viewStart}
-          .viewEnd=${this.viewEnd}
-          ?disabled=${!this.#viewBuffer}
-          @gl-seek-start=${this.#onSeekBarStart}
-          @gl-seek=${this.#onSeekBar}
-          @gl-seek-end=${this.#onSeekBarEnd}
-        ></gl-seek-bar>
-      </div>
-      <gl-transport-bar class="block" .playing=${this.playing}
-        .clock=${formatClock(clockMs)}
-        ?disabled=${!this.#viewBuffer}
-        @gl-transport=${this.#onTransport}
-      ></gl-transport-bar>
-      ${this.turntableOn
-        ? html`<button
-            type="button"
-            class="mx-3 mb-2 flex items-center gap-2 rounded-md bg-primary/15 px-3 py-2 text-left text-sm text-primary"
-            @click=${() => this.#stopTurntable()}
-          >
-            ${glIcon("refresh-cw", { size: "sm" })}
-            <span class="min-w-0 flex-1">${t("editor.turntableOn")}</span>
-            <span class="shrink-0 text-xs opacity-80"
-              >${t("editor.turntableStop")}</span
-            >
-          </button>`
-        : nothing}
+      ${empty
+        ? nothing
+        : html`
+            <div class="gl-transport-dock">
+              <gl-transport-bar
+                class="block"
+                .playing=${this.playing}
+                .clock=${formatClock(clockMs)}
+                ?disabled=${!this.#viewBuffer}
+                @gl-transport=${this.#onTransport}
+              ></gl-transport-bar>
+            </div>
+          `}
       ${this.#renderStretchModal()}
       ${this.#renderDynamicsModal()}
       ${this.#renderForceRoleModal()}
@@ -432,6 +540,36 @@ export class GlEditorPage extends LitElement {
           this.infoOpen = false;
         }}
       ></gl-sample-info>
+    `;
+  }
+
+  #renderEmpty() {
+    const missing = Boolean(this.sampleId) && !this.sample;
+    return html`
+      <div
+        class="flex min-h-[12rem] flex-1 flex-col items-center justify-center gap-3 rounded-md border border-neutral-200 px-5 py-7 text-center"
+        role="status"
+      >
+        <span class="text-primary" aria-hidden="true"
+          >${glIcon(missing ? "alert-triangle" : "audio-lines", {
+            size: "lg",
+          })}</span
+        >
+        <p class="editor-empty-title">
+          ${missing ? t("editor.missingTitle") : t("editor.emptyTitle")}
+        </p>
+        <p class="m-0 max-w-sm text-sm leading-snug text-neutral-500">
+          ${missing ? t("editor.missingHint") : t("editor.emptyHint")}
+        </p>
+        <sonic-button
+          size="sm"
+          type="primary"
+          @click=${() => navigate({ name: "library" })}
+        >
+          ${glIcon("library", { slot: "prefix", size: "xs" })}
+          ${t("editor.goLibrary")}
+        </sonic-button>
+      </div>
     `;
   }
 
@@ -480,6 +618,7 @@ export class GlEditorPage extends LitElement {
     // Polish / sampleId change must not orphan a looping AudioContext.
     this.#stopTurntable();
     this.#haltPlay();
+    this.loadDone = false;
     const prevEngine = this.#engine;
     this.#engine = null;
     if (prevEngine) {
@@ -488,6 +627,13 @@ export class GlEditorPage extends LitElement {
     }
 
     const gen = ++this.#loadGen;
+    if (!this.sampleId) {
+      this.sample = null;
+      this.master = null;
+      this.#viewBuffer = null;
+      this.loadDone = true;
+      return;
+    }
     this.sample = (await db.samples.get(this.sampleId)) ?? null;
     if (gen !== this.#loadGen) return;
     this.#history = [];
@@ -500,24 +646,31 @@ export class GlEditorPage extends LitElement {
     set(editorFormKey, {
       name: this.sample?.userName ?? this.sample?.name ?? "",
     });
+    if (!this.sample) {
+      this.master = null;
+      this.#viewBuffer = null;
+      this.dirty = false;
+      this.loadDone = true;
+      return;
+    }
     this.#engine = new TransportEngine();
     this.#sampleRate = this.#engine.sampleRate;
 
     let master: Float32Array | null = null;
-    if (this.sample) {
-      const data = await loadSampleAudio(this.sample);
-      if (gen !== this.#loadGen) {
-        this.#disposeEngine();
-        return;
-      }
-      if (data) {
-        this.#sampleRate = data.sampleRate;
-        this.#channelCount = data.channelCount ?? 1;
-        master = data.pcm;
-      }
+    const data = await loadSampleAudio(this.sample);
+    if (gen !== this.#loadGen) {
+      this.#disposeEngine();
+      this.loadDone = true;
+      return;
+    }
+    if (data) {
+      this.#sampleRate = data.sampleRate;
+      this.#channelCount = data.channelCount ?? 1;
+      master = data.pcm;
     }
     if (gen !== this.#loadGen) {
       this.#disposeEngine();
+      this.loadDone = true;
       return;
     }
     if (!master || master.length === 0) {
@@ -543,6 +696,7 @@ export class GlEditorPage extends LitElement {
       .sortBy("clientSeq");
     if (gen !== this.#loadGen) {
       this.#disposeEngine();
+      this.loadDone = true;
       return;
     }
     this.ops = saved
@@ -572,6 +726,7 @@ export class GlEditorPage extends LitElement {
       this.selEnd = this.state.endSample;
     }
     this.#rebuildView();
+    this.loadDone = true;
   }
 
   #disposeEngine(): void {
@@ -1220,72 +1375,76 @@ export class GlEditorPage extends LitElement {
       >
         <sonic-modal-title>${t("editor.stretchTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="flex flex-col gap-3">
-            <label
-              class="flex flex-col gap-0.5 text-xs text-neutral-500"
-              >${t("editor.stretchRatio")} ×${(this.stretchDraft / 100).toFixed(
-                2,
-              )}
-              <input
-                type="range"
-                class="w-full"
-                min="50"
-                max="200"
-                .valueAsNumber=${this.stretchDraft}
-                @input=${(e: Event) => {
-                  this.stretchDraft = (
-                    e.target as HTMLInputElement
-                  ).valueAsNumber;
-                }}
-              />
-            </label>
-            <div
-              class="flex flex-col gap-2"
-              role="radiogroup"
-              aria-label=${t("editor.stretchRatio")}
-            >
-              <label class="flex cursor-pointer items-center gap-2">
-                <input
-                  type="radio"
-                  name="gl-stretch-mode"
-                  .checked=${this.stretchModeUi === "preserve-pitch"}
-                  @change=${() => {
-                    this.stretchModeUi = "preserve-pitch";
-                  }}
-                />
-                <span class="inline-flex items-center gap-1 text-sm">
-                  ${glIcon("music", { size: "xs" })}
-                  ${t("editor.stretchPitch")}
-                </span>
-              </label>
-              <label class="flex cursor-pointer items-center gap-2">
-                <input
-                  type="radio"
-                  name="gl-stretch-mode"
-                  .checked=${this.stretchModeUi === "resample"}
-                  @change=${() => {
-                    this.stretchModeUi = "resample";
-                  }}
-                />
-                <span class="inline-flex items-center gap-1 text-sm">
-                  ${glIcon("activity", { size: "xs" })}
-                  ${t("editor.stretchResample")}
-                </span>
-              </label>
-            </div>
-          </div>
+          <gl-form-stack gap="sm" class="editor-form-modal text-content">
+            <gl-form-section label=${t("editor.sectionStretch")} tight>
+              <sonic-form-layout>
+                <label class="flex flex-col gap-1 text-xs text-neutral-500"
+                  >${t("editor.stretchRatio")} ×${(
+                    this.stretchDraft / 100
+                  ).toFixed(2)}
+                  <input
+                    type="range"
+                    min="50"
+                    max="200"
+                    .valueAsNumber=${this.stretchDraft}
+                    @input=${(e: Event) => {
+                      this.stretchDraft = (
+                        e.target as HTMLInputElement
+                      ).valueAsNumber;
+                    }}
+                  />
+                </label>
+                <div
+                  class="flex flex-col gap-2"
+                  role="radiogroup"
+                  aria-label=${t("editor.stretchRatio")}
+                >
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="gl-stretch-mode"
+                      .checked=${this.stretchModeUi === "preserve-pitch"}
+                      @change=${() => {
+                        this.stretchModeUi = "preserve-pitch";
+                      }}
+                    />
+                    <span class="inline-flex items-center gap-1 text-sm">
+                      ${glIcon("music", { size: "xs" })}
+                      ${t("editor.stretchPitch")}
+                    </span>
+                  </label>
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="gl-stretch-mode"
+                      .checked=${this.stretchModeUi === "resample"}
+                      @change=${() => {
+                        this.stretchModeUi = "resample";
+                      }}
+                    />
+                    <span class="inline-flex items-center gap-1 text-sm">
+                      ${glIcon("activity", { size: "xs" })}
+                      ${t("editor.stretchResample")}
+                    </span>
+                  </label>
+                </div>
+              </sonic-form-layout>
+            </gl-form-section>
+          </gl-form-stack>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button
-            hideModal
-            variant="outline"
-            type="neutral"
-            >${t("dialog.cancel")}</sonic-button
-          >
-          <sonic-button type="primary" @click=${this.#commitStretchModal}
-            >${t("dialog.ok")}</sonic-button
-          >
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary: {
+            label: t("dialog.cancel"),
+            hideModal: true,
+            variant: "outline",
+            type: "neutral",
+          },
+          primary: {
+            label: t("dialog.ok"),
+            type: "primary",
+            onClick: this.#commitStretchModal,
+          },
+        })}
       </sonic-modal>
     `;
   }
@@ -1320,132 +1479,145 @@ export class GlEditorPage extends LitElement {
       >
         <sonic-modal-title>${t("editor.dynamicsTitle")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="flex flex-col gap-3">
-            <p class="m-0 text-xs text-neutral-500">${t("editor.dynamicsHint")}</p>
-            <div
-              class="flex flex-col gap-2"
-              role="radiogroup"
-              aria-label=${t("editor.dynamicsTitle")}
+          <gl-form-stack gap="sm" class="editor-form-modal text-content">
+            <gl-form-section
+              label=${t("editor.dynamicsTitle")}
+              description=${t("editor.dynamicsHint")}
+              tight
             >
-              <label class="flex cursor-pointer items-center gap-2">
-                <input
-                  type="radio"
-                  name="gl-dynamics-mode"
-                  .checked=${gate}
-                  @change=${() => {
-                    this.dynamicsMode = "gate";
-                  }}
-                />
-                <span class="text-sm">${t("editor.dynamicsGate")}</span>
-              </label>
-              <label class="flex cursor-pointer items-center gap-2">
-                <input
-                  type="radio"
-                  name="gl-dynamics-mode"
-                  .checked=${!gate}
-                  @change=${() => {
-                    this.dynamicsMode = "compress";
-                  }}
-                />
-                <span class="text-sm">${t("editor.dynamicsCompress")}</span>
-              </label>
-            </div>
-            <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
-              >${t("editor.dynamicsThreshold")}
-              ${this.dynamicsThresholdDb} dB
-              <input
-                type="range"
-                class="w-full"
-                min="-80"
-                max="-6"
-                step="1"
-                .valueAsNumber=${this.dynamicsThresholdDb}
-                @input=${(e: Event) => {
-                  this.dynamicsThresholdDb = (
-                    e.target as HTMLInputElement
-                  ).valueAsNumber;
-                }}
-              />
-            </label>
-            <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
-              >${t("editor.dynamicsAttack")} ${this.dynamicsAttackMs} ms
-              <input
-                type="range"
-                class="w-full"
-                min="1"
-                max="100"
-                step="1"
-                .valueAsNumber=${this.dynamicsAttackMs}
-                @input=${(e: Event) => {
-                  this.dynamicsAttackMs = (
-                    e.target as HTMLInputElement
-                  ).valueAsNumber;
-                }}
-              />
-            </label>
-            <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
-              >${t("editor.dynamicsRelease")} ${this.dynamicsReleaseMs} ms
-              <input
-                type="range"
-                class="w-full"
-                min="5"
-                max="500"
-                step="5"
-                .valueAsNumber=${this.dynamicsReleaseMs}
-                @input=${(e: Event) => {
-                  this.dynamicsReleaseMs = (
-                    e.target as HTMLInputElement
-                  ).valueAsNumber;
-                }}
-              />
-            </label>
-            ${gate
-              ? nothing
-              : html`
-                  <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
-                    >${t("editor.dynamicsRatio")}
-                    ${this.dynamicsRatio.toFixed(1)}:1
+              <sonic-form-layout>
+                <div
+                  class="flex flex-col gap-2"
+                  role="radiogroup"
+                  aria-label=${t("editor.dynamicsTitle")}
+                >
+                  <label class="flex cursor-pointer items-center gap-2">
                     <input
-                      type="range"
-                      class="w-full"
-                      min="1.5"
-                      max="12"
-                      step="0.5"
-                      .valueAsNumber=${this.dynamicsRatio}
-                      @input=${(e: Event) => {
-                        this.dynamicsRatio = (
-                          e.target as HTMLInputElement
-                        ).valueAsNumber;
+                      type="radio"
+                      name="gl-dynamics-mode"
+                      .checked=${gate}
+                      @change=${() => {
+                        this.dynamicsMode = "gate";
                       }}
                     />
+                    <span class="text-sm">${t("editor.dynamicsGate")}</span>
                   </label>
-                  <label class="flex flex-col gap-0.5 text-xs text-neutral-500"
-                    >${t("editor.dynamicsMakeup")} ${this.dynamicsMakeupDb} dB
+                  <label class="flex cursor-pointer items-center gap-2">
                     <input
-                      type="range"
-                      class="w-full"
-                      min="0"
-                      max="12"
-                      step="1"
-                      .valueAsNumber=${this.dynamicsMakeupDb}
-                      @input=${(e: Event) => {
-                        this.dynamicsMakeupDb = (
-                          e.target as HTMLInputElement
-                        ).valueAsNumber;
+                      type="radio"
+                      name="gl-dynamics-mode"
+                      .checked=${!gate}
+                      @change=${() => {
+                        this.dynamicsMode = "compress";
                       }}
                     />
+                    <span class="text-sm"
+                      >${t("editor.dynamicsCompress")}</span
+                    >
                   </label>
-                `}
-          </div>
+                </div>
+                <label class="flex flex-col gap-1 text-xs text-neutral-500"
+                  >${t("editor.dynamicsThreshold")}
+                  ${this.dynamicsThresholdDb} dB
+                  <input
+                    type="range"
+                    min="-80"
+                    max="-6"
+                    step="1"
+                    .valueAsNumber=${this.dynamicsThresholdDb}
+                    @input=${(e: Event) => {
+                      this.dynamicsThresholdDb = (
+                        e.target as HTMLInputElement
+                      ).valueAsNumber;
+                    }}
+                  />
+                </label>
+                <label class="flex flex-col gap-1 text-xs text-neutral-500"
+                  >${t("editor.dynamicsAttack")} ${this.dynamicsAttackMs} ms
+                  <input
+                    type="range"
+                    min="1"
+                    max="100"
+                    step="1"
+                    .valueAsNumber=${this.dynamicsAttackMs}
+                    @input=${(e: Event) => {
+                      this.dynamicsAttackMs = (
+                        e.target as HTMLInputElement
+                      ).valueAsNumber;
+                    }}
+                  />
+                </label>
+                <label class="flex flex-col gap-1 text-xs text-neutral-500"
+                  >${t("editor.dynamicsRelease")}
+                  ${this.dynamicsReleaseMs} ms
+                  <input
+                    type="range"
+                    min="5"
+                    max="500"
+                    step="5"
+                    .valueAsNumber=${this.dynamicsReleaseMs}
+                    @input=${(e: Event) => {
+                      this.dynamicsReleaseMs = (
+                        e.target as HTMLInputElement
+                      ).valueAsNumber;
+                    }}
+                  />
+                </label>
+                ${gate
+                  ? nothing
+                  : html`
+                      <label
+                        class="flex flex-col gap-1 text-xs text-neutral-500"
+                        >${t("editor.dynamicsRatio")}
+                        ${this.dynamicsRatio.toFixed(1)}:1
+                        <input
+                          type="range"
+                          min="1.5"
+                          max="12"
+                          step="0.5"
+                          .valueAsNumber=${this.dynamicsRatio}
+                          @input=${(e: Event) => {
+                            this.dynamicsRatio = (
+                              e.target as HTMLInputElement
+                            ).valueAsNumber;
+                          }}
+                        />
+                      </label>
+                      <label
+                        class="flex flex-col gap-1 text-xs text-neutral-500"
+                        >${t("editor.dynamicsMakeup")}
+                        ${this.dynamicsMakeupDb} dB
+                        <input
+                          type="range"
+                          min="0"
+                          max="12"
+                          step="1"
+                          .valueAsNumber=${this.dynamicsMakeupDb}
+                          @input=${(e: Event) => {
+                            this.dynamicsMakeupDb = (
+                              e.target as HTMLInputElement
+                            ).valueAsNumber;
+                          }}
+                        />
+                      </label>
+                    `}
+              </sonic-form-layout>
+            </gl-form-section>
+          </gl-form-stack>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral"
-            >${t("dialog.cancel")}</sonic-button
-          >
-          <sonic-button type="primary" @click=${this.#commitDynamicsModal}
-            >${t("dialog.ok")}</sonic-button
-          >
-        </sonic-modal-actions>
+        ${renderModalActions({
+          secondary: {
+            label: t("dialog.cancel"),
+            hideModal: true,
+            variant: "outline",
+            type: "neutral",
+          },
+          primary: {
+            label: t("dialog.ok"),
+            type: "primary",
+            onClick: this.#commitDynamicsModal,
+          },
+        })}
       </sonic-modal>
     `;
   }
@@ -1528,41 +1700,44 @@ export class GlEditorPage extends LitElement {
       >
         <sonic-modal-title>${t("editor.forceRole")}</sonic-modal-title>
         <sonic-modal-content>
-          <div class="flex flex-col gap-3">
-            <p class="m-0 text-xs text-neutral-500">${t("editor.forceRoleHint")}</p>
-            <div
-              class="flex flex-col gap-2"
-              role="radiogroup"
-              aria-label=${t("editor.forceRole")}
+          <gl-form-stack gap="sm" class="text-content">
+            <gl-form-section
+              label=${t("editor.forceRole")}
+              description=${t("editor.forceRoleHint")}
+              tight
             >
-              <label class="flex cursor-pointer items-center gap-2">
-                <input
-                  type="radio"
-                  name="gl-force-role"
-                  .checked=${current == null}
-                  @change=${() => void this.#setForceRole(null)}
-                />
-                <span class="text-sm">${t("editor.forceRoleAuto")}</span>
-              </label>
-              ${roles.map(
-                (role) => html`
-                  <label class="flex cursor-pointer items-center gap-2">
-                    <input
-                      type="radio"
-                      name="gl-force-role"
-                      .checked=${current === role}
-                      @change=${() => void this.#setForceRole(role)}
-                    />
-                    <span class="text-sm">${role}</span>
-                  </label>
-                `,
-              )}
-            </div>
-          </div>
+              <div
+                class="flex flex-col gap-2"
+                role="radiogroup"
+                aria-label=${t("editor.forceRole")}
+              >
+                <label class="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="radio"
+                    name="gl-force-role"
+                    .checked=${current == null}
+                    @change=${() => void this.#setForceRole(null)}
+                  />
+                  <span class="text-sm">${t("editor.forceRoleAuto")}</span>
+                </label>
+                ${roles.map(
+                  (role) => html`
+                    <label class="flex cursor-pointer items-center gap-2">
+                      <input
+                        type="radio"
+                        name="gl-force-role"
+                        .checked=${current === role}
+                        @change=${() => void this.#setForceRole(role)}
+                      />
+                      <span class="text-sm">${role}</span>
+                    </label>
+                  `,
+                )}
+              </div>
+            </gl-form-section>
+          </gl-form-stack>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }
@@ -1610,9 +1785,7 @@ export class GlEditorPage extends LitElement {
             <li>${t("editor.rotateDocs")}</li>
           </ul>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }
@@ -1649,9 +1822,7 @@ export class GlEditorPage extends LitElement {
       >
         <sonic-modal-title>${t("editor.settings")}</sonic-modal-title>
         <sonic-modal-content>
-          <div
-            class="editor-settings-modal flex w-full flex-col gap-4 text-content"
-          >
+          <gl-form-stack gap="sm" class="text-content">
             <gl-track-fx-control
               inline
               showApply
@@ -1665,13 +1836,9 @@ export class GlEditorPage extends LitElement {
               @gl-fx=${this.#onPreviewFxEvent}
               @gl-fx-apply=${this.#onFxApply}
             ></gl-track-fx-control>
-          </div>
+          </gl-form-stack>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal variant="outline" type="neutral">
-            ${t("dialog.ok")}
-          </sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }

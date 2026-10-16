@@ -28,7 +28,7 @@ export const APP_THEMES: readonly AppThemeMeta[] = [
     id: "matcha",
     labelKey: "theme.matcha",
     dark: false,
-    themeColor: "#c5bfd4",
+    themeColor: "#e9ecf1",
   },
 ] as const;
 

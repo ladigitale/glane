@@ -68,18 +68,27 @@ export class GlEditTimeline extends LitElement {
         overflow: visible;
       }
       .timeline {
-        /* Not flex:1 — fixed host height; avoid collapse with Tailwind/flex parents. */
+        display: flex;
+        flex-direction: column;
         height: 100%;
-        min-height: 220px;
-        flex: none;
+        min-height: 0;
         border-radius: 6px;
+      }
+      .timeline-canvas {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 100%;
       }
       .time-ruler {
         top: 0;
+        flex-shrink: 0;
       }
       .track {
-        min-height: 180px;
-        height: 180px;
+        display: flex;
+        flex: 1 1 0;
+        min-height: 0;
+        height: auto;
       }
       /* Arrangement-style: lane first, narrow sticky gutter on the right. */
       .ruler-gutter,
@@ -107,9 +116,11 @@ export class GlEditTimeline extends LitElement {
       .track-label {
         display: flex;
         position: sticky;
+        align-self: stretch;
         flex-direction: column;
         justify-content: center;
         gap: 1px;
+        min-height: 0;
         padding: 0.25rem 1.65rem 0.25rem 0.25rem;
         font-family: var(--gl-font-mono);
         font-size: 0.6rem;
@@ -128,14 +139,18 @@ export class GlEditTimeline extends LitElement {
         right: 2px;
       }
       .lane {
-        min-height: 180px;
-        height: 180px;
+        flex: 1;
+        min-width: 400px;
+        min-height: 0;
+        height: auto;
+        align-self: stretch;
       }
       canvas.wave {
         position: sticky;
         left: 0;
+        top: 0;
         display: block;
-        height: 180px;
+        height: 100%;
         width: calc(var(--gl-tl-view-w, 100%) - ${TRACK_GUTTER_PX}px);
         max-width: none;
         pointer-events: none;
@@ -222,18 +237,20 @@ export class GlEditTimeline extends LitElement {
     }
     this.#bindWheel();
     const tl = this.#timelineEl();
+    const lane = this.#laneEl();
     if (tl) {
-      const syncViewW = () => {
+      const syncView = () => {
         const w = tl.clientWidth || this.viewW;
         this.viewW = w;
         tl.style.setProperty("--gl-tl-view-w", `${Math.max(1, w)}px`);
         this.#paint();
         this.#emitView();
       };
-      syncViewW();
+      syncView();
       if (typeof ResizeObserver !== "undefined") {
-        this.#ro = new ResizeObserver(syncViewW);
+        this.#ro = new ResizeObserver(syncView);
         this.#ro.observe(tl);
+        if (lane) this.#ro.observe(lane);
       }
     }
     this.#fitIfNeeded(true);
@@ -422,23 +439,30 @@ export class GlEditTimeline extends LitElement {
     );
   }
 
+  #laneEl(): HTMLElement | null {
+    return this.renderRoot.querySelector(".lane");
+  }
+
   #paint(): void {
     if (!this.#renderer || !this.pcm || !this.#pyramid) return;
     const tl = this.#timelineEl();
+    const lane = this.#laneEl();
     const canvas = this.#renderer.canvas;
     const viewportW = Math.max(
       64,
       (tl?.clientWidth ?? this.viewW) - TRACK_GUTTER_PX,
     );
+    const viewportH = Math.max(64, lane?.clientHeight ?? 180);
     const scrollLeft = tl?.scrollLeft ?? 0;
     const scrollSample = scrollLeft / this.pxPerSample;
     const spp = 1 / Math.max(1e-9, this.pxPerSample);
     canvas.style.width = `${viewportW}px`;
+    canvas.style.height = `${viewportH}px`;
     paintViewportWave(this.#renderer, this.pcm, this.#pyramid, {
       scrollSample,
       samplesPerPixel: spp,
       widthPx: viewportW,
-      heightPx: 180,
+      heightPx: viewportH,
       color: this.color,
       circularOffsetSamples: this.rotateOffsetSamples || undefined,
     });

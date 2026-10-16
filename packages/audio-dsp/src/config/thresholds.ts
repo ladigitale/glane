@@ -14,6 +14,13 @@ export const DSP_THRESHOLDS = {
   onsetThresholdFactor: 1.5,
   onsetDelta: 0.01,
   onsetGuardMs: 30,
+  /** Onset sensitivity range for dual hunter (attack mode). */
+  onsetThresholdFactorAtMin: 1.5,
+  onsetThresholdFactorAtMax: 3.0,
+  onsetDeltaAtMin: 0.01,
+  onsetDeltaAtMax: 0.05,
+  onsetGuardMsAtMin: 30,
+  onsetGuardMsAtMax: 10,
   /** Offset: drop below peak − N dB or floor + 6 dB. */
   offsetPeakDropDb: 40,
   offsetFloorMarginDb: 6,

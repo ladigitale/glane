@@ -14,7 +14,12 @@ export { INTEREST_CULL, targetKeepCount } from "./interest-cull-plan.js";
 export const SAMPLES_CULLED_EVENT = "glane:samples-culled";
 
 /** Matches import-for-hunt session notes — no density cull for these. */
-const CULL_EXEMPT_NOTES = new Set(["glane:file-song", "glane:file-whole"]);
+const CULL_EXEMPT_NOTES = new Set([
+  "glane:file-song",
+  "glane:file-whole",
+  "glane:file-attack",
+  "glane:file-harmonic",
+]);
 
 export type CullResult = {
   culledIds: string[];

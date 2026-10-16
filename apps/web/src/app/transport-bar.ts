@@ -61,7 +61,7 @@ export class GlTransportBar extends LitElement {
     const title = `${label} (Espace)`;
     return html`
       <div
-        class="toolbar grid min-h-[5.5rem] grid-cols-[1fr_auto_1fr] items-center gap-2.5 overflow-visible px-3.5 py-3"
+        class="toolbar grid min-h-[4.75rem] grid-cols-[1fr_auto_1fr] items-center gap-2.5 overflow-visible px-3.5 py-2.5"
         role="toolbar"
         aria-label="Transport"
       >

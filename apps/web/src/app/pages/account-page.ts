@@ -1,30 +1,22 @@
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
 import { set } from "@supersoniks/concorde/utils";
 import "@supersoniks/concorde/form-layout";
-import "@supersoniks/concorde/form-actions";
+import "@supersoniks/concorde/input";
+import "@supersoniks/concorde/alert";
 import tailwind from "../../css/tailwind";
+import { ACCESS_PAGE_STYLES } from "../access-layout.js";
 import { auth } from "../auth.js";
-import { accountFormKey, type AccountForm } from "../dp-keys.js";
+import { accountFormKey } from "../dp-keys.js";
 import { t } from "../i18n/messages.js";
 import { glIcon } from "../icon.js";
-import { pathFor } from "../router.js";
-import "../agent/agent-connector.js";
+import { renderFormActions } from "../form-actions.js";
+import "../form-stack.js";
 
 @customElement("gl-account-page")
 export class GlAccountPage extends LitElement {
-  static override styles = [
-    tailwind,
-    css`
-      :host {
-        display: block;
-        padding: 1rem;
-        padding-bottom: max(1rem, env(safe-area-inset-bottom));
-        box-sizing: border-box;
-      }
-    `,
-  ];
+  static override styles = [tailwind, ACCESS_PAGE_STYLES];
 
   @state() private username: string | null = null;
   @state() private busy = false;
@@ -106,79 +98,79 @@ export class GlAccountPage extends LitElement {
 
   override render() {
     return html`
-      <div class="mx-auto flex max-w-md flex-col gap-4">
-        <h1 class="font-display text-2xl">${t("account.title")}</h1>
+      <div class="access-page">
+        <h1>${t("account.title")}</h1>
         ${!auth.isApiConfigured()
-          ? html`<sonic-alert status="warning" label="API">${t("account.needApi")}</sonic-alert>`
+          ? html`<sonic-alert status="warning" label="API"
+              >${t("account.needApi")}</sonic-alert
+            >`
           : nothing}
         ${this.username
           ? html`
-              <p>
+              <p class="m-0 text-sm">
                 ${t("account.signedInAs")}
                 <strong>${this.username}</strong>
               </p>
-              <sonic-button
-                type="neutral"
-                variant="outline"
-                @click=${() => this.#logout()}
-              >
-                ${glIcon("log-out", { slot: "prefix" })}
-                ${t("account.logout")}
-              </sonic-button>
+              ${renderFormActions({
+                primary: {
+                  label: html`${glIcon("log-out", { slot: "prefix" })}
+                  ${t("account.logout")}`,
+                  type: "neutral",
+                  variant: "outline",
+                  onClick: () => this.#logout(),
+                },
+              })}
             `
           : html`
-              <div formDataProvider=${accountFormKey.path}>
-                <sonic-form-layout>
-                  <sonic-input
-                    name="username"
-                    label=${t("account.username")}
-                    autocomplete="username"
-                  ></sonic-input>
-                  <sonic-input
-                    name="password"
-                    label=${t("account.password")}
-                    type="password"
-                    autocomplete="current-password"
-                  ></sonic-input>
-                </sonic-form-layout>
-                <sonic-form-actions>
-                  <sonic-button
-                    type="primary"
-                    ?disabled=${this.busy}
-                    ?loading=${this.busy}
-                    @click=${() => void this.#login()}
-                  >
-                    ${t("account.login")}
-                  </sonic-button>
-                  <sonic-button
-                    variant="outline"
-                    type="neutral"
-                    ?disabled=${this.busy}
-                    @click=${() => void this.#register()}
-                  >
-                    ${t("account.register")}
-                  </sonic-button>
-                </sonic-form-actions>
+              <div
+                class="flex flex-col gap-4"
+                formDataProvider=${accountFormKey.path}
+              >
+                <gl-form-stack gap="md">
+                  <gl-form-section label=${t("account.credentials")}>
+                    <sonic-form-layout>
+                      <sonic-input
+                        name="username"
+                        label=${t("account.username")}
+                        autocomplete="username"
+                      ></sonic-input>
+                      <sonic-input
+                        name="password"
+                        label=${t("account.password")}
+                        type="password"
+                        autocomplete="current-password"
+                      ></sonic-input>
+                    </sonic-form-layout>
+                  </gl-form-section>
+                </gl-form-stack>
+                ${renderFormActions({
+                  secondary: {
+                    label: t("account.register"),
+                    variant: "outline",
+                    type: "neutral",
+                    disabled: this.busy,
+                    onClick: () => void this.#register(),
+                  },
+                  primary: {
+                    label: t("account.login"),
+                    type: "primary",
+                    disabled: this.busy,
+                    loading: this.busy,
+                    onClick: () => void this.#login(),
+                  },
+                })}
               </div>
             `}
         ${this.error
-          ? html`<sonic-alert status="error" label="Erreur">${this.error}</sonic-alert>`
+          ? html`<sonic-alert status="error" label="Erreur"
+              >${this.error}</sonic-alert
+            >`
           : nothing}
         ${this.message
-          ? html`<sonic-alert status="success" label="OK">${this.message}</sonic-alert>`
+          ? html`<sonic-alert status="success" label="OK"
+              >${this.message}</sonic-alert
+            >`
           : nothing}
-        <gl-agent-connector></gl-agent-connector>
-        <a
-          class="text-sm text-neutral-9 underline-offset-2 hover:underline"
-          href=${pathFor({ name: "landing" })}
-          @click=${(e: Event) => {
-            e.preventDefault();
-            history.pushState({}, "", pathFor({ name: "landing" }));
-            window.dispatchEvent(new PopStateEvent("popstate"));
-          }}
-        >
-          ← Glane
-        </a>
       </div>
     `;
   }

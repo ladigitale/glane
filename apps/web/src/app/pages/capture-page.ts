@@ -11,7 +11,8 @@ import {
   type LevelMeter,
 } from "@glane/audio-io";
 import {
-  EventHunter,
+  DualEventHunter,
+  type DualExtraction,
   DSP_THRESHOLDS,
   computeInterestScore,
   durationMsFromPcm,
@@ -29,6 +30,8 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import tailwind from "../../css/tailwind";
 import { handle, subscribe } from "@supersoniks/concorde/decorators";
+import { renderModalOk } from "../form-actions.js";
+import { renderSampleListIdentity } from "../sample-row.js";
 import { set } from "@supersoniks/concorde/utils";
 import {
   db,
@@ -101,6 +104,11 @@ import { GL_MODAL_PRESETS, GL_MODAL_SCROLL_LAYOUT } from "../modal-layout.js";
 import "../pop-select.js";
 import "../form-stack.js";
 import "../timeline/slice-preview-wave.js";
+import {
+  dualHunterOptsFor,
+  liveEventMode,
+  usesDensityTarget,
+} from "../file-process-mode.js";
 import "@supersoniks/concorde/form-layout";
 import "@supersoniks/concorde/queue";
 import "@supersoniks/concorde/table";
@@ -131,6 +139,7 @@ type FeedRow = {
   tags?: string[];
   loopProposed?: boolean;
   interestScore?: number;
+  durationMs?: number;
 };
 
 /** Map internal sensitivity 0–100 → openFloorFactor (higher → lower factor). */
@@ -147,23 +156,59 @@ export class GlCapturePage extends LitElement {
     css`
       :host {
         display: flex;
+        flex: 1;
+        min-height: 0;
         flex-direction: column;
         gap: 0.5rem;
-        padding: 1rem 1rem 1.25rem;
+        padding: 0.75rem 1rem 1rem;
         padding-left: max(1rem, env(safe-area-inset-left));
         padding-right: max(1rem, env(safe-area-inset-right));
-        padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+        padding-bottom: max(1rem, env(safe-area-inset-bottom));
         box-sizing: border-box;
         max-width: 100%;
-        overflow-x: hidden;
-        min-height: 100%;
+        overflow: hidden;
+      }
+      .gl-capture-stage {
+        display: flex;
+        min-height: 0;
+        flex: 1;
+        flex-direction: column;
+        gap: 0.5rem;
+        overflow: hidden;
       }
       .feed {
         flex: 1 1 auto;
         min-height: 8rem;
-        max-height: min(48vh, 26rem);
         overflow: auto;
         overscroll-behavior: contain;
+      }
+      .feed-empty {
+        display: flex;
+        min-height: 10rem;
+        flex: 1;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        border: 1px solid var(--sc-base-200, var(--sc-neutral-200));
+        border-radius: var(--sc-radius, 0.35rem);
+        padding: 1.5rem 1.25rem;
+        text-align: center;
+      }
+      .feed-empty__title {
+        margin: 0;
+        font-family: var(--gl-font-display);
+        font-size: 1.125rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .feed-empty__hint {
+        margin: 0;
+        max-width: 22rem;
+        font-size: 0.875rem;
+        line-height: 1.45;
+        color: var(--sc-base-content);
+        opacity: 0.65;
       }
       .rec-wrap sonic-button {
         --sc-btn-height: 4.5rem;
@@ -259,6 +304,7 @@ export class GlCapturePage extends LitElement {
   captureName = "";
 
   @state() private liveState: CaptureLiveState = "idle";
+  @state() private detectionSource: "attack" | "harmonic" | null = null;
   @state() private feedProjectId = "";
   @state() private feedSessionId = "";
   @state() private queueMounted = true;
@@ -281,8 +327,13 @@ export class GlCapturePage extends LitElement {
   @state() private mlDemucsStems: DemucsStemName[] = [
     ...ML_DEFAULTS.demucsStems,
   ];
-  /** Internal 0–100; auto-tuned toward targetCapturesPerMin. */
+  /** Internal 0–100; auto-tuned toward targetCapturesPerMin (hunt / attack). */
   @state() private attackSensitivity = DEFAULT_ATTACK_SENSITIVITY;
+  /** Harmonic mode sensitivity 0–100. */
+  @state() private harmonicSensitivity = 50;
+  @state() private harmonicMinHarmonicity = 0.25;
+  @state() private harmonicMaxFlatness = 0.65;
+  @state() private harmonicMinDurationMs = 500;
   @state() private targetCapturesPerMin = DEFAULT_TARGET_CAPTURES_PER_MIN;
   @state() private fileProcessMode: FileProcessMode = "hunt";
   /** null = DSP default. */
@@ -312,7 +363,7 @@ export class GlCapturePage extends LitElement {
   } | null = null;
 
   #live: LiveCapture | null = null;
-  #hunter: EventHunter | null = null;
+  #hunter: DualEventHunter | null = null;
   #hunt: Session | null = null;
   #engine: TransportEngine | null = null;
   #auditionGen = 0;
@@ -382,17 +433,17 @@ export class GlCapturePage extends LitElement {
         },
         "divider",
         {
+          label: t("capture.importFile"),
+          icon: "upload",
+          disabled: this.importBusy || this.listening,
+          onClick: this.#pickImportFile,
+        },
+        {
           label: t("capture.economyAction"),
           icon: "moon",
           onClick: () => {
             this.economy = true;
           },
-        },
-        {
-          label: t("capture.importFile"),
-          icon: "upload",
-          disabled: this.importBusy || this.listening,
-          onClick: this.#pickImportFile,
         },
       ],
     });
@@ -490,7 +541,7 @@ export class GlCapturePage extends LitElement {
       };
     }
     if (this.listening || this.micOpen) {
-      const live = stateLabel(this.liveState, this.listening);
+      const live = stateLabel(this.liveState, this.listening, this.detectionSource);
       const hint = this.listening
         ? t("capture.hintRecording")
         : t("capture.hintScout");
@@ -504,13 +555,15 @@ export class GlCapturePage extends LitElement {
         text: live || statusExtra || hint,
       };
     }
-    return {
-      status: "info",
-      label: this.scoutBlocked
-        ? t("capture.hintScoutBlocked")
-        : t("capture.empty"),
-      text: "",
-    };
+    // Idle: only surface permission block — empty panel owns guidance.
+    if (this.scoutBlocked) {
+      return {
+        status: "warning",
+        label: t("capture.hintScoutBlocked"),
+        text: "",
+      };
+    }
+    return null;
   }
 
   #renderStatusSlot() {
@@ -607,6 +660,10 @@ export class GlCapturePage extends LitElement {
     this.mlDemucsStems = resolveDemucsStems(prefs.mlDemucsStems);
     this.attackSensitivity =
       prefs.attackSensitivity ?? DEFAULT_ATTACK_SENSITIVITY;
+    this.harmonicSensitivity = prefs.harmonicSensitivity ?? 50;
+    this.harmonicMinHarmonicity = prefs.harmonicMinHarmonicity ?? 0.25;
+    this.harmonicMaxFlatness = prefs.harmonicMaxFlatness ?? 0.65;
+    this.harmonicMinDurationMs = prefs.harmonicMinDurationMs ?? 500;
     this.targetCapturesPerMin = clampTargetPerMin(
       prefs.targetCapturesPerMin ?? DEFAULT_TARGET_CAPTURES_PER_MIN,
     );
@@ -631,6 +688,10 @@ export class GlCapturePage extends LitElement {
       mlClapLimit: this.mlClapLimit,
       mlDemucsStems: [...this.mlDemucsStems],
       attackSensitivity: this.attackSensitivity,
+      harmonicSensitivity: this.harmonicSensitivity,
+      harmonicMinHarmonicity: this.harmonicMinHarmonicity,
+      harmonicMaxFlatness: this.harmonicMaxFlatness,
+      harmonicMinDurationMs: this.harmonicMinDurationMs,
       targetCapturesPerMin: this.targetCapturesPerMin,
       fileProcessMode: this.fileProcessMode,
       sliceMinDurationMs: this.sliceMinDurationMs,
@@ -640,9 +701,14 @@ export class GlCapturePage extends LitElement {
   }
 
   #applyHunterSensitivity(): void {
-    this.#hunter?.setOpenFloorFactor(
-      sensitivityToOpenFloor(this.attackSensitivity),
-    );
+    if (!this.#hunter) return;
+    // Attack sensitivity maps to openFloorFactor
+    this.#hunter.setAttackSensitivity(this.attackSensitivity);
+    // Harmonic sensitivity
+    this.#hunter.setHarmonicSensitivity(this.harmonicSensitivity);
+    this.#hunter.setHarmonicMinHarmonicity(this.harmonicMinHarmonicity);
+    this.#hunter.setHarmonicMaxFlatness(this.harmonicMaxFlatness);
+    this.#hunter.setHarmonicMinDurationMs(this.harmonicMinDurationMs);
   }
 
   #sliceLengthFilter() {
@@ -667,6 +733,8 @@ export class GlCapturePage extends LitElement {
 
   #regulateCaptureRate(nowMs: number): void {
     if (!this.micOpen || this.#micStartedAt <= 0) return;
+    // Attack / harmonic: pure detection — no sons/min auto-tune.
+    if (!usesDensityTarget(liveEventMode(this.fileProcessMode))) return;
     this.#captureTimes = pruneCaptureTimes(this.#captureTimes, nowMs);
     const next = nextSensitivity({
       sensitivity: this.attackSensitivity,
@@ -727,7 +795,8 @@ export class GlCapturePage extends LitElement {
         accept=".wav,.wave,.mp3,audio/wav,audio/wave,audio/x-wav,audio/mpeg,audio/mp3"
         @change=${(e: Event) => void this.#onPreviewFile(e)}
       />
-      <div class="rec-wrap flex items-center justify-center py-2">
+      <div class="gl-capture-stage">
+      <div class="rec-wrap flex flex-col items-center justify-center gap-2 py-2">
         ${tip(
           `${this.listening ? t("capture.stop") : t("capture.start")} (Espace)`,
           html`
@@ -750,6 +819,13 @@ export class GlCapturePage extends LitElement {
             </sonic-button>
           `,
         )}
+        ${!this.listening
+          ? html`<p
+              class="m-0 font-mono text-[0.7rem] tracking-wide text-neutral-500"
+            >
+              Espace
+            </p>`
+          : nothing}
       </div>
       <div class="flex flex-col gap-1">
         <div class="flex items-baseline justify-between gap-3">
@@ -853,23 +929,26 @@ export class GlCapturePage extends LitElement {
         dataFilterProvider=${captureFeedKey.path}
       >
         <div class="feed">
-          ${this.sampleCount === 0
-            ? html`<p class="sr-only">
-                ${this.listening
-                  ? "Aucun son extrait pour l’instant."
-                  : this.micOpen
-                    ? t("capture.scoutFeedEmpty")
-                    : "Aucun son extrait pour l’instant."}
-              </p>`
-            : nothing}
-          <div class="flex flex-col gap-1">
-            <p class="min-h-[1.25em] text-xs leading-[1.25em] text-neutral-500">
-              ${soundCountLabel(this.sampleCount)}
-            </p>
-            <sonic-table size="sm" bordered rounded maxHeight="min(48vh, 26rem)">
-              <sonic-tbody>
-                ${this.queueMounted && this.feedSessionId && this.feedProjectId
-                  ? html`
+          <div class="flex min-h-0 flex-1 flex-col gap-1">
+            ${this.sampleCount > 0
+              ? html`<p
+                  class="min-h-[1.25em] text-xs leading-[1.25em] text-neutral-500"
+                >
+                  ${soundCountLabel(this.sampleCount)}
+                </p>`
+              : nothing}
+            ${this.sampleCount > 0 &&
+            this.queueMounted &&
+            this.feedSessionId &&
+            this.feedProjectId
+              ? html`
+                  <sonic-table
+                    size="sm"
+                    bordered
+                    rounded
+                    maxHeight="min(52vh, 28rem)"
+                  >
+                    <sonic-tbody>
                       <sonic-queue
                         class="table-queue"
                         lazyload
@@ -883,12 +962,13 @@ export class GlCapturePage extends LitElement {
                         .noItems=${this.#noFeedItems}
                         .skeleton=${this.#feedSkeleton}
                       ></sonic-queue>
-                    `
-                  : this.#feedSkeleton()}
-              </sonic-tbody>
-            </sonic-table>
+                    </sonic-tbody>
+                  </sonic-table>
+                `
+              : this.#feedEmptyPanel()}
           </div>
         </div>
+      </div>
       </div>
       <div class="sr-only" aria-live="polite">${this.statusText}</div>
       ${this.economy
@@ -905,7 +985,7 @@ export class GlCapturePage extends LitElement {
               class="absolute right-4 top-4 h-3 w-3 rounded-full bg-danger shadow-[0_0_0_3px_color-mix(in_srgb,var(--sc-danger)_30%,transparent)]"
             ></span>
             <span
-              class="absolute left-4 top-4 font-mono tabular-nums text-[#666]"
+              class="absolute left-4 top-4 font-mono tabular-nums text-neutral-500"
               >${this.sampleCount}</span
             >
           </div>`
@@ -913,10 +993,51 @@ export class GlCapturePage extends LitElement {
     `;
   }
 
+  #feedEmptyHint(): string {
+    if (this.listening) return t("capture.feedEmptyHintRecording");
+    if (this.micOpen) return t("capture.feedEmptyHintScout");
+    return t("capture.feedEmptyHintIdle");
+  }
+
+  #feedEmptyPanel() {
+    const showImport = !this.listening && !this.importBusy;
+    return html`
+      <div class="feed-empty" role="status">
+        <span class="text-primary" aria-hidden="true"
+          >${glIcon(this.listening ? "circle" : "audio-lines", {
+            size: "lg",
+          })}</span
+        >
+        <p class="feed-empty__title">${t("capture.feedEmptyTitle")}</p>
+        <p class="feed-empty__hint">${this.#feedEmptyHint()}</p>
+        ${showImport
+          ? html`
+              <sonic-button
+                size="sm"
+                variant="outline"
+                type="neutral"
+                @click=${this.#pickImportFile}
+              >
+                ${glIcon("upload", { slot: "prefix", size: "xs" })}
+                ${t("capture.importFile")}
+              </sonic-button>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
   #renderFeedRow = (row: FeedRow) => {
     const tags = row.tags ?? [];
     const name = row.userName?.trim() || row.name || row.id.slice(0, 8);
     const playing = getSampleAuditionPlaying() === row.id;
+    const status = isProcessingBusy(tags)
+      ? ("busy" as const)
+      : isProcessingError(tags)
+        ? ("error" as const)
+        : tags.includes("processing:done")
+          ? ("ok" as const)
+          : null;
     return html`
       <sonic-tr type=${playing ? "info" : nothing}>
         <sonic-td
@@ -926,28 +1047,28 @@ export class GlCapturePage extends LitElement {
         >
           ${tip(
             t("sample.open"),
-            html`
-              <div>
-                ${name}${
-                  isProcessingBusy(tags)
-                    ? ` · ${t("library.processing")}`
-                    : isProcessingError(tags)
-                      ? ` · ${t("library.processingError")}`
-                      : tags.includes("processing:done")
-                        ? " · ok"
-                        : ""
-                }${
-                  row.interestScore != null
-                    ? ` · ★${Math.round(row.interestScore * 100)}`
-                    : ""
-                }
-              </div>
-              <div class="font-mono text-[0.7rem] text-neutral-500">
-                ${row.class}${row.loopProposed ? " · boucle" : ""}${
-                  tags.length ? ` · ${tags.slice(0, 4).join(" · ")}` : ""
-                }
-              </div>
-            `,
+            renderSampleListIdentity({
+              title: name,
+              sampleClass: row.class,
+              durationMs: row.durationMs ?? 0,
+              loopProposed: row.loopProposed,
+              interestPct:
+                row.interestScore != null
+                  ? Math.round(row.interestScore * 100)
+                  : null,
+              status,
+              statusLabel:
+                status === "busy"
+                  ? t("library.processing")
+                  : status === "error"
+                    ? t("library.processingError")
+                    : status === "ok"
+                      ? "ok"
+                      : undefined,
+              crumbs: tags
+                .filter((tag) => !tag.startsWith("processing:"))
+                .slice(0, 2),
+            }),
             { class: "w-full max-w-full justify-start text-left", focusable: true },
           )}
         </sonic-td>
@@ -1011,20 +1132,31 @@ export class GlCapturePage extends LitElement {
   #renderTargetRateSection() {
     const songMode = this.fileProcessMode === "song";
     const wholeMode = this.fileProcessMode === "whole";
+    const attackMode = this.fileProcessMode === "attack";
+    const harmonicMode = this.fileProcessMode === "harmonic";
+    const rateDisabled = !usesDensityTarget(this.fileProcessMode);
     const hint = wholeMode
       ? t("capture.targetRateHintWhole")
-      : songMode
-        ? t("capture.targetRateHintSong")
-        : t("capture.targetRateHint");
+      : attackMode
+        ? t("capture.targetRateHintAttack")
+        : harmonicMode
+          ? t("capture.targetRateHintHarmonic")
+          : songMode
+            ? t("capture.targetRateHintSong")
+            : t("capture.targetRateHint");
     const valueLabel = wholeMode
       ? t("capture.fileModeWhole")
-      : songMode
-        ? `${this.targetCapturesPerMin}/min · ${tf("capture.targetRateGrid", {
-            grid: songGridCaption(this.targetCapturesPerMin),
-          })}`
-        : `${this.targetCapturesPerMin}/min${
-            this.micOpen ? ` · ≈${formatRate(this.measuredRatePerMin)}` : ""
-          }`;
+      : attackMode
+        ? t("capture.fileModeAttack")
+        : harmonicMode
+          ? t("capture.fileModeHarmonic")
+          : songMode
+            ? `${this.targetCapturesPerMin}/min · ${tf("capture.targetRateGrid", {
+                grid: songGridCaption(this.targetCapturesPerMin),
+              })}`
+            : `${this.targetCapturesPerMin}/min${
+                this.micOpen ? ` · ≈${formatRate(this.measuredRatePerMin)}` : ""
+              }`;
 
     return html`
       <div class="flex w-full flex-col gap-1">
@@ -1037,7 +1169,7 @@ export class GlCapturePage extends LitElement {
         <p class="m-0 text-xs leading-snug text-neutral-500">${hint}</p>
         <input
           id="gl-target-rate"
-          class="w-full accent-primary ${wholeMode
+          class="w-full accent-primary ${rateDisabled
             ? "cursor-not-allowed opacity-40"
             : "cursor-pointer"}"
           type="range"
@@ -1045,7 +1177,7 @@ export class GlCapturePage extends LitElement {
           max=${CAPTURE_RATE.maxPerMin}
           step="1"
           .value=${String(this.targetCapturesPerMin)}
-          ?disabled=${wholeMode}
+          ?disabled=${rateDisabled}
           @input=${this.#onTargetRateInput}
           @change=${this.#onTargetRateChange}
           aria-valuemin=${CAPTURE_RATE.minPerMin}
@@ -1162,6 +1294,7 @@ export class GlCapturePage extends LitElement {
                     ${t("capture.fileModeHint")}
                   </p>
                   ${this.#renderFileModeRadios()}
+                  ${this.#renderEventModeParams()}
                 </div>
                 ${this.#renderTargetRateSection()}
                 ${this.#renderSliceDurationFields()}
@@ -1319,9 +1452,7 @@ export class GlCapturePage extends LitElement {
             </gl-form-section>
           </gl-form-stack>
         </sonic-modal-content>
-        <sonic-modal-actions>
-          <sonic-button hideModal type="primary">${t("dialog.ok")}</sonic-button>
-        </sonic-modal-actions>
+        ${renderModalOk(t("dialog.ok"))}
       </sonic-modal>
     `;
   }
@@ -1673,6 +1804,16 @@ export class GlCapturePage extends LitElement {
         hint: t("capture.fileModeHuntHint"),
       },
       {
+        value: "attack",
+        label: t("capture.fileModeAttack"),
+        hint: t("capture.fileModeAttackHint"),
+      },
+      {
+        value: "harmonic",
+        label: t("capture.fileModeHarmonic"),
+        hint: t("capture.fileModeHarmonicHint"),
+      },
+      {
         value: "song",
         label: t("capture.fileModeSong"),
         hint: t("capture.fileModeSongHint"),
@@ -1709,11 +1850,173 @@ export class GlCapturePage extends LitElement {
     `;
   }
 
+  /** Pure-detection params (attack / harmonic) — not density. */
+  #renderEventModeParams() {
+    if (this.fileProcessMode === "attack") {
+      return html`
+        <div class="mt-2 flex flex-col gap-1">
+          <label class="flex flex-col gap-1">
+            <span class="flex justify-between text-xs text-neutral-500">
+              <span>${t("capture.attackSensitivity")}</span>
+              <span class="font-mono">${this.attackSensitivity}</span>
+            </span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              class="w-full accent-primary"
+              .value=${String(this.attackSensitivity)}
+              @input=${(e: Event) => {
+                this.attackSensitivity = Number(
+                  (e.target as HTMLInputElement).value,
+                );
+              }}
+              @change=${() => {
+                void this.#persistCapturePrefs();
+                this.#applyHunterSensitivity();
+                this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
+              }}
+            />
+            <p class="m-0 text-xs text-neutral-500">
+              ${t("capture.attackSensitivityHint")}
+            </p>
+          </label>
+        </div>
+      `;
+    }
+    if (this.fileProcessMode !== "harmonic") return nothing;
+    return html`
+      <div class="mt-2 flex flex-col gap-2">
+        <label class="flex flex-col gap-1">
+          <span class="flex justify-between text-xs text-neutral-500">
+            <span>${t("capture.harmonicSensitivity")}</span>
+            <span class="font-mono">${this.harmonicSensitivity}</span>
+          </span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            class="w-full accent-primary"
+            .value=${String(this.harmonicSensitivity)}
+            @input=${(e: Event) => {
+              this.harmonicSensitivity = Number(
+                (e.target as HTMLInputElement).value,
+              );
+            }}
+            @change=${() => {
+              void this.#persistCapturePrefs();
+              this.#applyHunterSensitivity();
+              this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
+            }}
+          />
+        </label>
+        <div class="grid grid-cols-2 gap-2">
+          <label class="flex flex-col gap-1">
+            <span class="flex justify-between text-xs text-neutral-500">
+              <span>${t("capture.harmonicMinHarmonicity")}</span>
+              <span class="font-mono"
+                >${this.harmonicMinHarmonicity.toFixed(2)}</span
+              >
+            </span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              class="w-full accent-primary"
+              .value=${String(this.harmonicMinHarmonicity)}
+              @input=${(e: Event) => {
+                this.harmonicMinHarmonicity = Number(
+                  (e.target as HTMLInputElement).value,
+                );
+              }}
+              @change=${() => {
+                void this.#persistCapturePrefs();
+                this.#applyHunterSensitivity();
+                this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
+              }}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="flex justify-between text-xs text-neutral-500">
+              <span>${t("capture.harmonicMaxFlatness")}</span>
+              <span class="font-mono"
+                >${this.harmonicMaxFlatness.toFixed(2)}</span
+              >
+            </span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              class="w-full accent-primary"
+              .value=${String(this.harmonicMaxFlatness)}
+              @input=${(e: Event) => {
+                this.harmonicMaxFlatness = Number(
+                  (e.target as HTMLInputElement).value,
+                );
+              }}
+              @change=${() => {
+                void this.#persistCapturePrefs();
+                this.#applyHunterSensitivity();
+                this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
+              }}
+            />
+          </label>
+        </div>
+        <label class="flex flex-col gap-1">
+          <span class="flex justify-between text-xs text-neutral-500">
+            <span>${t("capture.harmonicMinDurationMs")}</span>
+            <span class="font-mono">${this.harmonicMinDurationMs} ms</span>
+          </span>
+          <input
+            type="range"
+            min="100"
+            max="5000"
+            step="50"
+            class="w-full accent-primary"
+            .value=${String(this.harmonicMinDurationMs)}
+            @input=${(e: Event) => {
+              this.harmonicMinDurationMs = Number(
+                (e.target as HTMLInputElement).value,
+              );
+            }}
+            @change=${() => {
+              void this.#persistCapturePrefs();
+              this.#applyHunterSensitivity();
+              this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
+            }}
+          />
+        </label>
+      </div>
+    `;
+  }
+
+  #rebuildHunter(): void {
+    if (!this.#live || !this.micOpen) return;
+    const eventMode = liveEventMode(this.fileProcessMode);
+    this.#hunter = new DualEventHunter(
+      this.#live.sampleRate,
+      dualHunterOptsFor(eventMode, {
+        attackSensitivity: this.attackSensitivity,
+        harmonicSensitivity: this.harmonicSensitivity,
+        harmonicMinHarmonicity: this.harmonicMinHarmonicity,
+        harmonicMaxFlatness: this.harmonicMaxFlatness,
+        harmonicMinDurationMs: this.harmonicMinDurationMs,
+        channelCount: this.#live.channelCount,
+      }),
+    );
+    this.#pcmCursor = this.#live.rolling?.totalPushed ?? this.#pcmCursor;
+  }
+
   #onFileProcessMode = (mode: FileProcessMode): void => {
     if (mode === this.fileProcessMode) return;
     this.fileProcessMode = mode;
     void this.#persistCapturePrefs();
-    this.#scheduleSlicePreview({ immediate: true });
+    this.#rebuildHunter();
+    this.#scheduleSlicePreview({ immediate: true, freshHunt: true });
   };
 
   #onSliceMinDurationChange = (e: Event): void => {
@@ -2028,6 +2331,10 @@ export class GlCapturePage extends LitElement {
         mode: this.fileProcessMode,
         targetPerMin: this.targetCapturesPerMin,
         openFloorFactor: openFloor,
+        harmonicSensitivity: this.harmonicSensitivity,
+        harmonicMinHarmonicity: this.harmonicMinHarmonicity,
+        harmonicMaxFlatness: this.harmonicMaxFlatness,
+        harmonicMinDurationMs: this.harmonicMinDurationMs,
         minDurationMs: lengthFilter.minMs,
         maxDurationMs: lengthFilter.maxMs,
         tempo: this.#previewTempo,
@@ -2037,7 +2344,12 @@ export class GlCapturePage extends LitElement {
       if (abort.signal.aborted) return;
       this.previewResult = result;
       if (result.tempo) this.#previewTempo = result.tempo;
-      if (result.mode === "hunt" && !result.error) {
+      if (
+        (result.mode === "hunt" ||
+          result.mode === "attack" ||
+          result.mode === "harmonic") &&
+        !result.error
+      ) {
         this.#previewHuntHits = result.regions.map((r) => ({
           startFrame: r.startFrame,
           endFrame: r.endFrame,
@@ -2432,10 +2744,17 @@ export class GlCapturePage extends LitElement {
         : (opts.title ?? this.captureName).trim() || "Capture";
       this.#hunt = await this.#live.start(title, projectId);
       if (!opts.scout) await db.sessions.put(this.#hunt);
-      this.#hunter = new EventHunter(this.#live.sampleRate, {
-        openFloorFactor: sensitivityToOpenFloor(this.attackSensitivity),
-        channelCount: this.#live.channelCount,
-      });
+      this.#hunter = new DualEventHunter(
+        this.#live.sampleRate,
+        dualHunterOptsFor(liveEventMode(this.fileProcessMode), {
+          attackSensitivity: this.attackSensitivity,
+          harmonicSensitivity: this.harmonicSensitivity,
+          harmonicMinHarmonicity: this.harmonicMinHarmonicity,
+          harmonicMaxFlatness: this.harmonicMaxFlatness,
+          harmonicMinDurationMs: this.harmonicMinDurationMs,
+          channelCount: this.#live.channelCount,
+        }),
+      );
       this.#pcmCursor = this.#live.rolling?.totalPushed ?? 0;
       this.micOpen = true;
       this.#micStartedAt = performance.now();
@@ -2467,7 +2786,7 @@ export class GlCapturePage extends LitElement {
     if (!rolling || rolling.filled < 64) return;
 
     this.#analysing = true;
-    let extraction = null as ReturnType<EventHunter["analyse"]>["extraction"];
+    let extraction: DualExtraction | null = null;
     try {
       // Contiguous delta since last tick — never re-slice a sliding window
       // (that used to drop `length % hop` samples every ~150 ms → regular chops).
@@ -2478,8 +2797,9 @@ export class GlCapturePage extends LitElement {
       }
       this.#pcmCursor = toAbs;
       const nowMs = performance.now();
-      const result = this.#hunter.analyse(pcm, nowMs);
+      const result = this.#hunter!.analyse(pcm, nowMs);
       this.liveState = result.state;
+      this.detectionSource = result.source;
       extraction = result.extraction;
       this.#regulateCaptureRate(nowMs);
     } finally {
@@ -2496,7 +2816,7 @@ export class GlCapturePage extends LitElement {
   }
 
   async #persistExtraction(
-    extraction: NonNullable<ReturnType<EventHunter["analyse"]>["extraction"]>,
+    extraction: DualExtraction,
     opts: { ignoreStop?: boolean } = {},
   ): Promise<void> {
     if ((!opts.ignoreStop && this.#stopping) || !this.#hunt) return;
@@ -2574,12 +2894,14 @@ export class GlCapturePage extends LitElement {
         revision: 0,
       };
       await db.samples.put(sample);
-      // Rank + soft-cap before polish so we do not queue hundreds of rejects.
-      const cull = await cullExcessProcessedSamples(hunt.id);
-      if (cull.culledIds.length > 0) processQueue.refresh();
-      if (cull.culledIds.includes(id)) {
-        this.liveState = "listening";
-        return;
+      // Density soft-cap only in hunt — attack / harmonic keep every detection.
+      if (usesDensityTarget(liveEventMode(this.fileProcessMode))) {
+        const cull = await cullExcessProcessedSamples(hunt.id);
+        if (cull.culledIds.length > 0) processQueue.refresh();
+        if (cull.culledIds.includes(id)) {
+          this.liveState = "listening";
+          return;
+        }
       }
       void processQueue.enqueue(id, extraction.kind);
       if (!opts.ignoreStop && this.#stopping) return;
@@ -2614,6 +2936,7 @@ export class GlCapturePage extends LitElement {
     if (hunt) {
       const ended = nowIso();
       const durationMs = Math.round(performance.now() - this.#recordStartedAt);
+      const density = usesDensityTarget(liveEventMode(this.fileProcessMode));
       void db.sessions
         .put({
           ...hunt,
@@ -2622,7 +2945,11 @@ export class GlCapturePage extends LitElement {
           status: "ready",
           updatedAt: ended,
         })
-        .then(() => cullExcessProcessedSamples(hunt.id))
+        .then(() =>
+          density
+            ? cullExcessProcessedSamples(hunt.id)
+            : { culledIds: [] as string[] },
+        )
         .then((cull) => {
           if (cull.culledIds.length > 0) processQueue.refresh();
         });
@@ -2665,6 +2992,7 @@ export class GlCapturePage extends LitElement {
       const durationMs =
         stopped?.durationMs ??
         Math.round(performance.now() - this.#recordStartedAt);
+      const density = usesDensityTarget(liveEventMode(this.fileProcessMode));
       void db.sessions
         .put({
           ...hunt,
@@ -2673,7 +3001,11 @@ export class GlCapturePage extends LitElement {
           status: "ready",
           updatedAt: ended,
         })
-        .then(() => cullExcessProcessedSamples(hunt.id))
+        .then(() =>
+          density
+            ? cullExcessProcessedSamples(hunt.id)
+            : { culledIds: [] as string[] },
+        )
         .then((cull) => {
           if (cull.culledIds.length > 0) processQueue.refresh();
         });
@@ -2765,21 +3097,37 @@ function isLiveCaptureDeviceState(s: string): boolean {
   return s === "idle" || s === "listening" || s === "suspended";
 }
 
-function stateLabel(s: CaptureLiveState, recording: boolean): string {
+function stateLabel(
+  s: CaptureLiveState,
+  recording: boolean,
+  source: "attack" | "harmonic" | null = null,
+): string {
+  const via =
+    source === "harmonic" ? "harmonique" : source === "attack" ? "attaque" : null;
   switch (s) {
     case "idle":
     case "listening":
       return "";
     case "event:attack":
-      return recording ? "événement · attaque" : "détecté · attaque (réglage)";
+      return recording
+        ? `événement · ${via ?? "attaque"}`
+        : `détecté · ${via ?? "attaque"} (réglage)`;
     case "event:sustain":
       return recording
-        ? "événement · sustain (enveloppe)"
-        : "détecté · sustain (réglage)";
+        ? `événement · sustain (${via ?? "enveloppe"})`
+        : `détecté · sustain (${via ?? "réglage"})`;
     case "extracting":
       return "écriture…";
     case "characterized":
-      return recording ? "capturé → file processing" : "détecté (non sauvé)";
+      return recording
+        ? via
+          ? `capturé · ${via} → file processing`
+          : "capturé → file processing"
+        : via
+          ? `détecté · ${via} (non sauvé)`
+          : "détecté (non sauvé)";
+    default:
+      return "";
   }
 }
 

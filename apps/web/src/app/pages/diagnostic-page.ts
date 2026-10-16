@@ -1,23 +1,15 @@
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { estimateStorage } from "@glane/audio-io";
 import tailwind from "../../css/tailwind";
+import { ACCESS_PAGE_STYLES } from "../access-layout.js";
 import { t } from "../i18n/messages.js";
 import { getSyncStatus, type SyncStatus } from "../sync.js";
 import { db } from "../db.js";
 
 @customElement("gl-diagnostic-page")
 export class GlDiagnosticPage extends LitElement {
-  static override styles = [
-    tailwind,
-    css`
-      :host {
-        display: block;
-        padding-bottom: max(1rem, env(safe-area-inset-bottom));
-        box-sizing: border-box;
-      }
-    `,
-  ];
+  static override styles = [tailwind, ACCESS_PAGE_STYLES];
 
   @state() private usage = 0;
   @state() private quota = 0;
@@ -53,12 +45,10 @@ export class GlDiagnosticPage extends LitElement {
     const sab = typeof SharedArrayBuffer !== "undefined";
     const opfs = typeof navigator.storage?.getDirectory === "function";
     return html`
-      <div
-        class="box-border max-w-full overflow-x-hidden p-4 font-mono text-[0.85rem]"
-      >
-        <h1 class="font-display">${t("nav.diagnostic")}</h1>
+      <div class="access-page font-mono text-[0.85rem]">
+        <h1>${t("nav.diagnostic")}</h1>
         <dl
-          class="grid grid-cols-[minmax(7rem,12rem)_1fr] items-center gap-x-4 gap-y-1.5 max-[480px]:grid-cols-1 max-[480px]:gap-y-0.5"
+          class="m-0 grid grid-cols-[minmax(7rem,12rem)_1fr] items-center gap-x-4 gap-y-1.5 max-[480px]:grid-cols-1 max-[480px]:gap-y-0.5"
         >
           <dt class="text-neutral-500 max-[480px]:mt-2.5 max-[480px]:first:mt-0">
             crossOriginIsolated
@@ -135,19 +125,17 @@ export class GlDiagnosticPage extends LitElement {
           </dt>
           <dd>16.7 ms (timeline ≤ 8 ms)</dd>
         </dl>
-        <div class="mt-4 flex flex-col gap-2">
-          ${this.sync?.lastError
-            ? html`<sonic-alert status="error" label="Dernière erreur sync"
-                >${this.sync.lastError}</sonic-alert
-              >`
-            : nothing}
-          ${!isolated || !sab
-            ? html`<sonic-alert status="warning" label="Isolation"
-                >Sans COOP/COEP, SharedArrayBuffer peut être indisponible — fallback
-                Transferable.</sonic-alert
-              >`
-            : nothing}
-        </div>
+        ${this.sync?.lastError
+          ? html`<sonic-alert status="error" label="Dernière erreur sync"
+              >${this.sync.lastError}</sonic-alert
+            >`
+          : nothing}
+        ${!isolated || !sab
+          ? html`<sonic-alert status="warning" label="Isolation"
+              >Sans COOP/COEP, SharedArrayBuffer peut être indisponible — fallback
+              Transferable.</sonic-alert
+            >`
+          : nothing}
       </div>
     `;
   }

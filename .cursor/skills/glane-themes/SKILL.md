@@ -38,7 +38,7 @@ Palette helper: [concordecolors](https://delanfranchi.github.io/concordecolors/)
 
 **Nord** sets the usability bar (clear base→100 steps, readable text, `--sc-dark-*` bridge). Accents may be high-chroma / eccentric when the user asks — neutrals stay coherent.
 
-Nord character: deeper polar ink + electric aurora teal. All three themes: **tranché** accents, clear neutral steps (page `base` → header `100`), eccentric modern — no desert / muted clay.
+Nord character: deeper polar ink + electric aurora teal. Light theme (matcha/Brume): cool paper + firm indigo — high text contrast, no mid-lilac wash. All three: **tranché** accents, clear neutral steps (page `base` → header `100`) — no desert / muted clay.
 
 ## Semantic color theory (required)
 
@@ -65,7 +65,7 @@ Rules:
 |----|---------------|----------|---------------|
 | `nord` | Polar night (`Nord`) | Cool ink blue-grey, sharp steps | Electric aurora teal |
 | `dark` | Ink (`Encre` / `Ink`) | Near-black cool ink | Hot pink — high chroma |
-| `matcha` | Sorbet (`Sorbet`) | Lilac mist paper — **not white** | Electric indigo |
+| `matcha` | Brume (`Mist`) | Cool paper grey — soft, high contrast (not mid lilac) | Firm indigo |
 
 ## Review workflow
 

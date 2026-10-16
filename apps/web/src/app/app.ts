@@ -37,8 +37,10 @@ import { glBrandMark, glIcon } from "./icon.js";
 import { tip } from "./tip.js";
 import {
   chromeMore,
+  renderChromePrimaries,
   renderMoreMenu,
   type ChromeMoreState,
+  type ChromePrimary,
 } from "./more-menu.js";
 import {
   APP_THEMES,
@@ -53,6 +55,8 @@ import type { GlEditorPage } from "./pages/editor-page.js";
 import "./pages/synth-page.js";
 import "./pages/sequencer-page.js";
 import "./pages/privacy-page.js";
+import "./pages/sync-page.js";
+import "./pages/connector-page.js";
 import "./pages/diagnostic-page.js";
 import "./pages/landing-page.js";
 import "./pages/workspace-hub-page.js";
@@ -87,8 +91,10 @@ export class GlApp extends LitElement {
         padding-right: max(0.75rem, env(safe-area-inset-right));
       }
       main {
+        display: flex;
         flex: 1;
         min-height: 0;
+        flex-direction: column;
         overflow: auto;
       }
       .brand {
@@ -104,13 +110,17 @@ export class GlApp extends LitElement {
         flex-shrink: 0;
         line-height: 0;
       }
-      /* Sequencer fills the chrome; scroll stays inside timeline / sample drawer. */
-      main:has(gl-sequencer-page) {
+      /* Instrument pages fill chrome; stage scrolls, transport can dock. */
+      main:has(gl-sequencer-page),
+      main:has(gl-editor-page),
+      main:has(gl-capture-page) {
         overflow: hidden;
         display: flex;
         flex-direction: column;
       }
-      main > gl-sequencer-page {
+      main > gl-sequencer-page,
+      main > gl-editor-page,
+      main > gl-capture-page {
         flex: 1;
         min-height: 0;
         overflow: hidden;
@@ -204,6 +214,9 @@ export class GlApp extends LitElement {
   chromeMoreItems: ChromeMoreState["items"] = [];
 
   @state()
+  chromePrimaries: readonly ChromePrimary[] = [];
+
+  @state()
   private readiness: Readiness = { projectId: null, sampleCount: 0 };
 
   #unsubProc: (() => void) | null = null;
@@ -227,6 +240,7 @@ export class GlApp extends LitElement {
       const s = chromeMore.get();
       this.chromeMoreLabel = s.ariaLabel;
       this.chromeMoreItems = s.items;
+      this.chromePrimaries = s.primaries ?? [];
     });
     window.addEventListener("keydown", this.#onKey);
     window.addEventListener("popstate", this.#onPopState);
@@ -457,7 +471,7 @@ export class GlApp extends LitElement {
     ];
   }
 
-  /** Account / privacy / diagnostic — top-level, outside the current project. */
+  /** Account / privacy / sync / connector / diagnostic — outside the project. */
   #accessLinks(): { href: string; label: string; icon: string; route: Route }[] {
     return [
       {
@@ -473,6 +487,18 @@ export class GlApp extends LitElement {
         route: { name: "privacy" },
       },
       {
+        href: pathFor({ name: "sync" }),
+        label: t("nav.sync"),
+        icon: "refresh-cw",
+        route: { name: "sync" },
+      },
+      {
+        href: pathFor({ name: "connector" }),
+        label: t("nav.connector"),
+        icon: "zap",
+        route: { name: "connector" },
+      },
+      {
         href: pathFor({ name: "diagnostic" }),
         label: t("nav.diagnostic"),
         icon: "activity",
@@ -483,7 +509,13 @@ export class GlApp extends LitElement {
 
   #isAccessRoute(): boolean {
     const n = this.route.name;
-    return n === "account" || n === "privacy" || n === "diagnostic";
+    return (
+      n === "account" ||
+      n === "privacy" ||
+      n === "sync" ||
+      n === "connector" ||
+      n === "diagnostic"
+    );
   }
 
   /** Selected nav item from app route (SPA + /project/:id). */
@@ -580,7 +612,7 @@ export class GlApp extends LitElement {
       `,
     );
 
-    /** Top-level access pages: single crumb, switch among account / privacy / diagnostic. */
+    /** Top-level access pages: single crumb, switch among access routes. */
     if (this.#isAccessRoute()) {
       return html`
         <nav
@@ -666,14 +698,23 @@ export class GlApp extends LitElement {
     `;
   }
 
-  /** Page contextual more — breadcrumb row, right-aligned (`chromeMore.set`). */
-  #breadcrumbMore() {
+  /** Page frame actions — primaries + more (`chromeMore.set`). */
+  #breadcrumbActions() {
     const items = this.chromeMoreItems;
-    if (!Array.isArray(items) || items.length === 0) return nothing;
-    return renderMoreMenu({
-      ariaLabel: this.chromeMoreLabel || t("nav.menu"),
-      items,
-    });
+    const primaries = this.chromePrimaries;
+    const hasMore = Array.isArray(items) && items.length > 0;
+    if (!primaries.length && !hasMore) return nothing;
+    return html`
+      <div class="ml-auto flex shrink-0 items-center gap-1.5">
+        ${renderChromePrimaries(primaries)}
+        ${hasMore
+          ? renderMoreMenu({
+              ariaLabel: this.chromeMoreLabel || t("nav.menu"),
+              items,
+            })
+          : nothing}
+      </div>
+    `;
   }
 
   #projectMenu() {
@@ -1034,12 +1075,12 @@ export class GlApp extends LitElement {
                 ></i>
               </div>`
             : nothing}
-          <main>
+          <main class="flex min-h-0 flex-1 flex-col">
             <div
-              class="mb-4 flex min-h-7 shrink-0 items-center gap-2 overflow-visible px-3 pt-4 sm:px-4"
+              class="gl-page-frame mb-2 flex min-h-[var(--gl-touch)] shrink-0 items-center gap-2 overflow-visible px-3 pt-3 sm:px-4"
             >
               ${this.#breadcrumb()}
-              <div class="ml-auto shrink-0">${this.#breadcrumbMore()}</div>
+              ${this.#breadcrumbActions()}
             </div>
             ${this.#page()}
           </main>
@@ -1074,6 +1115,10 @@ export class GlApp extends LitElement {
         ></gl-sequencer-page>`;
       case "privacy":
         return html`<gl-privacy-page></gl-privacy-page>`;
+      case "sync":
+        return html`<gl-sync-page></gl-sync-page>`;
+      case "connector":
+        return html`<gl-connector-page></gl-connector-page>`;
       case "diagnostic":
         return html`<gl-diagnostic-page></gl-diagnostic-page>`;
     }
@@ -1128,7 +1173,7 @@ export class GlApp extends LitElement {
         run: () => void this.#duplicateProject(),
       },
       {
-        label: "Créer un clip (projet)",
+        label: `${t("hub.open")} — ${t("hub.step.project.title")}`,
         icon: "music",
         section: "project" as GlSection,
         run: () => {

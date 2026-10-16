@@ -1,10 +1,13 @@
 import { LitElement, html, nothing } from "lit";
-import { customElement, state } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
+import "@supersoniks/concorde/form-layout";
 import tailwind from "../../css/tailwind";
 import { ensurePrefs } from "../db.js";
 import { glDialog } from "../dialog.js";
 import { t, type MessageKey } from "../i18n/messages.js";
 import { glIcon } from "../icon.js";
+import { renderFormActions } from "../form-actions.js";
+import "../form-stack.js";
 import {
   agentBridge,
   connectorUrl,
@@ -13,10 +16,13 @@ import {
   type AgentBridgeState,
 } from "./bridge.js";
 
-/** Account section: enable the Claude connector and show its URL. */
+/** Claude connector controls — used on `/connector` (embedded) or standalone. */
 @customElement("gl-agent-connector")
 export class GlAgentConnector extends LitElement {
   static override styles = [tailwind];
+
+  /** When true, page owns title/lede — no nested card chrome. */
+  @property({ type: Boolean, reflect: true }) embedded = false;
 
   @state() private enabled = false;
   @state() private token: string | null = null;
@@ -64,49 +70,76 @@ export class GlAgentConnector extends LitElement {
         : this.bridge === "connecting"
           ? "bg-warning"
           : "bg-neutral-400";
-    return html`
-      <section class="flex flex-col gap-3 rounded-lg border border-neutral-200 p-4">
-        <h2 class="font-display text-lg">${t("agent.title")}</h2>
-        <p class="text-sm text-neutral-500">${t("agent.intro")}</p>
-        <div class="flex items-center gap-2 text-sm">
-          <span class="inline-block h-2 w-2 rounded-full ${dot}"></span>
-          ${t(`agent.state.${this.bridge}` as MessageKey)}
-        </div>
-        <div>
-          <sonic-button
-            type=${this.enabled ? "neutral" : "primary"}
-            variant=${this.enabled ? "outline" : "default"}
-            @click=${() => void this.#toggle()}
-          >
-            ${glIcon(this.enabled ? "power" : "zap", { slot: "prefix" })}
-            ${this.enabled ? t("agent.disable") : t("agent.enable")}
-          </sonic-button>
-        </div>
+
+    const body = html`
+      <gl-form-stack gap="md">
+        <gl-form-section label=${t("agent.statusLabel")}>
+          <div class="flex items-center gap-2 text-sm">
+            <span class="inline-block h-2 w-2 shrink-0 rounded-full ${dot}"></span>
+            ${t(`agent.state.${this.bridge}` as MessageKey)}
+          </div>
+        </gl-form-section>
         ${url
           ? html`
-              <label class="text-sm text-neutral-500">${t("agent.url")}</label>
-              <code
-                class="block break-all rounded bg-neutral-100 px-2 py-1.5 font-mono text-xs"
-                >${url}</code
-              >
-              <div class="flex flex-wrap gap-2">
-                <sonic-button size="sm" @click=${() => void this.#copy(url)}>
-                  ${glIcon(this.copied ? "check" : "copy", { slot: "prefix" })}
-                  ${this.copied ? t("agent.copied") : t("agent.copy")}
-                </sonic-button>
-                <sonic-button
-                  size="sm"
-                  type="neutral"
-                  variant="outline"
-                  @click=${() => void this.#rotate()}
-                >
-                  ${glIcon("refresh-cw", { slot: "prefix" })} ${t("agent.rotate")}
-                </sonic-button>
-              </div>
-              <p class="text-xs text-neutral-500">${t("agent.secret")}</p>
+              <gl-form-section label=${t("agent.url")}>
+                <sonic-form-layout>
+                  <code
+                    class="block break-all rounded-md bg-neutral-100 px-2 py-1.5 font-mono text-xs"
+                    >${url}</code
+                  >
+                  <p class="m-0 text-xs text-neutral-500">${t("agent.secret")}</p>
+                </sonic-form-layout>
+              </gl-form-section>
             `
           : nothing}
-      </section>
+      </gl-form-stack>
+      ${renderFormActions({
+        secondary: url
+          ? {
+              label: html`${glIcon("refresh-cw", {
+                slot: "prefix",
+                size: "xs",
+              })}
+              ${t("agent.rotate")}`,
+              variant: "outline",
+              type: "neutral",
+              onClick: () => void this.#rotate(),
+            }
+          : undefined,
+        tertiary: url
+          ? {
+              label: html`${glIcon(this.copied ? "check" : "copy", {
+                slot: "prefix",
+                size: "xs",
+              })}
+              ${this.copied ? t("agent.copied") : t("agent.copy")}`,
+              variant: "outline",
+              type: "neutral",
+              onClick: () => void this.#copy(url),
+            }
+          : undefined,
+        primary: {
+          label: html`${glIcon(this.enabled ? "power" : "zap", {
+            slot: "prefix",
+          })}
+          ${this.enabled ? t("agent.disable") : t("agent.enable")}`,
+          type: this.enabled ? "neutral" : "primary",
+          variant: this.enabled ? "outline" : undefined,
+          onClick: () => void this.#toggle(),
+        },
+      })}
+    `;
+
+    if (this.embedded) return body;
+
+    return html`
+      <div class="flex flex-col gap-4">
+        <div class="flex flex-col gap-1">
+          <h2 class="m-0 font-display text-lg">${t("agent.title")}</h2>
+          <p class="m-0 text-sm text-neutral-500">${t("agent.intro")}</p>
+        </div>
+        ${body}
+      </div>
     `;
   }
 }

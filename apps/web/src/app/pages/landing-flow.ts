@@ -67,9 +67,12 @@ export class GlLandingFlow extends LitElement {
   #cssH = 0;
   #tape: BarTape = createBarTape();
 
+  #ro: ResizeObserver | null = null;
+
   #onResize = (): void => {
     this.#measure();
     if (this.#three) this.#three.resize(this.#cssW, this.#cssH);
+    else this.#fitCanvas();
   };
 
   #onMotion = (e: MediaQueryListEvent): void => {
@@ -92,6 +95,8 @@ export class GlLandingFlow extends LitElement {
     ).matches;
     this.#measure();
     void this.#boot();
+    this.#ro = new ResizeObserver(() => this.#onResize());
+    this.#ro.observe(this);
     window.addEventListener("resize", this.#onResize);
     window.visualViewport?.addEventListener("resize", this.#onResize);
     window.visualViewport?.addEventListener("scroll", this.#onResize);
@@ -131,6 +136,8 @@ export class GlLandingFlow extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.#stop();
+    this.#ro?.disconnect();
+    this.#ro = null;
     this.#three?.dispose();
     this.#three = null;
     window.removeEventListener("resize", this.#onResize);

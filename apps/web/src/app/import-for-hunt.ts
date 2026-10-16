@@ -11,20 +11,21 @@ import {
 import { sampleOpfs } from "@glane/audio-io";
 import {
   DSP_THRESHOLDS,
-  EventHunter,
+  DualEventHunter,
   computeInterestScore,
   durationMsFromPcm,
   frameCount,
   sliceFrames,
   songSlice,
   toMonoPcm,
-  type Extraction,
+  type DualExtraction as Extraction,
 } from "@glane/audio-dsp";
 import {
   DEFAULT_TARGET_CAPTURES_PER_MIN,
   db,
   type FileProcessMode,
 } from "./db.js";
+import { dualHunterOptsFor, isEventProcessMode } from "./file-process-mode.js";
 import { processQueue } from "./process-queue.js";
 import { cullExcessProcessedSamples } from "./sample-interest-cull.js";
 import { buildAutoSampleName } from "./sample-auto-name.js";
@@ -38,6 +39,8 @@ import {
 } from "./slice-duration.js";
 
 export const FILE_HUNT_NOTES = "glane:file-hunt";
+export const FILE_ATTACK_NOTES = "glane:file-attack";
+export const FILE_HARMONIC_NOTES = "glane:file-harmonic";
 export const FILE_SONG_NOTES = "glane:file-song";
 export const FILE_WHOLE_NOTES = "glane:file-whole";
 const FILE_TAG = "file";
@@ -99,6 +102,8 @@ async function yieldToUi(): Promise<void> {
 function sessionNotesForMode(mode: FileProcessMode): string {
   if (mode === "song") return FILE_SONG_NOTES;
   if (mode === "whole") return FILE_WHOLE_NOTES;
+  if (mode === "attack") return FILE_ATTACK_NOTES;
+  if (mode === "harmonic") return FILE_HARMONIC_NOTES;
   return FILE_HUNT_NOTES;
 }
 
@@ -264,6 +269,11 @@ async function processHunt(
     session: Session;
     captureName: string;
     excludeVoice: boolean;
+    eventMode: "hunt" | "attack" | "harmonic";
+    harmonicSensitivity?: number;
+    harmonicMinHarmonicity?: number;
+    harmonicMaxFlatness?: number;
+    harmonicMinDurationMs?: number;
   },
 ): Promise<ImportForHuntResult> {
   const {
@@ -275,12 +285,20 @@ async function processHunt(
     signal,
     onProgress,
     onSample,
+    eventMode,
   } = opts;
 
-  const hunter = new EventHunter(sampleRate, {
-    openFloorFactor: opts.openFloorFactor,
-    channelCount: session.channelCount,
-  });
+  const hunter = new DualEventHunter(
+    sampleRate,
+    dualHunterOptsFor(eventMode, {
+      openFloorFactor: opts.openFloorFactor,
+      channelCount: session.channelCount,
+      harmonicSensitivity: opts.harmonicSensitivity,
+      harmonicMinHarmonicity: opts.harmonicMinHarmonicity,
+      harmonicMaxFlatness: opts.harmonicMaxFlatness,
+      harmonicMinDurationMs: opts.harmonicMinDurationMs,
+    }),
+  );
 
   const hop = DSP_THRESHOLDS.live.envelopeHop * session.channelCount;
   const chunk = Math.max(hop * 4, Math.floor(sampleRate * 0.1 * session.channelCount));
@@ -599,6 +617,7 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
         captureName,
       });
     }
+    const eventMode = isEventProcessMode(mode) ? mode : "hunt";
     return await processHunt({
       ...opts,
       pcm,
@@ -606,6 +625,11 @@ async function processFile(opts: ImportForHuntOpts): Promise<ImportForHuntResult
       session,
       captureName,
       excludeVoice,
+      eventMode,
+      harmonicSensitivity: prefs?.harmonicSensitivity,
+      harmonicMinHarmonicity: prefs?.harmonicMinHarmonicity,
+      harmonicMaxFlatness: prefs?.harmonicMaxFlatness,
+      harmonicMinDurationMs: prefs?.harmonicMinDurationMs,
       minDurationMs: lengthFilter.minMs,
       maxDurationMs: lengthFilter.maxMs,
     });

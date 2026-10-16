@@ -1,0 +1,121 @@
+{
+  "title": "Home Persuade — composition",
+  "question": "Monde Pack A figé. Choisis la composition de la home (action = créer / ouvrir un projet).",
+  "options": [
+    {
+      "id": "scroll-chapters",
+      "label": "Chapitres du flux",
+      "kicker": "THE ROLL",
+      "lineage": "Phases capture → glaner → arranger comme chapitres",
+      "thesis": "Le canvas raconte le pipeline ; le CTA crée un projet au milieu du récit.",
+      "palette": ["#101820", "#eef3f8", "#2af5d0", "#03241c"],
+      "materials": ["flat Pack A base", "Bricolage display", "landing-flow canvas", "sonic-button"],
+      "viewport": "Full-bleed flow ; marque + tagline à gauche ; jalons de phase ; Nouveau projet primary visible sans carte verre.",
+      "risk": "Le scroll peut noyer l’action si le CTA n’est pas sticky.",
+      "html": ".impeccable/mocks/decision/scroll-chapters.html",
+      "comp": ".impeccable/mocks/decision/scroll-chapters.webp"
+    },
+    {
+      "id": "field-dock",
+      "label": "Champ + quai",
+      "lineage": "Canvas instrument plein écran + quai d’action",
+      "thesis": "La preuve visuelle occupe tout le viewport ; créer un projet vit sur un quai plat.",
+      "palette": ["#101820", "#eef3f8", "#2af5d0", "#03241c"],
+      "materials": ["flat Pack A base", "Bricolage display", "landing-flow canvas", "sonic-button"],
+      "viewport": "Canvas edge-to-edge ; bas : bande plate marque + tagline + Nouveau projet (+ liste projets si présents).",
+      "risk": "Le dock peut lire toolbar Operate si trop dense.",
+      "html": ".impeccable/mocks/decision/field-dock.html",
+      "comp": ".impeccable/mocks/decision/field-dock.webp"
+    },
+    {
+      "id": "project-shoebox",
+      "label": "Boîte à projets",
+      "lineage": "Formulaire de travail = projets",
+      "thesis": "Ouvrir ou créer un projet est le héros ; le flux n’est qu’une frise.",
+      "palette": ["#101820", "#eef3f8", "#2af5d0", "#03241c"],
+      "materials": ["flat Pack A base", "Bricolage display", "sonic-menu rows", "sonic-button"],
+      "viewport": "Marque en tête ; liste projets ou empty + CTA large ; frise flow en bande haute.",
+      "risk": "Moins de magie visuelle pour un premier visiteur.",
+      "raised": [
+        {
+          "from": "challenger-hypercard",
+          "raise": "Chaque ligne projet est à la fois lecture et entrée — ouvrir = même geste que créer."
+        }
+      ],
+      "html": ".impeccable/mocks/decision/project-shoebox.html",
+      "comp": ".impeccable/mocks/decision/project-shoebox.webp"
+    },
+    {
+      "id": "challenger-transit",
+      "label": "Plan de ligne sonore",
+      "verdict": "competitive",
+      "lineage": "wayfinding-cartography-signage-midnight-transit-diagram",
+      "thesis": "Capture → bibliothèque → arrangement comme une ligne de métro ; départ = nouveau projet.",
+      "palette": ["#101820", "#eef3f8", "#2af5d0", "#4ec4ff"],
+      "materials": ["flat Pack A", "diagram lines 45/90", "station ticks", "sonic-button"],
+      "viewport": "Diagramme de stations plein cadre ; Départ / Nouveau projet sur la première station.",
+      "case": "Clarté du parcours meilleure que le scroll ; identification moyenne hors usagers urbains.",
+      "risk": "Costume de carte si les stations ne sont pas cliquables / réelles.",
+      "html": ".impeccable/mocks/decision/challenger-transit.html",
+      "comp": ".impeccable/mocks/decision/challenger-transit.webp",
+      "hero": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-midnight-transit-diagram-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-midnight-transit-diagram.webp"
+    },
+    {
+      "id": "challenger-darkroom",
+      "label": "Chambre noire du take",
+      "verdict": "competitive",
+      "lineage": "signals-instruments-darkroom-safelight-bay",
+      "thesis": "Le son apparaît comme un tirage : exposer → développer → fixer dans la bibliothèque.",
+      "palette": ["#101820", "#eef3f8", "#2af5d0", "#ffc233"],
+      "materials": ["flat Pack A", "test-strip bands", "wave reveal", "sonic-button"],
+      "viewport": "Bandes d’exposition + wave qui émerge ; CTA Nouveau projet = tirer le print.",
+      "case": "Forte identification émotionnelle chez les field recordists ; clarté un cran sous le shoebox.",
+      "risk": "Ambres safelight interdits — topologie seule, couleurs Pack A.",
+      "html": ".impeccable/mocks/decision/challenger-darkroom.html",
+      "comp": ".impeccable/mocks/decision/challenger-darkroom.webp",
+      "hero": "https://impeccable.style/worlds/cards/signals-instruments-darkroom-safelight-bay-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/signals-instruments-darkroom-safelight-bay.webp"
+    },
+    {
+      "id": "challenger-provenance",
+      "label": "Ruban d’un take",
+      "verdict": "competitive",
+      "lineage": "exhibition-museum-curation-provenance-ribbon",
+      "thesis": "Un seul son, de la prise au partage — preuve local-first sans pitch cloud.",
+      "palette": ["#101820", "#eef3f8", "#2af5d0", "#ff5a7a"],
+      "materials": ["flat Pack A", "one custody ribbon", "dated folds", "sonic-button"],
+      "viewport": "Ruban vertical champ → slice → bibliothèque → écoute ; CTA au premier pli vide.",
+      "case": "Clarté produit maximale sur local-first ; identification archive vs terrain.",
+      "risk": "Lit musée si le CTA n’est pas le premier geste.",
+      "html": ".impeccable/mocks/decision/challenger-provenance.html",
+      "comp": ".impeccable/mocks/decision/challenger-provenance.webp",
+      "hero": "https://impeccable.style/worlds/cards/exhibition-museum-curation-provenance-ribbon-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/exhibition-museum-curation-provenance-ribbon.webp"
+    },
+    {
+      "id": "challenger-silkscreen",
+      "label": "Éditions de takes",
+      "verdict": "declined",
+      "lineage": "design-canon-factory-silkscreen-loft",
+      "palette": ["#101820", "#eef3f8", "#2af5d0"],
+      "materials": ["flat Pack A", "repeat frames"],
+      "case": "Audience faible : variations d’édition ≠ geste de capture sur le terrain.",
+      "kept": "La preuve par variations reste une option de section basse, pas le hero."
+    },
+    {
+      "id": "challenger-canopy",
+      "label": "Voiles de phases",
+      "verdict": "declined",
+      "lineage": "generative-art-computational-color-chord-counterpoint",
+      "palette": ["#101820", "#eef3f8", "#2af5d0"],
+      "materials": ["flat Pack A"],
+      "case": "Matériau translucide / multi-couleurs combat le flat Pack A.",
+      "kept": "Phases comme voix qui se croisent, pas une rangée de cartes égales."
+    }
+  ],
+  "reroll": { "registers": ["safer", "bolder"] },
+  "buildPath": { "value": "code", "toggle": true },
+  "steer": true,
+  "canon": false
+}
