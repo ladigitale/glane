@@ -128,6 +128,7 @@ docker run --rm \
 ok "Front build ready."
 
 info "Starting stack…"
+"${COMPOSE[@]}" build --pull
 "${COMPOSE[@]}" up -d --build
 ok "Containers started."
 # Drop a leftover solo edge if switching to cohost.

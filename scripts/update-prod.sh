@@ -88,6 +88,9 @@ docker run --rm \
 ok "Front build ready."
 
 info "Recreating stack…"
+# --pull : récupère l'image de base à jour (correctifs de sécurité PHP, ex. PHP2Shell CVE-2026-109618/109619).
+# Sans lui, `up --build` réutilise l'image FrankenPHP déjà en cache, donc un PHP non corrigé.
+"${COMPOSE[@]}" build --pull
 "${COMPOSE[@]}" up -d --build
 ok "Containers up."
 if [[ "${GLANE_COHOST:-0}" == "1" ]]; then

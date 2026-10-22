@@ -3,6 +3,11 @@
 # Versions
 FROM dunglas/frankenphp:1-php8.4 AS frankenphp_upstream
 
+# Garde-fou sécurité PHP2Shell (CVE-2026-109618 / CVE-2026-109619, RCE sans authentification,
+# corrigées dans PHP 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35) : le build échoue si l'image de base,
+# éventuellement restée en cache, embarque un PHP plus ancien. Reconstruire avec `--pull`.
+RUN php -r '$m=["8.5"=>"8.5.12","8.4"=>"8.4.27","8.3"=>"8.3.36","8.2"=>"8.2.35"][PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION]??null; if($m===null||version_compare(PHP_VERSION,$m,"<")){fwrite(STDERR,"PHP ".PHP_VERSION." vulnérable (CVE-2026-109618/109619) : minimum ".($m??"inconnu")." — reconstruire avec --pull.\n");exit(1);} echo "PHP ".PHP_VERSION." OK\n";'
+
 # The different stages of this Dockerfile are meant to be built into separate images
 # https://docs.docker.com/develop/develop-images/multistage-build/#stop-at-a-specific-build-stage
 # https://docs.docker.com/compose/compose-file/#target
