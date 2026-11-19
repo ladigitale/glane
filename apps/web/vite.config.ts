@@ -122,6 +122,8 @@ export default defineConfig({
       registerType: "autoUpdate",
       // ML WASM/ORT/RNNoise are fetched on demand (Cache Storage / HF); do not SW-precache.
       workbox: {
+        // Static agent/trust files (llms.txt, *.md, /.well-known/*, /about…) are not SPA routes.
+        navigateFallbackDenylist: [/\.[a-z0-9]+$/i, /^\/\.well-known\//, /^\/(about|contact)\/?$/],
         globPatterns: ["**/*.{js,css,html,ico,svg,png,woff2,webp}"],
         globIgnores: [
           "**/ml/**",

@@ -1,0 +1,28 @@
+# Glane
+
+> Glane is a local-first web instrument for field recording: capture ambient sound, segment it into a library of samples with on-device analysis, generate synthetic sounds, and arrange them on a 6-track sequencer. Free and open source (MIT). AI agents can drive the user's open Glane tab through an MCP connector.
+
+Audio, analyses and arrangements stay in the user's browser (IndexedDB / OPFS). There is no public sound catalogue: agents work on the user's own library, through the tab they have open.
+
+## Docs
+
+- [Homepage (markdown)](https://glane.tadaaa.space/index.md): what Glane does and who it is for
+- [Agent instructions](https://glane.tadaaa.space/agents.md): when to use Glane and the typical MCP tool flow
+- [Authentication](https://glane.tadaaa.space/auth.md): MCP connector URL with a per-user token, no OAuth
+- [Pricing](https://glane.tadaaa.space/pricing.md): free, no paid plan
+
+## MCP
+
+- [MCP server card](https://glane.tadaaa.space/.well-known/mcp/server-card.json): Streamable HTTP endpoint `https://glane-api.tadaaa.space/mcp/<token>`
+- [Agent resource catalog](https://glane.tadaaa.space/.well-known/ard.json): machine-readable index of these resources
+
+## API
+
+- [OpenAPI](https://glane-api.tadaaa.space/api/docs.jsonopenapi): REST API for accounts and unlisted listen links (JWT)
+
+## Optional
+
+- [About](https://glane.tadaaa.space/about.md)
+- [Contact](https://glane.tadaaa.space/contact.md)
+- [Privacy](https://glane.tadaaa.space/privacy.md)
+- [Source code](https://github.com/ladigitale/glane)

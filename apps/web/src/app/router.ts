@@ -14,6 +14,7 @@ export type Route =
   | { name: "account" }
   | { name: "listen"; token: string };
 
+// Keep in sync with `@spa_route` in deploy/tadaaa-cohost/glane.caddy: a route missing there is served with a 404 status.
 export function parsePath(pathname: string): Route {
   const p = pathname.replace(/\/+$/, "") || "/";
   if (p === "/") return { name: "landing" };

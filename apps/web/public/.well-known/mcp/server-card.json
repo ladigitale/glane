@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/mcp-server-card/v1.json",
+  "version": "1.0",
+  "protocolVersion": "2025-06-18",
+  "serverInfo": {
+    "name": "glane",
+    "title": "Glane",
+    "version": "0.1.0"
+  },
+  "description": "Claude connector for Glane, a local-first field-recording instrument: lists the user's sound library, generates and edits sounds, and writes, reads and plays 6-track arrangements in the Glane tab the user has open. Stateless relay; the URL carries a per-user secret token created in the app (see https://glane.tadaaa.space/auth.md). No OAuth.",
+  "transport": {
+    "type": "streamable-http",
+    "endpoint": "https://glane-api.tadaaa.space/mcp/{token}"
+  },
+  "authentication": {
+    "required": true,
+    "schemes": ["url-token"]
+  },
+  "tools": ["dynamic"]
+}

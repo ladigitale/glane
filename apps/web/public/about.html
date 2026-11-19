@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About Glane</title>
+    <meta name="description" content="Glane is a local-first, open-source web instrument for capturing, segmenting and arranging ambient sounds." />
+    <link rel="canonical" href="https://glane.tadaaa.space/about" />
+    <link rel="alternate" type="text/markdown" href="/about.md" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:title" content="About Glane" />
+    <meta property="og:description" content="Glane is a local-first, open-source web instrument for capturing, segmenting and arranging ambient sounds." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://glane.tadaaa.space/about" />
+    <meta property="og:image" content="https://glane.tadaaa.space/og-image.png" />
+    <style>
+      :root { color-scheme: light dark; --bg: #f4f6f9; --fg: #1d2330; --muted: #556070; --link: #3b6ea8; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #101820; --fg: #eceff4; --muted: #a3adbd; --link: #88c0d0; } }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, sans-serif; }
+      main { max-width: 42rem; margin: 0 auto; padding: 2.5rem 1rem 4rem; }
+      a { color: var(--link); }
+      nav { font-size: 0.9rem; color: var(--muted); }
+      h1 { line-height: 1.2; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <nav><a href="/">Glane</a> · <a href="/about">About</a> · <a href="/contact">Contact</a> · <a href="/privacy">Privacy</a></nav>
+      <h1>About Glane</h1>
+      <p>Glane is a web instrument for capturing, segmenting and arranging ambient sounds. Its name comes from <i>glaner</i> — to glean: you walk, record the field, keep the fragments worth keeping, and turn them into music.</p>
+      <h2>What it does</h2>
+      <ul>
+        <li><strong>Capture</strong> live (microphone) or from files; Glane isolates interesting fragments.</li>
+        <li><strong>Library</strong> of your own sounds with on-device analysis (sound classes and tags, pitch, loudness, loops, stem separation).</li>
+        <li><strong>Synth</strong> to invent textures and motifs from your references.</li>
+        <li><strong>Arrange</strong> on a 6-track sequencer with FX, then export or share an unlisted listen link.</li>
+        <li><strong>Claude connector</strong> (MCP) so an AI agent can compose from your library in the open tab — see <a href="/auth.md">auth.md</a>.</li>
+      </ul>
+      <h2>Principles</h2>
+      <ul>
+        <li><strong>Local-first</strong> — audio, analyses and arrangements stay in your browser (IndexedDB / OPFS) until you export or publish.</li>
+        <li><strong>No marketplace</strong> — nothing is listed publicly; listen links are unlisted.</li>
+        <li><strong>Free and open source</strong> — MIT license, © 2026 ladigitale. See <a href="/pricing.md">pricing</a>.</li>
+      </ul>
+      <h2>Who</h2>
+      <p>Glane is published by <strong>ladigitale</strong> and developed in the open on <a href="https://github.com/ladigitale/glane">GitHub</a>. It is hosted alongside its sister app Tadaaa on tadaaa.space.</p>
+      <h2>Built with</h2>
+      <p>Lit web components and <code>@supersoniks/concorde</code> for the interface, Web Audio for the engine, in-browser ML (YAMNet tags, Demucs stems, CLAP search), and a Symfony / API Platform API for accounts and listen links.</p>
+      <p><a href="/workspace">Open the instrument</a></p>
+    </main>
+  </body>
+</html>

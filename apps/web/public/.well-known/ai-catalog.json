@@ -1,0 +1,25 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Glane",
+    "identifier": "did:web:glane.tadaaa.space"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:glane.tadaaa.space:server:glane",
+      "displayName": "Glane MCP connector",
+      "type": "application/mcp-server-card+json",
+      "url": "https://glane.tadaaa.space/.well-known/mcp/server-card.json",
+      "description": "Drive the user's open Glane tab: sound library, synthesis, FX bake, 6-track arrangement write/read/undo and transport. Per-user token URL, no OAuth (https://glane.tadaaa.space/auth.md).",
+      "capabilities": ["glane_status", "glane_guide", "glane_list_projects", "glane_library", "glane_synth_generate", "glane_bake_fx", "glane_write_arrangement", "glane_get_arrangement", "glane_transport"],
+      "representativeQueries": [
+        "compose a track from my field recordings in Glane",
+        "list the loopable sounds in my Glane library",
+        "generate a few synth textures and add them to my Glane library"
+      ],
+      "tags": ["audio", "field-recording", "sequencer", "music"],
+      "version": "0.1.0",
+      "updatedAt": "2026-11-19T00:00:00Z"
+    }
+  ]
+}
