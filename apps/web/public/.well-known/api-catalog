@@ -1,0 +1,22 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://glane-api.tadaaa.space/api",
+      "service-desc": [
+        { "href": "https://glane-api.tadaaa.space/api/docs.jsonopenapi", "type": "application/vnd.openapi+json" }
+      ],
+      "status": [
+        { "href": "https://glane-api.tadaaa.space/api/health", "type": "application/json" }
+      ]
+    },
+    {
+      "anchor": "https://glane-api.tadaaa.space/mcp",
+      "service-desc": [
+        { "href": "https://glane.tadaaa.space/.well-known/mcp/server-card.json", "type": "application/json" }
+      ],
+      "service-doc": [
+        { "href": "https://glane.tadaaa.space/auth.md", "type": "text/markdown" }
+      ]
+    }
+  ]
+}

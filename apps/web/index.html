@@ -10,6 +10,64 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icons/glane.svg" />
     <title>Glane</title>
+    <meta
+      name="description"
+      content="Glane — local-first web instrument for field recording: capture ambient sound, segment it into a sample library, arrange it on a 6-track sequencer. Free and open source."
+    />
+    <link rel="canonical" href="https://glane.tadaaa.space/" />
+    <link rel="alternate" type="text/markdown" href="/index.md" />
+    <meta property="og:title" content="Glane — field-recording instrument" />
+    <meta
+      property="og:description"
+      content="Capture the field, glean the sounds, arrange — then share a listen."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://glane.tadaaa.space/" />
+    <meta property="og:image" content="https://glane.tadaaa.space/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Glane — field-recording instrument" />
+    <meta
+      name="twitter:description"
+      content="Capture the field, glean the sounds, arrange — then share a listen."
+    />
+    <meta name="twitter:image" content="https://glane.tadaaa.space/og-image.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://glane.tadaaa.space/#org",
+            "name": "ladigitale",
+            "url": "https://github.com/ladigitale",
+            "logo": "https://glane.tadaaa.space/og-image.png",
+            "sameAs": ["https://github.com/ladigitale/glane"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://glane.tadaaa.space/#website",
+            "name": "Glane",
+            "url": "https://glane.tadaaa.space/",
+            "publisher": { "@id": "https://glane.tadaaa.space/#org" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://glane.tadaaa.space/#app",
+            "name": "Glane",
+            "url": "https://glane.tadaaa.space/",
+            "description": "Local-first web instrument for capturing, segmenting and arranging ambient sounds.",
+            "applicationCategory": "MultimediaApplication",
+            "operatingSystem": "Web browser",
+            "license": "https://opensource.org/licenses/MIT",
+            "isAccessibleForFree": true,
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" },
+            "publisher": { "@id": "https://glane.tadaaa.space/#org" },
+            "isPartOf": { "@id": "https://glane.tadaaa.space/#website" },
+            "sameAs": ["https://github.com/ladigitale/glane"]
+          }
+        ]
+      }
+    </script>
     <script>
       (function () {
         try {
@@ -55,7 +113,30 @@
     <link rel="stylesheet" href="/src/app/styles/tokens.css" />
   </head>
   <body>
-    <gl-app></gl-app>
+    <!-- Static content for crawlers / no-JS: gl-app's shadow root has no slot, so it is hidden once the app boots. -->
+    <gl-app>
+      <main style="max-width: 42rem; margin: 0 auto; padding: 2.5rem 1rem; font-family: system-ui, sans-serif; line-height: 1.6">
+        <h1>Glane — field-recording instrument</h1>
+        <p>
+          Capture the field, glean the sounds, arrange — then share a listen. Glane is a local-first web
+          instrument: record or import ambient sound, segment it into a sample library with on-device
+          analysis, generate synthetic textures, and arrange everything on a 6-track sequencer. Audio stays
+          on your device until you choose to export or publish a listen link.
+        </p>
+        <p>Free and open source (MIT). Glane needs JavaScript to run.</p>
+        <ul>
+          <li><a href="/workspace">Open the instrument</a></li>
+          <li><a href="/about">About</a> · <a href="/contact">Contact</a> · <a href="/privacy">Privacy</a> · <a href="/pricing.md">Pricing</a></li>
+          <li><a href="/agents.md">For AI agents</a> · <a href="/auth.md">Claude connector (MCP)</a> · <a href="/llms.txt">llms.txt</a> · <a href="https://glane-api.tadaaa.space/api/docs.jsonopenapi">API (OpenAPI)</a></li>
+          <li><a href="https://github.com/ladigitale/glane">Source code on GitHub</a></li>
+        </ul>
+        <h2>Privacy</h2>
+        <p>
+          By default audio stays on this device. Segments detected as speech are excluded from the library and
+          are not uploaded. The recording indicator always stays visible. <a href="/privacy.md">Full privacy notes</a>.
+        </p>
+      </main>
+    </gl-app>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
