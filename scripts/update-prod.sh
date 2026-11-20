@@ -77,11 +77,15 @@ if [[ "${GLANE_COHOST:-0}" == "1" ]]; then
 fi
 
 info "Building front (VITE_API_BASE_URL=https://${api_host})…"
+# ONNXRUNTIME_NODE_INSTALL_CUDA=skip : onnxruntime-node (dépendance transitive, inutile au build
+# du front) télécharge sinon un binaire CUDA dont l'archive n'existe plus (404) et fait échouer
+# yarn install.
 rm -rf "$ROOT/node_modules" "$ROOT/apps/web/node_modules"
 docker run --rm \
   -v "$ROOT:/repo" \
   -w /repo \
   -e VITE_API_BASE_URL="https://${api_host}" \
+  -e ONNXRUNTIME_NODE_INSTALL_CUDA=skip \
   node:22-bookworm \
   bash -lc 'corepack enable && yarn install --frozen-lockfile && yarn --cwd apps/web build'
 [[ -f "$ROOT/apps/web/dist/index.html" ]] || die "Front build failed."
