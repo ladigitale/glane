@@ -3,9 +3,19 @@
   "compilerOptions": {
     "experimentalDecorators": true,
     "useDefineForClassFields": false,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"],
-    "noEmit": true
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "vite/client"
+    ],
+    "noEmit": true,
+    "noImplicitOverride": false,
+    "noUncheckedIndexedAccess": false
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }

@@ -17,6 +17,8 @@ Field-recording instrument: capture → segment → library → arrange.
 
 - **Yarn 1** workspaces (`apps/web`, `packages/*`) — not pnpm
 - **Lit** + `@supersoniks/concorde`; custom elements `gl-*`
+- **Concorde 7 + Vite 8** (Node >= 22.12). Concorde ships TypeScript sources: `apps/web/vite.config.ts` passes its Oxc options (legacy decorators, [[Set]] class fields) and its build guard — without them a class field hides the reactive accessor and the component stops updating, silently. For the same reason `apps/web/tsconfig.json` turns off `noImplicitOverride` / `noUncheckedIndexedAccess` (they would type-check Concorde's own sources); `packages/*` keep them.
+- `index.html` ships static content inside `<gl-app>` for crawlers; `gl-app` removes it in `connectedCallback` (`<sonic-scope>` renders in light DOM, so its `<slot>` would project it into the app).
 - **Local-first P0–P4**: OPFS + IndexedDB; API/sync in **P5**
 - **T2 ML** (`@glane/audio-ml`): Demucs stems, YAMNet tags, CLAP search (ADR-0020)
 - **API**: FrankenPHP + Symfony + API Platform + Postgres (Tadaaa-family Compose)
