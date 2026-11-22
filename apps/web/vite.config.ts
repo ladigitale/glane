@@ -4,6 +4,10 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+import {
+  decoratorsGuardPlugin,
+  decoratorsTransformOptions,
+} from "@supersoniks/concorde/vite-config";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -103,7 +107,18 @@ function copyMlWasm(): Plugin {
   };
 }
 
+/**
+ * Lit and Concorde put reactive accessors on the prototype (legacy decorators). Vite 8 (Oxc)
+ * does not read `esbuild.tsconfigRaw` and does not apply this tsconfig to node_modules:
+ * without these options a class field (`size = "md"`, or a property redeclared in a subclass)
+ * becomes an own property that hides the accessor — no re-render, no store write, no error.
+ * Concorde ships TypeScript sources, so the options must reach node_modules too. The guard
+ * fails the build on a raw decorator or on a field hiding a decorated accessor.
+ */
+const decorators = decoratorsTransformOptions;
+
 export default defineConfig({
+  oxc: decorators,
   server: {
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
@@ -117,6 +132,7 @@ export default defineConfig({
     },
   },
   plugins: [
+    decoratorsGuardPlugin(),
     copyMlWasm(),
     VitePWA({
       registerType: "autoUpdate",
@@ -159,6 +175,7 @@ export default defineConfig({
   optimizeDeps: {
     include: ["@breezystack/lamejs"],
     exclude: ["onnxruntime-web", "onnxruntime-web/webgpu", "@huggingface/transformers"],
+    rolldownOptions: { transform: decorators },
   },
   worker: {
     format: "es",

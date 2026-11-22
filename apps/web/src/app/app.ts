@@ -235,6 +235,10 @@ export class GlApp extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // index.html ships static content inside <gl-app> for crawlers / no-JS. The shadow root is
+    // not slot-free: <sonic-scope> renders in light DOM, so its <slot> lands in this shadow tree
+    // and would project that content into the middle of the app. Drop it once the app boots.
+    this.replaceChildren();
     set(paletteKey, { q: "" });
     chromeMore.clear();
     this.#unsubChromeMore = chromeMore.subscribe(() => {

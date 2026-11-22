@@ -123,6 +123,7 @@ docker run --rm \
   -w /repo \
   -e VITE_API_BASE_URL="https://${api_host}" \
   -e ONNXRUNTIME_NODE_INSTALL_CUDA=skip \
+  --pull always \
   node:22-bookworm \
   bash -lc 'corepack enable && yarn install --frozen-lockfile && yarn --cwd apps/web build'
 [[ -f "$ROOT/apps/web/dist/index.html" ]] || die "Front build failed."

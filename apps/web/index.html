@@ -113,7 +113,7 @@
     <link rel="stylesheet" href="/src/app/styles/tokens.css" />
   </head>
   <body>
-    <!-- Static content for crawlers / no-JS: gl-app's shadow root has no slot, so it is hidden once the app boots. -->
+    <!-- Static content for crawlers / no-JS: gl-app removes it when it boots (connectedCallback). -->
     <gl-app>
       <main style="max-width: 42rem; margin: 0 auto; padding: 2.5rem 1rem; font-family: system-ui, sans-serif; line-height: 1.6">
         <h1>Glane — field-recording instrument</h1>
